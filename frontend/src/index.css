@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-ink-950 text-slate-200 antialiased;
+    font-feature-settings: 'cv02', 'cv03', 'cv04', 'tnum';
+  }
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #2b374a transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 9px;
+    height: 9px;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-ink-600;
+  }
+}
+
+@layer components {
+  .panel {
+    @apply rounded-lg border border-ink-700 bg-ink-900;
+  }
+  .panel-head {
+    @apply flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3;
+  }
+  .panel-title {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5
+           text-sm font-medium transition-colors
+           disabled:cursor-not-allowed disabled:opacity-45;
+  }
+  .btn-primary {
+    @apply btn bg-accent text-white hover:bg-accent/85;
+  }
+  .btn-ghost {
+    @apply btn border border-ink-600 text-slate-300 hover:border-ink-600/80 hover:bg-ink-800;
+  }
+  .btn-danger {
+    @apply btn border border-rose-900/70 text-rose-300 hover:bg-rose-950/40;
+  }
+  .btn-xs {
+    @apply px-2 py-1 text-xs;
+  }
+
+  .field {
+    @apply w-full rounded-md border border-ink-600 bg-ink-850 px-3 py-2 text-sm
+           text-slate-100 placeholder:text-slate-600
+           focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/40;
+  }
+  .label {
+    @apply mb-1 block text-xs font-medium text-slate-400;
+  }
+  .hint {
+    @apply mt-1 text-[11px] leading-relaxed text-slate-500;
+  }
+
+  .chip {
+    @apply inline-flex items-center gap-1 rounded border border-ink-600 bg-ink-850
+           px-1.5 py-0.5 text-[11px] text-slate-300;
+  }
+  .mono {
+    @apply font-mono text-[12px];
+  }
+
+  .row-link {
+    @apply w-full cursor-pointer border-b border-ink-800 px-4 py-3 text-left
+           transition-colors last:border-0 hover:bg-ink-850;
+  }
+
+  .table-cell {
+    @apply whitespace-nowrap px-3 py-2 text-sm;
+  }
+  .table-head {
+    @apply whitespace-nowrap px-3 py-2 text-left text-[11px] font-semibold
+           uppercase tracking-wider text-slate-500;
+  }
+}

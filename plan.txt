@@ -1,0 +1,1903 @@
+Yes. I went back through the latest documentation and the specific concern you repeated about **not running anomaly detection across every entity inside every dimension**. I agree with you: that would make the prototype unnecessarily expensive, harder to explain, and much less realistic.
+
+The important correction is:
+
+> **We detect anomalies at the governed KPI level. We do not continuously detect anomalies for every product/customer/region/channel. Dimensions are used for contribution analysis and targeted investigation only when the KPI movement justifies it.**
+
+The latest source itself explicitly says not to run full anomaly detection for every entity and instead use contribution scan → candidate selection → top-K → adaptive drill-down → selective trend analysis. 
+
+I would now freeze the following as the **optimal implementation plan**.
+
+# 1. First: what the final product actually is
+
+Think of BusinessIntelligence.ai as **four layers**, not dozens of independent systems.
+
+```text
+                 BUSINESSINTELLIGENCE.AI
+
+                         USERS
+                           │
+             ┌─────────────┴─────────────┐
+             │                           │
+       Monitoring Center          Investigation Center
+             │                           │
+       "What changed?"          "Tell me about this."
+             │                           │
+             └─────────────┬─────────────┘
+                           ▼
+                 INTELLIGENCE PLATFORM
+                           │
+        ┌──────────────────┼──────────────────┐
+        ▼                  ▼                  ▼
+   KPI / Semantic      Analytical          Evidence
+     Services           Services            Services
+        │                  │                  │
+        └──────────────────┼──────────────────┘
+                           ▼
+                    Reasoning / LLM
+                           │
+                           ▼
+                  Action + Feedback
+```
+
+The important distinction is:
+
+### Monitoring
+
+Automatically looks at **governed KPIs**.
+
+### Investigation
+
+Looks deeper only when necessary, or because a user explicitly asks.
+
+The documentation also separates Monitoring Center and Investigation Center. 
+
+---
+
+# 2. Your biggest scalability concern — this is how we solve it
+
+Suppose:
+
+```text
+Products = 500,000
+Regions = 50
+Channels = 10
+Customers = 5,000,000
+```
+
+We **do not** do this:
+
+```text
+500,000 products
+    ↓
+anomaly detection for each
+    ↓
+seasonality for each
+    ↓
+forecast for each
+    ↓
+LLM for each
+```
+
+That is exactly what we should avoid.
+
+Instead:
+
+```text
+                 REVENUE KPI
+                     │
+                     ▼
+             Is Revenue unusual?
+                     │
+               YES / NO
+                     │
+                     ▼
+              Is it material?
+                     │
+                     ▼
+                  YES
+                     │
+                     ▼
+          Contribution Analysis
+                     │
+        ┌────────────┼────────────┐
+        ▼            ▼            ▼
+      Region       Product      Channel
+        │            │            │
+        └────────────┼────────────┘
+                     ▼
+             Which dimension
+             explains most?
+                     │
+                     ▼
+                TOP-K ONLY
+                     │
+                     ▼
+         Targeted entity analysis
+                     │
+                     ▼
+            Evidence / Drivers
+```
+
+So:
+
+> **KPI anomaly detection is continuous. Entity anomaly detection is on-demand/selective.**
+
+This exactly follows the progressive investigation principle in your source material. 
+
+---
+
+# 3. Very important: contribution analysis is NOT anomaly detection
+
+This distinction should be built into your design.
+
+Suppose:
+
+```text
+Revenue dropped ₹15M.
+```
+
+We calculate:
+
+```text
+North      -₹9M   → 60%
+South      -₹4M   → 27%
+West       -₹1M   → 7%
+East       -₹1M   → 7%
+```
+
+We are **not saying North is anomalous**.
+
+We are saying:
+
+> North explains 60% of the KPI movement.
+
+That is cheap and useful.
+
+Then we may inspect North's products:
+
+```text
+Product A   -₹5M
+Product B   -₹3M
+Product C   -₹0.5M
+...
+```
+
+Only now do we decide whether A/B deserve deeper analysis.
+
+The documentation explicitly says contribution tells you **where the change occurred**, not **why it happened**. 
+
+That distinction is critical.
+
+---
+
+# 4. The final analytical hierarchy
+
+I would make the hierarchy extremely simple:
+
+```text
+LEVEL 0
+Source health
+
+        ↓
+
+LEVEL 1
+KPI calculation
+
+        ↓
+
+LEVEL 2
+KPI expected behavior
+
+        ↓
+
+LEVEL 3
+KPI materiality
+
+        ↓
+
+LEVEL 4
+Dimension contribution
+
+        ↓
+
+LEVEL 5
+Top-K entity selection
+
+        ↓
+
+LEVEL 6
+Targeted entity profile
+
+        ↓
+
+LEVEL 7
+Driver / evidence analysis
+
+        ↓
+
+LEVEL 8
+Recommendation
+
+        ↓
+
+LEVEL 9
+Outcome / feedback
+```
+
+Notice what is **missing**:
+
+> “Anomaly model for every entity.”
+
+We don't need it.
+
+---
+
+# 5. What happens to entities?
+
+Entities have a lightweight lifecycle.
+
+```text
+ENTITY
+  │
+  ▼
+Not currently important
+  │
+  ▼
+Contributes materially to KPI movement
+  │
+  ▼
+PROMOTED
+  │
+  ▼
+Temporary deeper analysis
+  │
+  ▼
+Investigation complete
+  │
+  ▼
+Return to normal / demote
+```
+
+That matches the source's entity promotion idea. 
+
+This means we don't maintain a permanent expensive analytical model for every product.
+
+---
+
+# 6. What happens when a user directly asks about Product A?
+
+This is the other half you clarified.
+
+Suppose a manager selects:
+
+```text
+Date:       15-Aug-2026
+Dimension:  Product
+Entity:     Product A
+Lookback:   90 days
+```
+
+We **do not** run the entire automatic KPI investigation.
+
+Instead:
+
+```text
+USER REQUEST
+    ↓
+Security check
+    ↓
+Does Product A exist?
+    ↓
+KPI contract
+    ↓
+Relevant historical data
+    ↓
+Entity profile
+    ↓
+Trend
+    ↓
+Recent performance
+    ↓
+Relationships
+    ↓
+Business context
+    ↓
+Optional deeper evidence
+```
+
+So this is:
+
+> **Entity analysis**
+
+not:
+
+> **Entity anomaly detection**
+
+That is a much cleaner architecture.
+
+Your latest source describes this as user-driven deep analysis using the same underlying analytical foundation. 
+
+---
+
+# 7. The two entry paths are now officially defined
+
+## Path A — Automatic
+
+```text
+KPI
+ ↓
+Expected behavior
+ ↓
+Material movement
+ ↓
+Contribution
+ ↓
+Top-K
+ ↓
+Targeted investigation
+ ↓
+Evidence
+ ↓
+Action
+```
+
+## Path B — User-driven
+
+```text
+User selects KPI / dimension / entity
+ ↓
+Security
+ ↓
+Entity profile
+ ↓
+Trend
+ ↓
+Relationships
+ ↓
+Optional evidence
+ ↓
+Optional action
+```
+
+Both reuse the same services.
+
+But they do **not** use the same orchestration.
+
+This should be your final architectural wording.
+
+---
+
+# 8. Now the major addition you raised: multiple companies
+
+This is important.
+
+Your previous plan was effectively designed around one fictional company such as NovaMart.
+
+That is good for the hackathon dataset, but the **platform architecture should be multi-tenant from the beginning**.
+
+The prototype can still contain one demonstration company.
+
+The software model should support:
+
+```text
+BusinessIntelligence.ai
+        │
+        ├── Company A
+        │     ├── Users
+        │     ├── KPIs
+        │     ├── Sources
+        │     ├── Documents
+        │     ├── Business rules
+        │     ├── Permissions
+        │     └── Insights
+        │
+        ├── Company B
+        │     ├── Users
+        │     ├── KPIs
+        │     ├── Sources
+        │     ├── Documents
+        │     ├── Business rules
+        │     ├── Permissions
+        │     └── Insights
+        │
+        └── Company C
+```
+
+The source already calls for tenant isolation and security across rows, columns, domains, documents, RAG and Copilot context. 
+
+---
+
+# 9. Company onboarding should be part of the architecture
+
+The flow should be:
+
+```text
+ADMIN LOGIN
+      ↓
+CREATE / ACCESS COMPANY
+      ↓
+COMPANY PROFILE
+      ↓
+CONNECT DATA SOURCES
+      ↓
+REGISTER / DISCOVER KPIs
+      ↓
+UPLOAD BUSINESS REFERENCE DOCUMENTS
+      ↓
+DEFINE BUSINESS RULES
+      ↓
+DEFINE USERS / ROLES / ACCESS
+      ↓
+VALIDATE
+      ↓
+ACTIVATE COMPANY
+```
+
+This is much better than treating each company's KPI definitions as application code.
+
+---
+
+# 10. Company record
+
+Create:
+
+### `companies`
+
+```text
+id
+company_name
+industry
+timezone
+currency
+business_calendar
+fiscal_year_start
+status
+created_at
+```
+
+Then **everything important gets `company_id`**.
+
+For example:
+
+```text
+kpi_definitions.company_id
+data_sources.company_id
+documents.company_id
+users.company_id
+insights.company_id
+feedback.company_id
+audit_logs.company_id
+```
+
+That is what gives you tenant isolation.
+
+---
+
+# 11. Company administrator
+
+Each company should have one or more administrators.
+
+```text
+company_user
+```
+
+with:
+
+```text
+user_id
+company_id
+role
+status
+permissions
+scope
+```
+
+Example:
+
+```text
+Alice
+Company A
+ADMIN
+```
+
+```text
+Bob
+Company A
+EXECUTIVE
+```
+
+```text
+Charlie
+Company A
+REGIONAL_MANAGER
+region = South
+```
+
+The security model therefore becomes:
+
+```text
+User
+ ↓
+Company
+ ↓
+Role
+ ↓
+Scope
+ ↓
+Data
+ ↓
+Documents
+ ↓
+Insights
+```
+
+---
+
+# 12. The "confidential section" you described
+
+Yes — this should exist.
+
+I would call it:
+
+> **Admin & Governance**
+
+Not simply “KPI registration”.
+
+The company administrator should see:
+
+```text
+Company Profile
+Data Sources
+KPI Registry
+Business Definitions
+Reference Documents
+Business Rules
+Users & Roles
+Access Policies
+Audit Log
+System Health
+```
+
+This gives your system a real enterprise feel.
+
+---
+
+# 13. KPI registration should have two methods
+
+This is where I recommend improving your earlier plan.
+
+A company should be able to:
+
+### Method A — Manual registration
+
+Administrator enters:
+
+```text
+KPI name
+Business definition
+Formula
+Source
+Grain
+Calendar
+Dimensions
+Drivers
+Thresholds
+Owner
+Access rules
+```
+
+### Method B — Discovery-assisted registration
+
+System inspects the database and proposes:
+
+```text
+Potential KPI:
+Revenue
+
+Potential formula:
+SUM(net_revenue)
+
+Potential dimensions:
+Region
+Product
+Channel
+```
+
+The administrator reviews and approves.
+
+This follows the existing governed-contract approach: the system proposes, business user confirms/edits/rejects. 
+
+---
+
+# 14. KPI registration states
+
+Never treat a KPI as immediately active.
+
+Use:
+
+```text
+DRAFT
+   ↓
+PROPOSED
+   ↓
+UNDER_REVIEW
+   ↓
+APPROVED
+   ↓
+ACTIVE
+   ↓
+DEPRECATED
+```
+
+And every change creates a new version.
+
+Example:
+
+```text
+Revenue v1
+Revenue v2
+Revenue v3
+```
+
+Old insight records should continue pointing to the exact KPI version used when they were produced.
+
+That is important for auditability.
+
+---
+
+# 15. What exactly belongs in the KPI contract?
+
+This is the final contract I recommend.
+
+```text
+IDENTITY
+ ├── company_id
+ ├── kpi_id
+ ├── name
+ └── version
+
+BUSINESS MEANING
+ ├── business_definition
+ ├── purpose
+ └── owner
+
+CALCULATION
+ ├── formula
+ ├── aggregation
+ ├── numerator
+ ├── denominator
+ ├── filters
+ └── null handling
+
+TIME
+ ├── time_field
+ ├── grain
+ ├── calendar
+ └── timezone
+
+DIMENSIONS
+ ├── region
+ ├── product
+ ├── channel
+ └── other approved dimensions
+
+DRIVERS
+ ├── volume
+ ├── price
+ ├── mix
+ ├── supply
+ ├── marketing
+ └── other approved drivers
+
+BEHAVIOR
+ ├── expected baseline
+ ├── seasonality
+ └── sparse-history strategy
+
+MATERIALITY
+ ├── relative threshold
+ ├── absolute impact threshold
+ ├── statistical rule
+ └── priority rule
+
+SECURITY
+ ├── allowed roles
+ ├── row scope
+ ├── column scope
+ └── domain scope
+
+LINEAGE
+ ├── source
+ ├── table
+ ├── columns
+ └── calculation version
+
+GOVERNANCE
+ ├── status
+ ├── created_by
+ ├── approved_by
+ ├── approved_at
+ └── version
+```
+
+This keeps the KPI definition central instead of scattering it through code.
+
+---
+
+# 16. Now your company reference document idea
+
+Yes.
+
+This should become a **first-class company knowledge layer**.
+
+The document should not merely be uploaded and forgotten.
+
+Flow:
+
+```text
+COMPANY ADMIN
+      ↓
+Upload reference document
+      ↓
+Store original document
+      ↓
+Create document metadata
+      ↓
+Parse
+      ↓
+Chunk
+      ↓
+Embed
+      ↓
+Store vectors
+      ↓
+Ready for governed retrieval
+```
+
+The architecture already proposes a small governed knowledge base with supplier incidents, operational reports, campaign notes and management announcements, including document metadata such as date, type, region, product/category, event and access scope. 
+
+---
+
+# 17. But there are actually two document types
+
+I recommend separating them.
+
+## A. Company Reference Documents
+
+These define **how the company operates**.
+
+Examples:
+
+```text
+Company KPI Handbook
+Finance Definitions
+Business Rules
+Returns Policy
+Regional Operating Rules
+Pricing Policy
+Marketing Definitions
+Inventory Policy
+```
+
+These are relatively stable.
+
+## B. Business Event Documents
+
+These describe **what happened**.
+
+Examples:
+
+```text
+Supplier disruption report
+Marketing campaign note
+Operational incident
+Management announcement
+Competitor event
+Store closure report
+```
+
+These are time-dependent evidence.
+
+This distinction is extremely useful.
+
+---
+
+# 18. Example knowledge structure
+
+```text
+COMPANY A
+│
+├── REFERENCE
+│   ├── KPI Handbook
+│   ├── Finance Policy
+│   ├── Pricing Policy
+│   └── Inventory Policy
+│
+└── EVENTS
+    ├── Supplier Incident #17
+    ├── Campaign Note #42
+    ├── Operations Incident #91
+    └── Management Announcement #6
+```
+
+Now RAG can answer two different types of questions:
+
+> “What does this KPI mean?”
+
+versus:
+
+> “What happened around August 15?”
+
+---
+
+# 19. Document table
+
+Create:
+
+### `company_documents`
+
+```text
+id
+company_id
+document_type
+title
+description
+source
+storage_path
+version
+effective_from
+effective_to
+created_by
+created_at
+status
+access_scope
+```
+
+Then:
+
+### `document_chunks`
+
+```text
+id
+document_id
+company_id
+chunk_index
+content
+embedding
+metadata
+access_scope
+```
+
+This gives you:
+
+```text
+company → document → chunk → retrieval
+```
+
+---
+
+# 20. Important: documents must also be versioned
+
+Suppose:
+
+```text
+Revenue Definition v1
+```
+
+changes later.
+
+Don't overwrite the old document.
+
+Instead:
+
+```text
+Revenue Handbook v1
+Revenue Handbook v2
+```
+
+The KPI contract can say:
+
+```text
+reference_document_id = DOC-101
+reference_version = 2
+```
+
+Then an old investigation remains reproducible.
+
+This is especially important because your platform needs auditability.
+
+---
+
+# 21. RAG retrieval must always begin with company identity
+
+Never do:
+
+```text
+User question
+ ↓
+Search every company document
+```
+
+Do:
+
+```text
+User identity
+    ↓
+Company ID
+    ↓
+Role
+    ↓
+Row/domain/document scope
+    ↓
+Filtered document set
+    ↓
+Semantic retrieval
+    ↓
+Evidence
+```
+
+The current reference architecture explicitly requires entitlement filtering before retrieval. 
+
+This is one of the strongest enterprise aspects of your design.
+
+---
+
+# 22. The full end-to-end company lifecycle
+
+Now we can put everything together.
+
+```text
+                    PLATFORM
+
+                      ADMIN
+                        │
+                        ▼
+                 COMPANY SETUP
+                        │
+          ┌─────────────┼─────────────┐
+          ▼             ▼             ▼
+       Sources         KPIs        Documents
+          │             │             │
+          ▼             ▼             ▼
+       Registry      Contracts        RAG
+          │             │             │
+          └─────────────┼─────────────┘
+                        ▼
+                  GOVERNED WORLD
+                        │
+                        ▼
+                MONITORING ENGINE
+                        │
+                ┌───────┴───────┐
+                ▼               ▼
+              Normal         Material
+                │               │
+                │               ▼
+                │        Contribution Scan
+                │               │
+                │              Top-K
+                │               │
+                │        Targeted Investigation
+                │               │
+                │          Evidence + RAG
+                │               │
+                │          Confidence
+                │               │
+                │          Recommendation
+                │               │
+                └───────────────┼───────────────┐
+                                ▼               │
+                              USERS             │
+                                │               │
+                         Feedback / Action      │
+                                │               │
+                                └───────► Outcome
+                                            │
+                                            ▼
+                                       Learning
+```
+
+---
+
+# 23. Where Quick Dimensional Analysis fits
+
+It enters here:
+
+```text
+                    INVESTIGATION CENTER
+                           │
+                ┌──────────┴──────────┐
+                │                     │
+          AUTOMATIC CASE          USER REQUEST
+                │                     │
+        KPI incident             Product A
+                │                     │
+                ▼                     ▼
+       Progressive analysis      Entity profile
+                │                     │
+                └──────────┬──────────┘
+                           ▼
+                 SHARED ANALYTICAL
+                     SERVICES
+```
+
+Shared:
+
+* KPI contract
+* security
+* data access
+* time series
+* dimension metadata
+* relationships
+* evidence
+* RAG
+* confidence
+* telemetry
+
+Different orchestration.
+
+That is now the final answer to the architectural question you raised.
+
+---
+
+# 24. What we actually compute for an entity
+
+This should be lightweight.
+
+For Product A:
+
+```text
+Current performance
+Historical performance
+Trend
+Share of KPI
+Business rank
+Top regions
+Top channels
+Relationship changes
+Optional comparison with peers
+```
+
+We do **not** automatically calculate:
+
+```text
+anomaly score
+forecast
+seasonality model
+change-point model
+causal model
+```
+
+unless the entity has been promoted by an investigation or the user explicitly asks for deeper analysis.
+
+That is much more realistic.
+
+The source itself recommends entity trend only after promotion. 
+
+---
+
+# 25. This is how we satisfy "multiple interacting drivers"
+
+Suppose:
+
+```text
+Revenue ↓12%
+```
+
+The engine can say:
+
+```text
+Orders ↓4%
+AOV ↓8%
+Stock-out ↑22%
+```
+
+Then:
+
+```text
+Revenue
+  ↓
+North Region = 60% contribution
+  ↓
+Product A/B = major contributors
+  ↓
+Stock-out increase
+  ↓
+Supplier incident
+```
+
+And separately evaluate:
+
+```text
+Demand hypothesis
+Inventory hypothesis
+Price hypothesis
+Mix hypothesis
+Marketing hypothesis
+```
+
+The source explicitly recommends generating multiple hypotheses and testing FOR/AGAINST evidence. 
+
+---
+
+# 26. Causality — keep it simple
+
+For the hackathon:
+
+Don't build a giant causal inference platform.
+
+Use three labels:
+
+```text
+OBSERVED
+ASSOCIATED
+CAUSALLY SUPPORTED
+```
+
+Most of the system will say:
+
+> “Associated with”
+
+not:
+
+> “Caused by.”
+
+Only use causal inference if there is a suitable controlled design or experiment.
+
+That keeps your claims scientifically defensible.
+
+---
+
+# 27. Source reconciliation
+
+This must happen before analytical evidence is trusted.
+
+For every source:
+
+```text
+source_name
+grain
+refresh_frequency
+last_refresh
+coverage_start
+coverage_end
+completeness
+quality_score
+known_limitations
+calendar
+```
+
+Example:
+
+```text
+Sales
+grain = order line
+refresh = frequent
+
+Inventory
+grain = product × region × time
+refresh = every few hours
+
+Marketing
+grain = campaign × region × day
+refresh = daily
+```
+
+The reference architecture explicitly says these cannot be blindly joined and that freshness/grain/quality become part of evidence confidence. 
+
+---
+
+# 28. Sparse history
+
+This becomes:
+
+```text
+Product A
+history = 3 years
+→ normal baseline
+
+New Product B
+history = 21 days
+→ peer/category baseline
+→ LOW confidence
+```
+
+No fake precision.
+
+That directly fulfills the new-product requirement. 
+
+---
+
+# 29. Positive movement is also required
+
+Don't build only a "problem detector".
+
+For example:
+
+```text
+South Revenue +18%
+AOV +11%
+Margin +7%
+```
+
+The system can say:
+
+> “South demonstrates a pattern worth testing in North.”
+
+That becomes an **opportunity transfer** recommendation.
+
+The source identifies this as one of the meaningful differentiators of the platform. 
+
+---
+
+# 30. Hidden shifts
+
+Suppose:
+
+```text
+Total Revenue: +0.2%
+```
+
+The KPI looks normal.
+
+But:
+
+```text
+North   -₹8M
+South   +₹7M
+West    +₹1M
+```
+
+The system reports:
+
+> **Hidden business shift. Aggregate revenue appears stable, but regional composition materially changed.**
+
+This satisfies one of the important real-world complexities without requiring entity-level anomaly detection. 
+
+---
+
+# 31. Confidence and abstention
+
+Every investigation needs:
+
+```text
+Confidence
+Evidence FOR
+Evidence AGAINST
+Missing evidence
+Stale evidence
+Contradictions
+```
+
+Possible result:
+
+```text
+HIGH
+MEDIUM
+LOW
+INCONCLUSIVE
+ABSTAIN
+```
+
+For example:
+
+```text
+Demand decline       Strong
+Inventory disruption Strong
+Marketing            Moderate
+
+Result:
+INCONCLUSIVE
+
+Reason:
+No sufficient evidence to distinguish
+demand decline from inventory restriction.
+```
+
+This is explicitly required by the design. 
+
+---
+
+# 32. Persona handling
+
+We should not create separate analytics.
+
+One result:
+
+```text
+INSIGHT CONTRACT
+```
+
+Then:
+
+### Executive
+
+```text
+Revenue down 12%
+Business impact: ₹15M
+Leading driver: inventory disruption
+Confidence: High
+Decision required: supply allocation
+```
+
+### Manager
+
+```text
+North responsible for 60%
+Products A/B most affected
+Action: prioritize replenishment
+Owner: supply manager
+```
+
+### Analyst
+
+```text
+Contribution method: SQL decomposition
+Evidence:
+inventory trend
+stock-out rate
+supplier report
+
+Alternative hypothesis:
+demand decline
+```
+
+The source explicitly uses this same-facts/different-presentation structure. 
+
+---
+
+# 33. Feedback and learning
+
+Minimum:
+
+```text
+Helpful?
+Correct?
+Accepted?
+Executed?
+Outcome?
+```
+
+Then:
+
+```text
+feedback
+ ↓
+calibration
+ ↓
+drift
+ ↓
+recalibration
+```
+
+This closes:
+
+**Observe → Explain → Act → Measure → Learn**
+
+which is the intended overall lifecycle.
+
+---
+
+# 34. Model/data drift
+
+For the prototype, keep this simple.
+
+Monitor:
+
+```text
+Baseline error
+Distribution shift
+Seasonality shift
+Source quality degradation
+```
+
+Example:
+
+Previously:
+
+```text
+Friday = strongest day
+```
+
+Later:
+
+```text
+Thursday = strongest day
+```
+
+Flag:
+
+> Behavioral drift detected.
+
+Then:
+
+```text
+recompute baseline
+→ validate
+→ activate new baseline
+```
+
+The reference design specifically includes drift and recalibration. 
+
+---
+
+# 35. LLM versus non-LLM — final boundary
+
+This should be visible in your architecture presentation.
+
+| Task                    | Technology                                |
+| ----------------------- | ----------------------------------------- |
+| KPI calculation         | SQL                                       |
+| Aggregation             | SQL                                       |
+| Source health           | Deterministic                             |
+| KPI contract            | Rules + admin                             |
+| Expected value          | Statistics / forecasting                  |
+| Materiality             | Rules + statistics                        |
+| Contribution            | SQL                                       |
+| Candidate ranking       | Deterministic scoring                     |
+| Entity profile          | SQL                                       |
+| Hypothesis candidates   | Rules/LLM                                 |
+| Structured evidence     | SQL/statistics                            |
+| Business documents      | RAG                                       |
+| Evidence interpretation | LLM                                       |
+| Narrative               | LLM                                       |
+| Persona wording         | LLM                                       |
+| Confidence              | Deterministic                             |
+| Security                | Deterministic                             |
+| Lineage                 | Deterministic                             |
+| Telemetry               | Deterministic                             |
+| Causal inference        | Statistical/causal methods when justified |
+
+The source explicitly defines this separation. 
+
+---
+
+# 36. Runtime/cost strategy
+
+Monitoring:
+
+```text
+cheap
+frequent
+no LLM
+```
+
+Investigation:
+
+```text
+selective
+more expensive
+RAG + optional LLM
+```
+
+Copilot:
+
+```text
+on-demand
+cached
+```
+
+This is exactly why the architecture has monitoring mode and investigation mode. 
+
+---
+
+# 37. Minimum database architecture
+
+Because you already use Supabase/Postgres, I would keep it there.
+
+## Tenant layer
+
+```text
+companies
+company_users
+roles
+permissions
+access_policies
+```
+
+## Data governance
+
+```text
+data_sources
+source_tables
+source_columns
+source_health
+```
+
+## KPI governance
+
+```text
+kpi_definitions
+kpi_versions
+kpi_dimensions
+kpi_drivers
+kpi_validation_runs
+kpi_audit_log
+```
+
+## Knowledge
+
+```text
+company_documents
+document_versions
+document_chunks
+```
+
+## Analytics
+
+```text
+kpi_observations
+kpi_baselines
+kpi_movements
+dimension_contributions
+promoted_entities
+```
+
+## Investigation
+
+```text
+incidents
+investigations
+hypotheses
+evidence
+evidence_links
+confidence_scores
+```
+
+## Action
+
+```text
+recommendations
+decision_rights
+action_outcomes
+```
+
+## Learning
+
+```text
+feedback
+outcomes
+drift_events
+```
+
+## Observability
+
+```text
+execution_logs
+llm_usage
+rag_usage
+query_metrics
+```
+
+That is enough.
+
+---
+
+# 38. Final implementation roadmap
+
+Now I would reduce the entire project to **10 implementation stages**.
+
+## Stage 1 — Multi-tenant company foundation
+
+Build:
+
+```text
+companies
+company_users
+roles
+permissions
+```
+
+Create the confidential Admin/Governance area.
+
+---
+
+## Stage 2 — Source registry + profiling
+
+Connect your existing Supabase data.
+
+Build:
+
+```text
+source registry
+table registry
+column profiler
+freshness
+grain
+quality
+```
+
+No intelligence yet.
+
+---
+
+## Stage 3 — KPI Governance
+
+This is your **immediate next stage**.
+
+Build:
+
+```text
+KPI discovery
+KPI manual registration
+KPI proposal
+KPI review
+KPI approval
+KPI versioning
+KPI validation
+KPI lineage
+KPI access rules
+```
+
+Start with:
+
+1. Revenue
+2. Orders
+3. AOV
+4. Stock-out Rate
+
+The source documentation's latest master sequence also puts KPI definitions before monitoring and investigation. 
+
+---
+
+## Stage 4 — KPI behavior + monitoring
+
+Build:
+
+```text
+historical KPI series
+trend
+seasonality
+expected value
+expected range
+sparse history
+movement
+materiality
+priority
+incident
+```
+
+---
+
+## Stage 5 — Contribution engine
+
+Build:
+
+```text
+material KPI
+↓
+region contribution
+product contribution
+channel contribution
+```
+
+No entity anomaly detection.
+
+---
+
+## Stage 6 — Progressive investigation
+
+Build:
+
+```text
+contribution
+↓
+Top-K
+↓
+adaptive drill-down
+↓
+promoted entity
+↓
+entity profile
+```
+
+Stop when explanation is sufficient.
+
+---
+
+## Stage 7 — Evidence + RAG
+
+Build:
+
+```text
+structured evidence
++
+company reference documents
++
+event documents
+↓
+security-aware retrieval
+↓
+evidence graph
+```
+
+---
+
+## Stage 8 — Reasoning
+
+Build:
+
+```text
+hypotheses
+↓
+FOR / AGAINST
+↓
+confidence
+↓
+abstention
+↓
+LLM narrative
+```
+
+---
+
+## Stage 9 — Action + personas
+
+Build:
+
+```text
+driver
+↓
+lever
+↓
+action
+↓
+owner
+↓
+decision right
+↓
+expected impact
+↓
+monitoring plan
+```
+
+Then Executive / Manager / Analyst views.
+
+---
+
+## Stage 10 — Enterprise hardening
+
+Build:
+
+```text
+security
+audit
+lineage
+telemetry
+LLM cost
+latency
+feedback
+outcomes
+drift
+evaluation
+```
+
+---
+
+# 39. Hackathon requirement checklist
+
+Here is the final coverage.
+
+| Requirement                 | Where it lives                    |
+| --------------------------- | --------------------------------- |
+| 3–5 connected KPIs          | KPI Registry                      |
+| 2–3 heterogeneous sources   | Source Registry                   |
+| Different grain             | Source metadata + KPI contract    |
+| Different refresh           | Source health                     |
+| KPI semantic contract       | KPI Governance                    |
+| KPI definitions             | KPI versions                      |
+| Drivers                     | KPI driver registry               |
+| Thresholds                  | Materiality config                |
+| Lineage                     | KPI + evidence lineage            |
+| Material movement           | Monitoring Engine                 |
+| Prioritisation              | Materiality Engine                |
+| Statistical significance    | Behavior/materiality              |
+| Business impact             | Materiality                       |
+| Multi-factor movement       | KPI relationships + drivers       |
+| Driver ranking              | Contribution + hypothesis ranking |
+| Multiple hypotheses         | Investigation                     |
+| RAG                         | Company Knowledge Base            |
+| Traceable evidence          | Evidence layer                    |
+| Contradictory evidence      | Evidence FOR/AGAINST              |
+| Missing data                | Reconciliation                    |
+| Confidence                  | Confidence engine                 |
+| Abstention                  | Investigation state               |
+| Persona-specific narratives | Presentation layer                |
+| Actions                     | Action engine                     |
+| Business levers             | Recommendation                    |
+| Constraints                 | Recommendation rules              |
+| Decision rights             | Permission/action policy          |
+| Feedback                    | Feedback layer                    |
+| Learning                    | Outcome loop                      |
+| Sparse history              | Baseline fallback                 |
+| New KPI/entity              | Limited-history mode              |
+| Role security               | Tenant/RBAC/scope                 |
+| Row security                | Access policy                     |
+| Column security             | Access policy                     |
+| Domain security             | Access policy                     |
+| Document security           | RAG access filter                 |
+| Auditability                | Audit log                         |
+| Drift                       | Drift engine                      |
+| Cost                        | LLM telemetry                     |
+| Latency                     | Execution telemetry               |
+| Token usage                 | LLM telemetry                     |
+| Scalability                 | Progressive investigation         |
+| Entity explosion            | Top-K + promotion                 |
+| User-driven analysis        | Investigation Center              |
+| Automatic investigation     | Monitoring → Incident             |
+| LLM/non-LLM separation      | Architecture/control plane        |
+
+So yes: **all eight Round 2 objectives and the minimum prototype expectations can be covered without building anomaly detection for every entity.**
+
+---
+
+# 40. What I recommend you implement now
+
+Do **not** start with the anomaly engine.
+
+Do **not** start with RAG.
+
+Do **not** start with the dashboard.
+
+Your exact next implementation is:
+
+```text
+                COMPANY
+                   ↓
+            ADMIN ONBOARDING
+                   ↓
+             DATA SOURCES
+                   ↓
+             SCHEMA PROFILER
+                   ↓
+            KPI DISCOVERY
+                   ↓
+          KPI REGISTRATION UI
+                   ↓
+         KPI SEMANTIC CONTRACT
+                   ↓
+        KPI APPROVE / REJECT / EDIT
+                   ↓
+            VERSION + AUDIT
+                   ↓
+             KPI VALIDATION
+                   ↓
+        DETERMINISTIC KPI EXECUTION
+```
+
+Then prove:
+
+```text
+Revenue
+Orders
+AOV
+Stock-out Rate
+```
+
+work correctly from the contract.
+
+**Only after that**:
+
+```text
+KPI behavior
+→ monitoring
+→ materiality
+→ contribution
+→ targeted entity analysis
+→ evidence
+→ RAG
+→ confidence
+→ LLM
+→ action
+```
+
+That is the cleanest, safest and most explainable implementation path.
+
+The source documentation itself ultimately converges on essentially this order: establish the business/data foundation and KPI definitions, then expected behavior and monitoring, then progressive dimensional analysis, then structured evidence/RAG/LLM, and finally enterprise controls and learning. 
+
+### The one rule I want us to keep permanently
+
+> **We detect at the KPI level. We investigate dimensions. We analyze entities selectively.**
+
+That single rule solves your biggest scalability problem while preserving the entire intelligence-to-action story required by the hackathon.

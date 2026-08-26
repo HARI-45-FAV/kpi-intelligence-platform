@@ -1,0 +1,2811 @@
+Yes. The latest Sprint 1 document is strong for the **data foundation**, but for your current plan I would make one deliberate change:
+
+> **Sprint 1 must include the complete KPI Governance layer.**
+
+The uploaded specification currently ends the first sprint at a versioned semantic catalog and says KPI meaning belongs to Sprint 2.  That separation is clean architecturally, but it no longer matches the implementation order we just agreed on.
+
+So I would now freeze **Sprint 1 as: Multi-Tenant Foundation + Source Registry + Data Profiling + KPI Governance**.
+
+The important thing is that we still **do not build anomaly detection, forecasting, RAG reasoning, LLM investigation, or entity-level anomaly detection in Sprint 1**.
+
+---
+
+# Sprint 1 — Complete Foundation + KPI Governance
+
+## The goal
+
+At the end of Sprint 1, a company administrator can:
+
+```text
+Create company
+    ↓
+Configure company
+    ↓
+Add users / roles
+    ↓
+Connect data sources
+    ↓
+Discover tables
+    ↓
+Select allowed tables
+    ↓
+Profile data
+    ↓
+Understand grain / relationships / freshness
+    ↓
+Upload company reference documents
+    ↓
+Register KPIs
+    ↓
+Validate KPI definitions
+    ↓
+Approve KPI
+    ↓
+Version KPI
+    ↓
+Store lineage + access rules
+```
+
+And the system can answer:
+
+> **“What does this company's KPI mean, exactly where does its data come from, who is allowed to see it, and can we reliably calculate it?”**
+
+That is the correct foundation for Sprint 2.
+
+---
+
+# 1. What Sprint 1 is NOT
+
+This is important because otherwise the project will become too large.
+
+Do **not** build in Sprint 1:
+
+```text
+❌ KPI anomaly detection
+❌ Entity anomaly detection
+❌ Forecasting
+❌ Expected-value monitoring
+❌ Contribution analysis
+❌ Root-cause investigation
+❌ Causal inference
+❌ RAG reasoning
+❌ LLM investigation
+❌ Copilot
+❌ Action recommendations
+❌ Automated alerts
+```
+
+We only prepare the interfaces needed for those later.
+
+The uploaded specification already makes this boundary very clear. 
+
+---
+
+# 2. Sprint 1 architecture
+
+This is the final structure I recommend:
+
+```text
+                         SPRINT 1
+                            │
+       ┌────────────────────┴─────────────────────┐
+       │                                          │
+       ▼                                          ▼
+ MULTI-TENANT FOUNDATION                    DATA FOUNDATION
+       │                                          │
+ Company                                      Sources
+ Users                                         Tables
+ Roles                                        Columns
+ Permissions                                  Profiling
+       │                                      Quality
+       └──────────────────┬───────────────────────┘
+                          ▼
+                 GOVERNED DATA CATALOG
+                          │
+          ┌───────────────┼────────────────┐
+          ▼               ▼                ▼
+       Grain          Relationships      Freshness
+          │               │                │
+          └───────────────┼────────────────┘
+                          ▼
+                 COMPANY KNOWLEDGE
+                   DOCUMENT STORE
+                          │
+                          ▼
+                  KPI GOVERNANCE
+                          │
+             ┌────────────┴────────────┐
+             ▼                         ▼
+      Manual KPI Entry          Discovery Proposal
+             │                         │
+             └────────────┬────────────┘
+                          ▼
+                    KPI Review
+                          ▼
+                 KPI Validation
+                          ▼
+                  Human Approval
+                          ▼
+                 Versioned KPI
+                          ▼
+            KPI + Lineage + Access
+```
+
+This is the foundation from which Sprint 2 will start.
+
+---
+
+# 3. Sprint 1A — Multi-tenant company foundation
+
+First build the concept of a **company**.
+
+Your platform is not:
+
+```text
+One database → one company
+```
+
+It is:
+
+```text
+BusinessIntelligence.ai
+        │
+        ├── Company A
+        ├── Company B
+        ├── Company C
+        └── ...
+```
+
+Every important object therefore belongs to a company.
+
+---
+
+## Tables
+
+### `users`
+
+```text
+id
+email
+password_hash
+full_name
+is_active
+created_at
+updated_at
+```
+
+### `companies`
+
+```text
+id
+company_name
+industry
+description
+country
+timezone
+currency
+fiscal_year_start
+status
+created_at
+updated_at
+```
+
+### `company_users`
+
+```text
+id
+company_id
+user_id
+role_id
+status
+created_at
+```
+
+### `roles`
+
+Start simple:
+
+```text
+ADMIN
+ANALYST
+VIEWER
+```
+
+Later you can add:
+
+```text
+EXECUTIVE
+MANAGER
+REGIONAL_MANAGER
+```
+
+### `permissions`
+
+Examples:
+
+```text
+company.read
+company.manage
+
+source.read
+source.manage
+
+kpi.read
+kpi.create
+kpi.approve
+kpi.edit
+
+document.read
+document.manage
+
+analytics.read
+investigation.read
+```
+
+---
+
+# 4. Company isolation
+
+This is mandatory.
+
+Every request follows:
+
+```text
+JWT
+ ↓
+User
+ ↓
+Company membership
+ ↓
+Role
+ ↓
+Permission
+ ↓
+Company scope
+ ↓
+Resource
+```
+
+Never trust:
+
+```text
+/company/123
+```
+
+just because the URL contains `123`.
+
+The backend must verify:
+
+```text
+Does this user belong to Company 123?
+```
+
+The uploaded specification explicitly requires backend authorization and prevents Company A users from simply changing an ID to access Company B. 
+
+---
+
+# 5. Admin/Governance area
+
+After login, an administrator should have:
+
+```text
+ADMIN / GOVERNANCE
+
+├── Company
+├── Users & Roles
+├── Data Sources
+├── Data Scope
+├── Data Catalog
+├── Documents
+├── KPI Registry
+├── KPI Approvals
+├── Access Policies
+└── Audit Log
+```
+
+This becomes your confidential area.
+
+---
+
+# 6. Sprint 1B — Data source registry
+
+Since your actual datasets already exist in Supabase/Postgres, connect them now.
+
+Create:
+
+### `data_sources`
+
+```text
+id
+company_id
+name
+type
+host/reference
+database
+schema
+status
+refresh_frequency
+timezone
+created_at
+updated_at
+```
+
+For your current prototype:
+
+```text
+PostgreSQL / Supabase
+```
+
+should be the first fully working connector.
+
+Your uploaded specification recommends an abstraction around connectors rather than hardcoding the application to one database. 
+
+---
+
+# 7. Connector interface
+
+Build one universal interface:
+
+```python
+class DataSourceConnector:
+
+    test_connection()
+
+    list_databases()
+
+    list_schemas()
+
+    list_tables()
+
+    get_table_metadata()
+
+    get_column_metadata()
+
+    get_primary_keys()
+
+    get_foreign_keys()
+
+    estimate_row_count()
+
+    execute_query()
+
+    get_refresh_metadata()
+```
+
+Then:
+
+```text
+PostgreSQLConnector
+SampleConnector
+```
+
+fully work.
+
+And define interfaces for:
+
+```text
+Snowflake
+BigQuery
+```
+
+without spending Sprint 1 implementing their entire infrastructure.
+
+That keeps the architecture enterprise-ready without wasting development time.
+
+---
+
+# 8. Source registration flow
+
+Administrator sees:
+
+```text
+Add Data Source
+```
+
+Enters:
+
+```text
+Name
+Type
+Connection details
+Database
+Schema
+Refresh cadence
+Timezone
+```
+
+Then:
+
+```text
+TEST CONNECTION
+```
+
+Result:
+
+```text
+✓ Connected
+✓ Authentication successful
+✓ Schema accessible
+✓ 3 tables detected
+```
+
+Never return passwords or secrets in API responses. The latest specification explicitly requires that. 
+
+---
+
+# 9. Table discovery
+
+After connection:
+
+```text
+Sales
+Inventory
+Marketing
+```
+
+The administrator sees:
+
+```text
+Table
+Approx Rows
+Columns
+Detected Grain
+Last Refresh
+Status
+```
+
+For example:
+
+```text
+Sales
+1.2M rows
+10 columns
+Unknown → profile
+
+Inventory
+2.5M rows
+5 columns
+Unknown → profile
+
+Marketing
+80K rows
+7 columns
+Unknown → profile
+```
+
+---
+
+# 10. Explicit data scope
+
+This is an important enterprise principle.
+
+Don't automatically analyze every table.
+
+The admin explicitly selects:
+
+```text
+✓ sales
+✓ inventory
+✓ marketing
+```
+
+Create:
+
+### `selected_tables`
+
+```text
+id
+company_id
+data_source_id
+database
+schema
+table_name
+enabled
+created_at
+updated_at
+```
+
+Then Sprint 1 guarantees:
+
+> **Only selected tables enter semantic/KPI processing.**
+
+The latest Sprint 1 specification explicitly defines selected-table scope as the maximum scope for future semantic processing. 
+
+---
+
+# 11. Data profiling
+
+For each selected table, calculate **deterministically**:
+
+```text
+row count
+null count
+null %
+distinct count
+min
+max
+mean
+sample values
+zero count
+negative count
+```
+
+For columns:
+
+```text
+numeric
+categorical
+date
+identifier
+possible primary key
+possible foreign key
+```
+
+Example:
+
+```text
+revenue
+type          numeric
+null %        0.2%
+distinct      845,123
+min           5
+max           125,000
+negative      0
+```
+
+This should be SQL/database pushdown.
+
+Never download an entire production table into Python just to calculate a null percentage.
+
+The source explicitly requires database pushdown and protection against loading complete enterprise tables into application memory. 
+
+---
+
+# 12. Data quality
+
+Create a quality profile:
+
+```text
+completeness
+null rate
+distinctness
+duplicate indication
+type validity
+range validity
+```
+
+Example:
+
+```text
+Revenue
+
+Completeness: 99.8%
+Negative values: 0
+Type validity: 100%
+Quality status: GOOD
+```
+
+Important:
+
+> **Do not silently repair bad data.**
+
+Store warnings.
+
+Later the confidence engine can use them.
+
+---
+
+# 13. Grain detection
+
+This is extremely important for the later KPI engine.
+
+For example:
+
+```text
+Sales
+→ Order Line
+
+Inventory
+→ Product × Region × Hour
+
+Marketing
+→ Campaign × Region × Day
+```
+
+Store:
+
+### `table_grains`
+
+```text
+table_id
+declared_grain
+inferred_grain
+grain_columns
+confidence
+method
+```
+
+Use deterministic logic based on keys, uniqueness and relationships.
+
+Do not hardcode:
+
+```text
+Sales = order
+```
+
+The uploaded specification explicitly says the data should determine the inferred grain rather than application assumptions. 
+
+---
+
+# 14. Relationship detection
+
+Find things like:
+
+```text
+sales.product_id
+        ↓
+products.product_id
+```
+
+Store:
+
+```text
+source_table
+source_column
+target_table
+target_column
+relationship_type
+confidence
+method
+```
+
+This gives you:
+
+```text
+1:1
+1:N
+N:1
+UNKNOWN
+```
+
+Later this becomes extremely useful for KPI formulas.
+
+---
+
+# 15. Join safety
+
+This is one of the best additions from the latest Sprint 1 document.
+
+Suppose:
+
+```text
+Orders → Customers
+```
+
+is many-to-one.
+
+Safe.
+
+But:
+
+```text
+Orders → OrderItems
+```
+
+may create duplication.
+
+So calculate:
+
+```text
+source uniqueness
+target uniqueness
+fan-out factor
+duplicate-key rate
+expected cardinality
+observed cardinality
+```
+
+Then:
+
+```text
+SAFE
+SAFE_WITH_AGGREGATION
+RISKY
+UNKNOWN
+```
+
+This prevents one of the most dangerous BI errors:
+
+> **Correct-looking KPI with incorrect joins.**
+
+The proposed join-safety model in the latest specification is exactly what we should use. 
+
+---
+
+# 16. Calendar foundation
+
+Before KPI registration, establish:
+
+```text
+timezone
+week start
+fiscal year start
+fiscal period
+calendar ID
+```
+
+For example:
+
+```text
+Company A
+Timezone: Asia/Kolkata
+Week starts: Monday
+Fiscal year: April
+```
+
+This becomes important when the company later defines:
+
+> “Monthly Revenue”
+
+because “month” must have a governed meaning.
+
+---
+
+# 17. Freshness
+
+Track:
+
+```text
+last successful refresh
+last checked
+expected refresh interval
+freshness lag
+status
+```
+
+Example:
+
+```text
+Sales       15 min   FRESH
+Inventory    2 hr    FRESH
+Marketing   1 day    FRESH
+```
+
+If Marketing is three days old:
+
+```text
+STALE
+```
+
+Don't delete it.
+
+Don't pretend it is current.
+
+Store the freshness state.
+
+The later confidence engine will use it. 
+
+---
+
+# 18. Cross-source reconciliation
+
+Sprint 1 should **not calculate multi-source KPIs yet**.
+
+Instead, establish whether sources can safely cooperate.
+
+Example:
+
+```text
+Sales
+order-line
+    ↓
+daily
+
+Marketing
+campaign × region × day
+    ↓
+daily
+```
+
+Then record:
+
+```text
+DIRECTLY_COMPATIBLE
+REQUIRES_AGGREGATION
+REQUIRES_DIMENSION_MAPPING
+UNSAFE
+UNKNOWN
+```
+
+This prepares Sprint 2 for Revenue + Marketing analysis.
+
+The latest specification correctly keeps reconciliation as metadata rather than prematurely turning it into KPI logic. 
+
+---
+
+# 19. Access control must already exist at profiling time
+
+This is crucial.
+
+Suppose:
+
+```text
+customer_email
+customer_phone
+```
+
+is restricted.
+
+Do **not**:
+
+```text
+profile everything
+ ↓
+hide it from user later
+```
+
+Instead:
+
+```text
+User
+ ↓
+Authorization
+ ↓
+Allowed tables
+ ↓
+Allowed columns
+ ↓
+Allowed rows
+ ↓
+Profile
+```
+
+The source explicitly requires access-aware profiling rather than filtering sensitive output afterward. 
+
+---
+
+# 20. Sensitivity classification
+
+Create fields:
+
+```text
+classification
+is_pii
+is_sensitive
+is_restricted
+```
+
+Classification:
+
+```text
+PUBLIC
+INTERNAL
+CONFIDENTIAL
+RESTRICTED
+```
+
+Don't attempt sophisticated AI-based PII discovery yet.
+
+Build the data model first.
+
+---
+
+# 21. Company reference documents
+
+This is where your new idea fits perfectly.
+
+During company setup:
+
+```text
+ADMIN
+ ↓
+Company Reference Documents
+```
+
+Examples:
+
+```text
+Company KPI Handbook
+Finance Definitions
+Pricing Policy
+Returns Policy
+Inventory Policy
+Business Rules
+Organizational Structure
+```
+
+Store them now.
+
+But:
+
+> **Do not implement RAG retrieval yet.**
+
+Sprint 1 prepares the document foundation.
+
+---
+
+# 22. Document architecture
+
+### `company_documents`
+
+```text
+id
+company_id
+title
+document_type
+version
+effective_date
+access_scope
+storage_path/content
+status
+created_by
+created_at
+updated_at
+```
+
+Later:
+
+```text
+company_documents
+       ↓
+document_versions
+       ↓
+document_chunks
+       ↓
+embeddings
+```
+
+But embeddings belong to the RAG sprint.
+
+For Sprint 1 we only need:
+
+```text
+UPLOAD
+STORE
+VERSION
+ACCESS CONTROL
+RETRIEVE METADATA
+```
+
+The uploaded specification makes exactly this distinction: documentation storage belongs in Sprint 1; embeddings and LLM retrieval do not. 
+
+---
+
+# 23. Now the critical part — KPI Governance
+
+This is where I am intentionally extending the latest Sprint 1 specification.
+
+Once the company and data foundation exists:
+
+```text
+Company
+ ↓
+Selected Tables
+ ↓
+Profiles
+ ↓
+Grain
+ ↓
+Relationships
+ ↓
+Freshness
+ ↓
+Documents
+ ↓
+KPI Governance
+```
+
+This is now **Stage 3 within Sprint 1**.
+
+---
+
+# 24. KPI Governance should have two entry mechanisms
+
+## A. Manual KPI registration
+
+Administrator says:
+
+> “I want to register Revenue.”
+
+They enter:
+
+```text
+KPI Name
+Business Definition
+Formula
+Source
+Aggregation
+Time Field
+Time Grain
+Calendar
+Dimensions
+Drivers
+Materiality
+Owner
+Access Rules
+```
+
+---
+
+## B. Discovery-assisted registration
+
+System looks at the selected data and proposes:
+
+```text
+Possible KPI:
+
+Revenue
+
+Candidate formula:
+SUM(sales.revenue)
+
+Candidate dimensions:
+region
+product
+channel
+```
+
+Then the admin can:
+
+```text
+APPROVE
+EDIT
+REJECT
+```
+
+The system never automatically decides the business definition.
+
+This preserves the core principle from the reference architecture: the platform may propose, but the business owns the semantic meaning. 
+
+---
+
+# 25. KPI lifecycle
+
+Use:
+
+```text
+DRAFT
+   ↓
+PROPOSED
+   ↓
+UNDER_REVIEW
+   ↓
+APPROVED
+   ↓
+ACTIVE
+   ↓
+DEPRECATED
+```
+
+This is much safer than immediately writing:
+
+```text
+revenue = SUM(revenue)
+```
+
+into application code.
+
+---
+
+# 26. KPI tables
+
+## `kpi_definitions`
+
+```text
+id
+company_id
+kpi_key
+name
+status
+current_version
+owner_user_id
+created_at
+updated_at
+```
+
+## `kpi_versions`
+
+```text
+id
+kpi_id
+version
+business_definition
+
+formula
+aggregation
+
+numerator
+denominator
+filters
+
+source_definition
+
+time_field
+time_grain
+calendar_id
+timezone
+
+status
+
+created_by
+approved_by
+approved_at
+
+created_at
+```
+
+---
+
+# 27. KPI dimensions
+
+### `kpi_dimensions`
+
+```text
+id
+kpi_version_id
+dimension_name
+source_table
+source_column
+hierarchy
+allowed
+```
+
+Example:
+
+```text
+Revenue
+
+region
+product
+channel
+```
+
+This doesn't mean:
+
+> “Run anomaly detection for every region/product/channel.”
+
+It only means:
+
+> “These dimensions are valid ways to slice this KPI.”
+
+That distinction solves your scalability concern.
+
+---
+
+# 28. KPI drivers
+
+### `kpi_drivers`
+
+```text
+id
+kpi_version_id
+driver_name
+driver_type
+source
+controllable
+measurement_method
+```
+
+For Revenue:
+
+```text
+Volume
+Price
+Mix
+Inventory
+Marketing
+```
+
+This prepares the future investigation engine.
+
+---
+
+# 29. KPI materiality
+
+### `kpi_materiality_rules`
+
+```text
+kpi_version_id
+
+relative_threshold
+absolute_threshold
+statistical_rule
+
+business_criticality
+priority_policy
+persistence_rule
+```
+
+Example:
+
+```text
+Revenue
+
+Relative:
+5%
+
+Absolute:
+₹100,000
+
+Criticality:
+HIGH
+```
+
+We are **storing** the rule in Sprint 1.
+
+We are not yet running automated monitoring.
+
+---
+
+# 30. KPI access rules
+
+### `kpi_access_policies`
+
+```text
+kpi_version_id
+role
+allowed
+row_scope
+column_scope
+domain_scope
+```
+
+Example:
+
+```text
+Revenue
+ADMIN → all
+EXECUTIVE → all
+REGIONAL_MANAGER → region scope
+VIEWER → aggregate only
+```
+
+This makes the KPI itself governed.
+
+---
+
+# 31. KPI lineage
+
+A KPI should be able to answer:
+
+> “Where did this number come from?”
+
+Example:
+
+```text
+Revenue
+   ↓
+sales.revenue
+   ↓
+Postgres
+   ↓
+company database
+```
+
+Later a more complex KPI might become:
+
+```text
+AOV
+ ↓
+SUM(revenue)
+ /
+COUNT(DISTINCT order_id)
+ ↓
+sales.revenue
+sales.order_id
+```
+
+This is why the column-level lineage built earlier is important.
+
+---
+
+# 32. KPI validation
+
+This is the most important thing before allowing a KPI to become `ACTIVE`.
+
+For Revenue:
+
+### Validation 1
+
+Can the formula execute?
+
+### Validation 2
+
+Does the column exist?
+
+### Validation 3
+
+Does the selected time field exist?
+
+### Validation 4
+
+Does the selected dimension exist?
+
+### Validation 5
+
+Is the aggregation valid?
+
+### Validation 6
+
+Does the formula create duplicate counting?
+
+### Validation 7
+
+Can the KPI be calculated at the selected grain?
+
+### Validation 8
+
+Does the user's access permit the required data?
+
+### Validation 9
+
+Can the KPI reconcile against underlying data?
+
+Then:
+
+```text
+VALID
+```
+
+or:
+
+```text
+INVALID
+```
+
+---
+
+# 33. KPI validation record
+
+Create:
+
+### `kpi_validation_runs`
+
+```text
+id
+kpi_version_id
+test_type
+status
+expected
+actual
+error_message
+runtime_ms
+created_at
+```
+
+Example:
+
+```text
+Revenue
+
+Formula validity       PASS
+Column existence       PASS
+Grain compatibility    PASS
+Dimension compatibility PASS
+Join safety             PASS
+Access validation       PASS
+
+Overall:
+PASS
+```
+
+Only then can the administrator click:
+
+> **Approve & Activate**
+
+---
+
+# 34. KPI approval
+
+The final flow:
+
+```text
+KPI Draft
+   ↓
+Validation
+   ↓
+Admin Review
+   ↓
+Approve
+   ↓
+Version = 1
+   ↓
+ACTIVE
+```
+
+Record:
+
+```text
+approved_by
+approved_at
+approval_reason
+```
+
+This gives you governance and auditability.
+
+---
+
+# 35. Four KPIs to register in Sprint 1
+
+Start with exactly these:
+
+### 1. Revenue
+
+```text
+SUM(revenue)
+```
+
+### 2. Orders
+
+```text
+COUNT(DISTINCT order_id)
+```
+
+### 3. AOV
+
+```text
+SUM(revenue)
+/
+COUNT(DISTINCT order_id)
+```
+
+### 4. Stock-out Rate
+
+For example:
+
+```text
+stock_out observations
+/
+total inventory observations
+```
+
+The exact formula should come from your actual dataset rather than being hardcoded from the roadmap.
+
+The latest architecture identifies these connected KPIs as sufficient to demonstrate the subsequent intelligence flow. 
+
+---
+
+# 36. Very important: don't register the four KPI definitions blindly
+
+The process should be:
+
+```text
+DATABASE
+ ↓
+DISCOVER
+ ↓
+PROPOSE
+ ↓
+ADMIN REVIEW
+ ↓
+VALIDATE
+ ↓
+APPROVE
+```
+
+For example:
+
+```text
+Candidate:
+Revenue
+
+Formula candidate:
+SUM(sales.revenue)
+
+Admin:
+✓ Approved
+```
+
+Then:
+
+```text
+Candidate:
+AOV
+
+Formula candidate:
+SUM(revenue) / COUNT(DISTINCT order_id)
+
+Admin:
+✏ Edited
+
+Approved formula:
+...
+```
+
+This is what makes the system universal.
+
+---
+
+# 37. Business reference documents and KPI governance are connected
+
+This is another important improvement.
+
+Suppose the company uploads:
+
+> `Company KPI Definition Handbook.pdf`
+
+The KPI proposal can reference it:
+
+```text
+Revenue
+Definition source:
+KPI Handbook v3
+
+Formula source:
+Admin supplied
+
+Approval:
+Finance Director
+```
+
+So the KPI has:
+
+```text
+Database evidence
++
+Business documentation
++
+Human approval
+```
+
+But the document is **supporting governance evidence**, not the quantitative source.
+
+---
+
+# 38. Semantic catalog after Sprint 1
+
+The catalog should finally look like:
+
+```text
+COMPANY
+│
+├── USERS
+│
+├── ROLES
+│
+├── DATA SOURCES
+│   ├── Sales
+│   ├── Inventory
+│   └── Marketing
+│
+├── SELECTED TABLES
+│   ├── Grain
+│   ├── Relationships
+│   ├── Join Safety
+│   ├── Quality
+│   ├── Freshness
+│   ├── Access
+│   └── Lineage
+│
+├── DOCUMENTS
+│   ├── Reference
+│   └── Business Context
+│
+└── KPI REGISTRY
+    ├── Revenue v1
+    ├── Orders v1
+    ├── AOV v1
+    └── Stock-out Rate v1
+```
+
+This is your **governed business world**.
+
+Sprint 2 can then consume this without trying to rediscover the business every time.
+
+---
+
+# 39. Versioning
+
+You need two different version concepts.
+
+### Catalog version
+
+Represents:
+
+> “What did we know about the company's data at this point?”
+
+Example:
+
+```text
+Catalog v1
+Catalog v2
+```
+
+### KPI version
+
+Represents:
+
+> “What did the company mean by Revenue at this point?”
+
+Example:
+
+```text
+Revenue v1
+Revenue v2
+```
+
+Never silently overwrite either.
+
+The latest Sprint 1 specification specifically recommends versioned semantic snapshots for reproducibility. 
+
+---
+
+# 40. Audit trail
+
+Log:
+
+```text
+user
+company
+operation
+resource
+old version
+new version
+timestamp
+```
+
+Important events:
+
+```text
+Company created
+User added
+Source added
+Source tested
+Table selected
+KPI created
+KPI edited
+KPI approved
+KPI deprecated
+Document uploaded
+Access policy changed
+```
+
+---
+
+# 41. Telemetry
+
+Sprint 1 doesn't need LLM telemetry yet.
+
+But build the infrastructure now:
+
+```text
+request_id
+company_id
+user_id
+service
+operation
+resource_id
+start_time
+duration
+status
+error
+```
+
+For source queries:
+
+```text
+connector
+query_hash
+query_duration
+rows_returned
+```
+
+Do not log secrets or sensitive query contents.
+
+The uploaded specification already sets these telemetry expectations. 
+
+---
+
+# 42. Recommended API structure
+
+Your main routes become:
+
+```text
+/auth
+/companies
+/users
+/memberships
+/roles
+/permissions
+
+/data-sources
+/discovery
+/selected-tables
+/metadata
+/profiling
+/quality
+/grain
+/relationships
+/join-safety
+/freshness
+/reconciliation
+/access
+
+/documents
+
+/catalog
+
+/kpis
+/kpis/{id}/versions
+/kpis/{id}/validate
+/kpis/{id}/approve
+/kpis/{id}/deprecate
+
+/audit
+/telemetry
+```
+
+That is enough.
+
+---
+
+Unified Dashboard + KPI Governance Foundation
+1. Sprint 1 objective
+
+Sprint 1 should deliver one working product shell:
+
+                         BUSINESSINTELLIGENCE.AI
+                                  │
+       ┌─────────────── TOP NAVIGATION ────────────────┐
+       │                                               │
+       │  Dashboard   Monitor   Investigation   ...   │
+       │                                 KPI Setup     │
+       └───────────────────────┬───────────────────────┘
+                               │
+                               ▼
+                       MAIN DASHBOARD
+                               │
+                 ┌─────────────┴─────────────┐
+                 │                           │
+           Normal dashboard          KPI Setup clicked
+                                         │
+                                         ▼
+                                Authentication
+                                         │
+                                         ▼
+                               Admin/Governance
+                                         │
+                                         ▼
+                       KPI Registration Floating Panel
+
+The key idea:
+
+The main application is simple. KPI/company configuration is isolated behind one protected toggle.
+
+Everything discussed in Sprint 1 concerning company setup, sources, documents, KPI definitions, validation, access and lineage lives inside that protected panel.
+
+2. Top navigation — keep it to 5–6 toggles
+
+For now, don't overdesign the functions.
+
+Use something like:
+
+┌───────────────────────────────────────────────────────────────────────┐
+│ BI.ai     Dashboard   Monitoring   Investigation   Insights   KPI Setup │
+└───────────────────────────────────────────────────────────────────────┘
+
+You can rename the future tabs later.
+
+Suggested final six
+
+1. Dashboard
+
+Main business overview.
+
+2. Monitoring
+
+Later: material KPI movements and incidents.
+
+3. Investigation
+
+Later: automatic investigation + user-driven entity analysis.
+
+4. Insights
+
+Later: recommendations, opportunities, outcomes.
+
+5. Activity / Audit
+
+Later: feedback, action history, system telemetry.
+
+6. KPI Setup
+
+The protected configuration area.
+
+For Sprint 1, only Dashboard + KPI Setup need meaningful functionality.
+
+The other tabs can be present visually but remain simple placeholders.
+
+That is much better than implementing five half-finished systems.
+
+3. What happens when the user clicks KPI Setup?
+
+This is the important part.
+
+The user should not immediately be thrown into a giant admin application.
+
+Instead:
+
+Click "KPI Setup"
+        ↓
+Authentication modal/page
+        ↓
+Email
+Password
+        ↓
+Verify ADMIN permission
+        ↓
+KPI Setup workspace opens
+
+Once authenticated:
+
+┌─────────────────────────────────────────────────────────────┐
+│ KPI SETUP / COMPANY GOVERNANCE                              │
+│                                                             │
+│ Company: NovaMart                          Admin            │
+├─────────────────────────────────────────────────────────────┤
+│ Company   Data Sources   Documents   KPIs   Access   Audit  │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│                 Current selected section                    │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+
+These are sub-tabs inside KPI Setup, not top-level application navigation.
+
+That is the simplification I would strongly recommend.
+
+4. KPI Setup becomes one complete governance panel
+
+Everything we discussed goes here.
+
+KPI SETUP
+│
+├── Company
+├── Data Sources
+├── Data Scope
+├── Data Profile
+├── Documents
+├── KPI Registry
+├── KPI Validation
+├── Access Rules
+└── Audit
+
+But don't show all of these as huge menus.
+
+Use a compact left-side or horizontal secondary navigation.
+
+For example:
+
+Company
+Sources
+Documents
+KPIs
+Security
+History
+
+That's enough.
+
+5. Company section
+
+This is where your multi-company concept starts.
+
+COMPANY
+────────────────────────
+
+Company Name
+Industry
+Country
+Currency
+Timezone
+Fiscal Year
+Business Calendar
+
+[Save Changes]
+
+For the hackathon you don't need a huge company-management UI.
+
+You just need:
+
+company identity
+business context
+calendar
+timezone
+currency
+6. Data Sources section
+
+Keep it extremely simple.
+
+DATA SOURCES
+
+┌─────────────────────────────────────────────────────┐
+│ Sales       PostgreSQL      Connected       ✓       │
+│ Inventory   PostgreSQL      Connected       ✓       │
+│ Marketing   PostgreSQL      Connected       ✓       │
+└─────────────────────────────────────────────────────┘
+
+                    [+ Add Source]
+
+Click a source:
+
+Sales
+
+Connection
+Status
+Tables
+Freshness
+Grain
+Quality
+
+[Discover Tables]
+[Profile Data]
+
+You do not need a giant data-management application.
+
+7. Data Scope section
+
+This is where the administrator chooses what the company allows BI.ai to use.
+
+AVAILABLE TABLES
+
+☑ sales
+☑ inventory
+☑ marketing
+☐ customers
+☐ campaigns_archive
+
+Then:
+
+[Save Data Scope]
+
+This supports the secure selected-data boundary from the Sprint 1 specification.
+
+8. Data Profile should be a single compact panel
+
+After selecting sales:
+
+SALES
+
+Rows              1.2M
+Grain             Order Line
+Freshness         15 min
+Quality           99.4%
+
+Columns
+────────────────────────────
+order_id          Identifier
+product_id        Identifier
+region            Category
+channel           Category
+order_date        Date
+quantity          Numeric
+revenue           Numeric
+
+Then a small:
+
+View detailed profile
+
+button.
+
+Don't make separate pages for:
+
+grain
+freshness
+quality
+relationships
+lineage
+
+Put them into the same details panel.
+
+9. Documents should also be inside KPI Setup
+
+This addresses your company-reference-document requirement.
+
+DOCUMENTS
+
+Company KPI Handbook
+Finance Policy
+Pricing Policy
+Inventory Policy
+Operations Guide
+
+[+ Upload Document]
+
+Click a document:
+
+Document Details
+
+Name
+Type
+Version
+Effective Date
+Access Scope
+Uploaded By
+Status
+
+For Sprint 1:
+
+Store and version the document.
+
+Do not yet build embeddings/RAG.
+
+That is still consistent with the current Sprint 1 specification.
+
+10. The central piece: KPI Registry
+
+This should be the most important screen inside KPI Setup.
+
+KPI REGISTRY
+
+┌──────────────────────────────────────────────────────────────┐
+│ Revenue            ACTIVE       v1                           │
+│ Orders             ACTIVE       v1                           │
+│ AOV                ACTIVE       v1                           │
+│ Stock-out Rate     ACTIVE       v1                           │
+└──────────────────────────────────────────────────────────────┘
+
+                    [+ Register KPI]
+
+Click Revenue.
+
+A floating/detail panel opens.
+
+11. KPI detail should use one scrollable panel
+
+Don't create 12 different pages.
+
+Use one panel:
+
+┌──────────────────────────────────────────────────────────────┐
+│ Revenue                                      ACTIVE • v1      │
+├──────────────────────────────────────────────────────────────┤
+│ Business Definition                                           │
+│ Total recognized sales revenue                                │
+│                                                              │
+│ Calculation                                                  │
+│ SUM(sales.revenue)                                            │
+│                                                              │
+│ Source                                                       │
+│ sales                                                        │
+│                                                              │
+│ Time                                                        │
+│ Day | Company Calendar | Asia/Kolkata                        │
+│                                                              │
+│ Dimensions                                                  │
+│ Region | Product | Channel                                  │
+│                                                              │
+│ Drivers                                                     │
+│ Volume | Price | Mix | Inventory | Marketing                │
+│                                                              │
+│ Materiality                                                 │
+│ Relative: 5%    Impact: ₹100K                               │
+│                                                              │
+│ Access                                                      │
+│ Admin | Executive | Analyst | Regional Scope                │
+│                                                              │
+│ Lineage                                                     │
+│ sales.revenue                                               │
+│                                                              │
+│ Validation                                                  │
+│ ✓ Formula                                                   │
+│ ✓ Source                                                    │
+│ ✓ Grain                                                     │
+│ ✓ Access                                                    │
+│                                                              │
+│ Version History                                             │
+│ v1 Approved — 25 Aug 2026                                  │
+│                                                              │
+│ [Edit] [Validate] [Approve]                                │
+└──────────────────────────────────────────────────────────────┘
+
+This is what “put everything inside the KPI registration toggle” should mean.
+
+12. KPI registration flow
+
+Click:
+
++ Register KPI
+
+Then:
+
+┌──────────────────────────────────────────────────────────────┐
+│ REGISTER KPI                                                 │
+├──────────────────────────────────────────────────────────────┤
+│ KPI Name                                                     │
+│ [ Revenue                                                 ] │
+│                                                              │
+│ Business Definition                                          │
+│ [ Total recognized sales revenue                          ] │
+│                                                              │
+│ Source                                                       │
+│ [ Sales ▼ ]                                                  │
+│                                                              │
+│ Formula                                                      │
+│ [ SUM(revenue)                                            ] │
+│                                                              │
+│ Time Field                                                   │
+│ [ order_date ▼ ]                                             │
+│                                                              │
+│ Time Grain                                                   │
+│ [ Daily ▼ ]                                                  │
+│                                                              │
+│ Dimensions                                                   │
+│ ☑ Region   ☑ Product   ☑ Channel                            │
+│                                                              │
+│ Drivers                                                      │
+│ ☑ Volume   ☑ Price   ☑ Mix   ☑ Inventory   ☑ Marketing     │
+│                                                              │
+│ [Validate KPI]                                               │
+└──────────────────────────────────────────────────────────────┘
+
+That's enough.
+
+13. Add discovery, but don't make it another UI
+
+The administrator should also have:
+
+Suggest from Data
+
+When clicked:
+
+Detected candidate:
+
+Revenue
+Possible formula:
+SUM(sales.revenue)
+
+Candidate dimensions:
+Region
+Product
+Channel
+
+[Use Candidate]
+[Dismiss]
+
+The discovery engine proposes.
+
+The admin remains responsible for approval.
+
+This preserves the governed KPI contract principle from your architecture.
+
+14. KPI validation should appear inside the same panel
+
+When clicking:
+
+Validate KPI
+
+show:
+
+VALIDATION
+
+✓ Source exists
+✓ Formula executes
+✓ Required columns exist
+✓ Time field valid
+✓ Grain compatible
+✓ Dimensions available
+✓ Join safety valid
+✓ Access policy valid
+
+OVERALL
+✓ READY FOR APPROVAL
+
+Then:
+
+[Approve & Activate]
+
+No separate validation page.
+
+15. KPI version history is also inside that panel
+VERSION HISTORY
+
+v1
+Approved
+25 Aug 2026
+
+v2
+Future changes
+
+If the admin edits Revenue later:
+
+Revenue v1
+       ↓
+Edit
+       ↓
+Validation
+       ↓
+Approve
+       ↓
+Revenue v2
+
+Old insights remain tied to v1.
+
+16. The top-level dashboard remains extremely simple
+
+Using the reference image, the main page could initially be:
+
+┌──────────────────────────────────────────────────────────────────┐
+│ BI.ai    Dashboard   Monitoring   Investigation   Insights   KPI │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ SYSTEM STATUS                                                    │
+│                                                                  │
+│ Data Sources       3 connected                                  │
+│ KPIs               4 active                                      │
+│ Data Quality       Healthy                                      │
+│ Last Refresh       5 min ago                                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ KPI SUMMARY                                                      │
+│                                                                  │
+│ Revenue       Orders       AOV       Stock-out Rate              │
+│ ₹...          ...          ...           ...                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│ Recent Activity                                                  │
+│                                                                  │
+│ KPI configured                                                   │
+│ Source refreshed                                                 │
+│ Document updated                                                 │
+└──────────────────────────────────────────────────────────────────┘
+
+Nothing more.
+
+Monitoring and Investigation can later replace/add real content.
+
+17. Top navigation behavior
+
+I recommend:
+
+Dashboard
+
+No authentication.
+
+Publicly visible within the authenticated application/session.
+
+Monitoring
+
+No special admin authentication.
+
+Later this shows business monitoring.
+
+Investigation
+
+No special admin authentication.
+
+Later this provides both:
+
+Automatic investigation
++
+User-selected entity analysis
+Insights
+
+No special admin authentication.
+
+Later recommendations/outcomes.
+
+Activity
+
+Normal role-based access.
+
+KPI Setup
+
+Admin authentication required.
+
+This matches exactly what you described.
+
+18. Don't make the KPI button itself look like a technical admin button
+
+Make it business-friendly.
+
+Instead of:
+
+Configuration
+
+I recommend:
+
+KPI Setup
+
+or:
+
+KPI & Company
+
+For a business user, “Configuration” feels technical.
+
+“KPI Setup” communicates the purpose immediately.
+
+19. The authentication flow
+
+Don't redirect the user into a separate application feeling.
+
+Use:
+
+KPI Setup
+   ↓
+modal / dedicated secure screen
+   ↓
+Email
+Password
+   ↓
+Authenticate
+   ↓
+Admin KPI Setup panel
+
+After closing:
+
+Return to Dashboard
+
+Simple.
+
+This will be one of the most important screens in your final demo.
+
+---
+
+# 44. Sprint 1 execution sequence
+
+Here is the exact order I recommend coding.
+
+### Step 1
+
+Create repository/backend/frontend structure.
+
+### Step 2
+
+Set up:
+
+```text
+FastAPI
+SQLAlchemy
+Pydantic
+Alembic
+JWT
+pytest
+```
+
+The uploaded specification uses this exact baseline. 
+
+### Step 3
+
+Implement:
+
+```text
+users
+companies
+roles
+permissions
+company_users
+```
+
+### Step 4
+
+Implement authentication and company authorization.
+
+### Step 5
+
+Implement PostgreSQL/Supabase connector.
+
+### Step 6
+
+Implement source registration and connection testing.
+
+### Step 7
+
+Implement table/schema discovery.
+
+### Step 8
+
+Implement explicit selected-table scope.
+
+### Step 9
+
+Implement metadata extraction.
+
+### Step 10
+
+Implement profiling.
+
+### Step 11
+
+Implement quality.
+
+### Step 12
+
+Implement grain detection.
+
+### Step 13
+
+Implement relationship detection.
+
+### Step 14
+
+Implement join-safety analysis.
+
+### Step 15
+
+Implement calendar/timezone.
+
+### Step 16
+
+Implement freshness.
+
+### Step 17
+
+Implement cross-source reconciliation metadata.
+
+### Step 18
+
+Implement access-aware profiling.
+
+### Step 19
+
+Implement document storage.
+
+### Step 20
+
+Implement semantic catalog.
+
+### Step 21
+
+Implement catalog versioning.
+
+### Step 22
+
+Implement KPI manual registration.
+
+### Step 23
+
+Implement KPI discovery/proposal.
+
+### Step 24
+
+Implement KPI review/edit/reject.
+
+### Step 25
+
+Implement KPI validation.
+
+### Step 26
+
+Implement KPI approval/versioning.
+
+### Step 27
+
+Register:
+
+```text
+Revenue
+Orders
+AOV
+Stock-out Rate
+```
+
+### Step 28
+
+Implement KPI lineage.
+
+### Step 29
+
+Implement KPI access rules.
+
+### Step 30
+
+Implement audit + telemetry.
+
+### Step 31
+
+Run golden end-to-end test.
+
+---
+
+# 45. Sprint 1 definition of done
+
+I would not move to Sprint 2 until this entire flow works:
+
+```text
+Admin
+ ↓
+Login
+ ↓
+Create Company
+ ↓
+Add User
+ ↓
+Assign Role
+ ↓
+Connect Supabase
+ ↓
+Discover Sales / Inventory / Marketing
+ ↓
+Select Tables
+ ↓
+Profile
+ ↓
+Detect Grain
+ ↓
+Detect Relationships
+ ↓
+Check Join Safety
+ ↓
+Calculate Freshness
+ ↓
+Apply Security
+ ↓
+Upload Company Handbook
+ ↓
+Create KPI Proposal
+ ↓
+Review KPI
+ ↓
+Validate KPI
+ ↓
+Approve KPI
+ ↓
+KPI v1 ACTIVE
+ ↓
+Lineage visible
+ ↓
+Audit visible
+```
+
+Then you have a real Sprint 1.
+
+---
+
+# 46. The golden test
+
+One automated test should reproduce the full process:
+
+```text
+Register admin
+   ↓
+Login
+   ↓
+Create company
+   ↓
+Add membership
+   ↓
+Connect sample/Postgres
+   ↓
+Discover tables
+   ↓
+Select sales/inventory/marketing
+   ↓
+Profile
+   ↓
+Infer grain
+   ↓
+Detect relationships
+   ↓
+Check join safety
+   ↓
+Calculate freshness
+   ↓
+Apply access policy
+   ↓
+Upload reference document
+   ↓
+Propose Revenue
+   ↓
+Review Revenue
+   ↓
+Validate Revenue
+   ↓
+Approve Revenue v1
+   ↓
+Retrieve KPI
+   ↓
+Verify lineage
+   ↓
+Verify audit
+```
+
+Then:
+
+```text
+Company B
+     ↓
+tries to access Company A
+     ↓
+403 / denied
+```
+
+This is much more meaningful than having dozens of disconnected unit tests.
+
+The latest Sprint 1 specification already proposes this kind of golden end-to-end test. 
+
+---
+
+# 47. What Sprint 2 receives
+
+At the end of Sprint 1, Sprint 2 should **not need to ask**:
+
+> What is Revenue?
+
+It should receive:
+
+```json
+{
+  "company_id": "COMP-001",
+  "kpi_id": "revenue",
+  "version": 1,
+  "status": "ACTIVE",
+  "formula": "SUM(sales.revenue)",
+  "time_grain": "day",
+  "dimensions": [
+    "region",
+    "product",
+    "channel"
+  ],
+  "drivers": [
+    "volume",
+    "price",
+    "mix",
+    "inventory",
+    "marketing"
+  ],
+  "materiality": {},
+  "lineage": {},
+  "access_policy": {},
+  "calendar": {},
+  "data_quality": {},
+  "freshness": {}
+}
+```
+
+Then Sprint 2 starts:
+
+```text
+ACTIVE KPI
+    ↓
+Historical KPI series
+    ↓
+Expected behavior
+    ↓
+Materiality
+    ↓
+Monitoring
+```
+
+---
+
+# 48. Most important architectural rule
+
+There are now **three different concepts**, and we should never mix them.
+
+### KPI definition
+
+> What does this number mean?
+
+### KPI monitoring
+
+> Is the number behaving unusually?
+
+### Entity analysis
+
+> Tell me about Product A.
+
+They are different.
+
+```text
+KPI Definition
+     ↓
+KPI Monitoring
+     ↓
+KPI Investigation
+     ↓
+Targeted Entity Analysis
+```
+
+And again:
+
+> **Entity analysis is not entity anomaly detection.**
+
+We only perform deeper entity statistics when the entity becomes relevant through contribution, promotion, or explicit user request.
+
+---
+
+# 49. Final Sprint 1 architecture
+
+```text
+                    BUSINESSINTELLIGENCE.AI
+                              │
+                              ▼
+                      AUTHENTICATION
+                              │
+                              ▼
+                    COMPANY / TENANT
+                              │
+                ┌─────────────┼─────────────┐
+                ▼             ▼             ▼
+              USERS         ROLES       PERMISSIONS
+                │
+                ▼
+          DATA GOVERNANCE
+                │
+       ┌────────┼─────────┐
+       ▼        ▼         ▼
+    Sources   Tables    Documents
+       │        │         │
+       ▼        ▼         ▼
+  Discovery  Profiling   Versioning
+       │        │
+       │    ┌───┼────────────┐
+       │    ▼   ▼            ▼
+       │  Grain Quality   Freshness
+       │    │
+       │ Relationships
+       │    │
+       │ Join Safety
+       │    │
+       └────┼───────────────┐
+            ▼               ▼
+      RECONCILIATION     SECURITY
+            │               │
+            └───────┬───────┘
+                    ▼
+             SEMANTIC CATALOG
+                    │
+                    ▼
+              KPI GOVERNANCE
+                    │
+          ┌─────────┴─────────┐
+          ▼                   ▼
+      KPI Manual         KPI Discovery
+      Registration        Proposal
+          │                   │
+          └─────────┬─────────┘
+                    ▼
+                 REVIEW
+                    ▼
+               VALIDATION
+                    ▼
+              HUMAN APPROVAL
+                    ▼
+              KPI VERSION 1
+                    │
+          ┌─────────┼─────────┐
+          ▼         ▼         ▼
+      Lineage    Access     Audit
+                    │
+                    ▼
+              SPRINT 1 DONE
+                    │
+                    ▼
+                 SPRINT 2
+                    │
+          KPI Behavior / Monitoring
+                    │
+                    ▼
+               SPRINT 3
+                    │
+          Progressive Investigation
+                    │
+                    ▼
+               SPRINT 4+
+          Evidence / RAG / LLM /
+          Confidence / Actions /
+          Feedback / Learning
+```
+
+## Bottom line
+
+**Yes, I would update Sprint 1 to include KPI Governance.**
+
+The cleanest interpretation is:
+
+> **Sprint 1 = establish the company, data, security, documents and governed KPI definitions.**
+
+Then:
+
+> **Sprint 2 = make those approved KPIs intelligent.**
+
+And within the later intelligence layer:
+
+> **KPI-level anomaly detection is broad; entity-level analysis is selective.**
+
+That gives us a stable foundation without accidentally building the expensive “analyze every entity” system you are correctly trying to avoid.
+
+The latest uploaded specification is already a strong foundation for the source/data side; the only major change I recommend is moving **KPI registration, proposal, validation and approval into this Sprint 1**, while keeping actual KPI monitoring and investigation out of it. 
