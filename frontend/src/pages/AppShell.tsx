@@ -16,11 +16,11 @@ export default function AppShell() {
     useAuth()
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-30 border-b border-ink-700 bg-ink-900/95 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-[1600px] items-center gap-6 px-5">
+    <div className="min-h-screen px-3 py-3 sm:px-5 sm:py-5">
+      <header className="sticky top-3 z-30 mx-auto max-w-[1600px] rounded-2xl border border-white/80 bg-white/65 shadow-[0_12px_32px_rgba(52,104,146,0.16),inset_0_1px_0_rgba(255,255,255,0.86)] backdrop-blur-xl sm:top-5">
+        <div className="flex min-h-14 items-center gap-4 px-3 sm:gap-6 sm:px-5">
           <div className="flex items-center gap-2">
-            <span className="grid h-7 w-7 place-items-center rounded bg-accent text-[13px] font-bold text-white">
+            <span className="grid h-8 w-8 place-items-center rounded-xl bg-accent text-[13px] font-bold text-white shadow-[0_6px_14px_rgba(25,120,197,0.28)]">
               BI
             </span>
             <span className="hidden text-sm font-semibold tracking-tight text-slate-100 sm:block">
@@ -28,17 +28,17 @@ export default function AppShell() {
             </span>
           </div>
 
-          <nav className="flex flex-1 items-center gap-1 overflow-x-auto">
+          <nav className="flex flex-1 items-center gap-1 overflow-x-auto rounded-xl border border-white/70 bg-white/35 p-1">
             {TABS.map((tab) => (
               <NavLink
                 key={tab.to}
                 to={tab.to}
                 end={tab.end}
                 className={({ isActive }) =>
-                  `whitespace-nowrap rounded-md px-3 py-1.5 text-sm transition-colors ${
+                  `whitespace-nowrap rounded-lg px-3 py-1.5 text-sm transition-all ${
                     isActive
-                      ? 'bg-ink-800 font-medium text-slate-100'
-                      : 'text-slate-400 hover:bg-ink-850 hover:text-slate-200'
+                      ? 'bg-white/90 font-medium text-slate-100 shadow-sm'
+                      : 'text-slate-400 hover:bg-white/65 hover:text-slate-200'
                   }`
                 }
               >
@@ -47,14 +47,14 @@ export default function AppShell() {
             ))}
 
             {/* Visually separated: this is the governed configuration area. */}
-            <span className="mx-2 h-5 w-px bg-ink-700" />
+            <span className="mx-1 h-5 w-px bg-ink-700/70" />
             <NavLink
               to="/kpi-setup"
               className={({ isActive }) =>
-                `flex items-center gap-1.5 whitespace-nowrap rounded-md border px-3 py-1.5 text-sm transition-colors ${
+                `flex items-center gap-1.5 whitespace-nowrap rounded-lg border px-3 py-1.5 text-sm transition-all ${
                   isActive
-                    ? 'border-accent bg-accent/15 font-medium text-accent-soft'
-                    : 'border-ink-600 text-slate-300 hover:border-accent/50 hover:text-accent-soft'
+                    ? 'border-sky-200 bg-sky-50/90 font-medium text-accent shadow-sm'
+                    : 'border-white/80 bg-white/35 text-slate-300 hover:border-sky-200 hover:bg-white/70 hover:text-accent'
                 }`
               }
             >
@@ -68,7 +68,7 @@ export default function AppShell() {
               <select
                 value={companyId ?? ''}
                 onChange={(event) => selectCompany(event.target.value)}
-                className="rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs text-slate-200"
+                className="rounded-lg border border-white/80 bg-white/55 px-2 py-1 text-xs text-slate-200 shadow-sm"
                 title="Switch company workspace"
               >
                 {memberships.map((m) => (
@@ -97,7 +97,7 @@ export default function AppShell() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-[1600px] px-5 py-6">
+      <main className="app-content-shell mx-auto mt-5 max-w-[1600px] sm:mt-6">
         <Outlet />
       </main>
     </div>

@@ -357,7 +357,10 @@ export interface ValidationReport {
 }
 
 export interface KpiContract {
+  /** The stable business key (e.g. `net_revenue`), not a uuid. */
   kpi_id: string
+  /** The owning definition's uuid — this is what KPI Setup selections store. */
+  kpi_definition_id: string
   kpi_version_id: string
   name: string
   version: number

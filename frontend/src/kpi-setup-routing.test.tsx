@@ -331,9 +331,7 @@ describe('KPI Setup state and routing lifecycle', () => {
     // mounted rather than having been reset or replaced.
     expect(screen.getByText('Company-defined KPIs')).toBeTruthy()
     // And the new KPI is in the governed list immediately.
-    await waitFor(() =>
-      expect(screen.getByText(/Validation & approval — 1 governed KPI/)).toBeTruthy(),
-    )
+    await waitFor(() => expect(screen.getByText(/KPI registry — 0 of 1 live/)).toBeTruthy())
   })
 
   it('importing company definitions stays on the page and preserves selection in the URL', async () => {

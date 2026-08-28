@@ -639,17 +639,17 @@ function DataScope({
           </Alert>
         )}
 
-        {grouped.map(([sourceName, group]) => (
-          <div key={sourceName}>
+        {grouped.map(([sourceName, group], groupIndex) => (
+          <div key={`${sourceName}-${groupIndex}`}>
             <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
               {sourceName}
             </div>
             <div className="space-y-1">
-              {group.map((table) => {
+              {group.map((table, tableIndex) => {
                 const state = draft[table.id] ?? { enabled: false }
                 return (
                   <div
-                    key={table.id}
+                    key={`${sourceName}-${table.id}-${tableIndex}`}
                     className="flex flex-wrap items-center gap-3 rounded-md border border-ink-800 bg-ink-850 px-3 py-2"
                   >
                     <label className="flex flex-1 items-center gap-2.5">

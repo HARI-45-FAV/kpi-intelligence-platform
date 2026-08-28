@@ -3,16 +3,76 @@
 @tailwind utilities;
 
 @layer base {
+  :root {
+    --bg-sky: #dceefa;
+    --bg-sky-deep: #b8d9ee;
+    --glass-bg: rgba(255, 255, 255, 0.7);
+    --glass-bg-strong: rgba(255, 255, 255, 0.88);
+    --glass-border: rgba(255, 255, 255, 0.9);
+    --glass-highlight: rgba(255, 255, 255, 0.78);
+    --surface: #f9fcff;
+    --surface-secondary: #eff7fd;
+    --text-primary: #18314a;
+    --text-secondary: #58728a;
+    --primary-blue: #1978c5;
+    --primary-blue-hover: #1268ae;
+    --success: #168563;
+    --warning: #b77518;
+    --critical: #c24f59;
+    --shadow-soft: 0 12px 26px rgba(50, 103, 145, 0.11), 0 3px 8px rgba(50, 103, 145, 0.06);
+    --shadow-floating: 0 22px 52px rgba(48, 100, 143, 0.18), 0 5px 14px rgba(48, 100, 143, 0.08);
+    --shadow-pebble: 0 7px 14px rgba(47, 100, 141, 0.12), 0 2px 4px rgba(47, 100, 141, 0.06), inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    --shadow-pebble-hover: 0 12px 22px rgba(47, 100, 141, 0.16), 0 4px 8px rgba(47, 100, 141, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.98);
+    --radius-card: 22px;
+    --radius-control: 15px;
+  }
   html {
-    color-scheme: dark;
+    color-scheme: light;
+    min-height: 100%;
   }
   body {
-    @apply bg-ink-950 text-slate-200 antialiased;
+    @apply text-slate-200 antialiased;
+    min-height: 100vh;
+    color: var(--text-primary);
+    background:
+      radial-gradient(ellipse 70% 45% at 6% -8%, rgba(255, 255, 255, 0.92), transparent 68%),
+      radial-gradient(ellipse 55% 35% at 95% 9%, rgba(255, 255, 255, 0.75), transparent 72%),
+      radial-gradient(ellipse 52% 32% at 48% 98%, rgba(191, 221, 241, 0.65), transparent 75%),
+      linear-gradient(145deg, #eaf6fe 0%, #d9ecf9 47%, #c4e0f1 100%);
+    background-attachment: fixed;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'tnum';
+  }
+  body::before,
+  body::after {
+    position: fixed;
+    z-index: -1;
+    display: block;
+    width: 42vw;
+    height: 20vw;
+    content: '';
+    pointer-events: none;
+    border-radius: 999px;
+    filter: blur(44px);
+    opacity: 0.56;
+  }
+  body::before {
+    top: 16vh;
+    left: -11vw;
+    background: rgba(255, 255, 255, 0.85);
+    transform: rotate(-12deg);
+  }
+  body::after {
+    right: -13vw;
+    bottom: 8vh;
+    background: rgba(255, 255, 255, 0.68);
+    transform: rotate(14deg);
+  }
+  button, a, input, select, textarea {
+    -webkit-tap-highlight-color: transparent;
   }
   * {
     scrollbar-width: thin;
-    scrollbar-color: #2b374a transparent;
+    scrollbar-color: #9cbbd1 transparent;
   }
   *::-webkit-scrollbar {
     width: 9px;
@@ -25,37 +85,57 @@
 
 @layer components {
   .panel {
-    @apply rounded-lg border border-ink-700 bg-ink-900;
+    @apply border border-white/80;
+    border-radius: var(--radius-card);
+    background: var(--glass-bg-strong);
+    box-shadow: var(--shadow-soft), inset 0 1px 0 var(--glass-highlight), inset 0 -1px 0 rgba(166, 204, 230, 0.16);
+    backdrop-filter: blur(18px);
   }
   .panel-head {
-    @apply flex items-center justify-between gap-3 border-b border-ink-700 px-4 py-3;
+    @apply flex items-center justify-between gap-3 border-b border-ink-700/75 px-4 py-3;
   }
   .panel-title {
-    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-400;
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500;
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-md px-3 py-1.5
-           text-sm font-medium transition-colors
+    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-medium
+           transition-all duration-200 ease-out
            disabled:cursor-not-allowed disabled:opacity-45;
+    border-radius: var(--radius-control);
+    box-shadow: var(--shadow-pebble);
+  }
+  .btn:not(:disabled):hover {
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-pebble-hover);
+  }
+  .btn:not(:disabled):active {
+    transform: translateY(0);
+    box-shadow: none;
   }
   .btn-primary {
     @apply btn bg-accent text-white hover:bg-accent/85;
+    box-shadow: 0 9px 18px rgba(25, 120, 197, 0.28), 0 3px 6px rgba(25, 120, 197, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.34);
   }
   .btn-ghost {
-    @apply btn border border-ink-600 text-slate-300 hover:border-ink-600/80 hover:bg-ink-800;
+    @apply btn border border-white/90 text-slate-300 hover:border-sky-200 hover:bg-white/80;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.78), rgba(242, 249, 254, 0.52));
   }
   .btn-danger {
-    @apply btn border border-rose-900/70 text-rose-300 hover:bg-rose-950/40;
+    @apply btn border border-rose-200 text-rose-500 hover:bg-rose-50;
+    background: rgba(255, 251, 251, 0.62);
   }
   .btn-xs {
     @apply px-2 py-1 text-xs;
   }
 
   .field {
-    @apply w-full rounded-md border border-ink-600 bg-ink-850 px-3 py-2 text-sm
-           text-slate-100 placeholder:text-slate-600
-           focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/40;
+    @apply w-full border border-white/90 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600
+           focus:border-accent focus:outline-none focus:ring-4 focus:ring-accent/15;
+    border-radius: var(--radius-control);
+    background: rgba(255, 255, 255, 0.64);
+    box-shadow: inset 0 1px 2px rgba(58, 108, 145, 0.06);
+    transition: border-color 180ms ease, box-shadow 180ms ease, background 180ms ease;
   }
   .label {
     @apply mb-1 block text-xs font-medium text-slate-400;
@@ -65,16 +145,18 @@
   }
 
   .chip {
-    @apply inline-flex items-center gap-1 rounded border border-ink-600 bg-ink-850
-           px-1.5 py-0.5 text-[11px] text-slate-300;
+    @apply inline-flex items-center gap-1 rounded-lg border border-white/80 px-1.5 py-0.5 text-[11px] text-slate-300;
+    background: rgba(255, 255, 255, 0.54);
   }
   .mono {
     @apply font-mono text-[12px];
   }
 
   .row-link {
-    @apply w-full cursor-pointer border-b border-ink-800 px-4 py-3 text-left
-           transition-colors last:border-0 hover:bg-ink-850;
+    @apply w-full cursor-pointer border-b border-ink-800/80 px-4 py-3 text-left transition-all duration-200 last:border-0 hover:bg-white/55;
+  }
+  .row-link:hover {
+    transform: translateX(2px);
   }
 
   .table-cell {
@@ -84,4 +166,94 @@
     @apply whitespace-nowrap px-3 py-2 text-left text-[11px] font-semibold
            uppercase tracking-wider text-slate-500;
   }
+  .app-content-shell {
+    position: relative;
+    min-height: calc(100vh - 104px);
+    padding: clamp(1rem, 2vw, 1.75rem);
+    border: 1px solid rgba(255, 255, 255, 0.86);
+    border-radius: 28px;
+    background:
+      linear-gradient(145deg, rgba(255, 255, 255, 0.56), rgba(239, 248, 254, 0.38)),
+      rgba(228, 243, 252, 0.3);
+    box-shadow: 0 30px 65px rgba(40, 92, 132, 0.19), 0 9px 21px rgba(40, 92, 132, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(22px);
+  }
+  .app-content-shell::before {
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    content: '';
+    border-radius: inherit;
+    background: radial-gradient(ellipse 55% 20% at 22% 0%, rgba(255, 255, 255, 0.58), transparent 80%);
+    pointer-events: none;
+  }
+}
+
+/* Light-theme remapping for existing semantic utility classes. It preserves
+   each page's layout and behavior while moving the shared visual language from
+   dark ink to translucent sky surfaces. */
+@layer utilities {
+  /* These important overrides intentionally win over Tailwind's generated
+     utilities. The legacy app used ink values on hundreds of surfaces; keeping
+     their class names avoids changing page structure while ensuring none can
+     revert this light theme to near-black. */
+  .bg-ink-950 { background-color: #eaf5fc !important; }
+  .bg-ink-900 { background-color: rgba(249, 252, 255, 0.9) !important; }
+  .bg-ink-900\/70, .bg-ink-900\/40 { background-color: rgba(249, 252, 255, 0.68) !important; }
+  .bg-ink-850 { background-color: rgba(241, 248, 254, 0.9) !important; }
+  .bg-ink-800 { background-color: #dcecf8 !important; }
+  .border-ink-800, .border-b-ink-800, .border-t-ink-800, .border-l-ink-800, .border-r-ink-800 { border-color: #d3e5f2 !important; }
+  .border-ink-700, .border-b-ink-700, .border-t-ink-700, .border-l-ink-700, .border-r-ink-700 { border-color: #c4dcee !important; }
+  .border-ink-600 { border-color: #a8c7dc !important; }
+  .text-slate-100 { color: #18314a; }
+  .text-slate-200 { color: #26445f; }
+  .text-slate-300 { color: #385875; }
+  .text-slate-400 { color: #58728a; }
+  .text-slate-500 { color: #6f879b; }
+  .text-slate-600 { color: #8297a9; }
+  .bg-slate-900 { background-color: rgba(239, 247, 253, 0.82); }
+  .border-slate-700 { border-color: #c7deef; }
+  .bg-black\/60, .bg-black\/70 { background-color: rgba(45, 88, 121, 0.2); }
+  .bg-emerald-950\/50 { background-color: rgba(218, 244, 234, 0.82); }
+  .border-emerald-800 { border-color: #99d8bd; }
+  .text-emerald-300 { color: #168563; }
+  .bg-amber-950\/50 { background-color: rgba(255, 243, 215, 0.84); }
+  .border-amber-800 { border-color: #edc779; }
+  .text-amber-300 { color: #a76608; }
+  .bg-rose-950\/50 { background-color: rgba(255, 235, 237, 0.86); }
+  .border-rose-900 { border-color: #efafb5; }
+  .text-rose-300 { color: #bf4b56; }
+  .bg-sky-950\/50 { background-color: rgba(220, 241, 253, 0.88); }
+  .border-sky-800 { border-color: #9dcee9; }
+  .text-sky-300 { color: #1978c5; }
+}
+
+@media (hover: hover) {
+  button:not(:disabled), a, [role='button'], .cursor-pointer {
+    transition-property: transform, box-shadow, background-color, border-color, color, opacity;
+    transition-duration: 180ms;
+    transition-timing-function: ease-out;
+  }
+  button:not(.btn):not(:disabled):hover,
+  a[href]:hover {
+    transform: translateY(-1px);
+  }
+  button:not(.btn):not(:disabled) {
+    border-radius: 13px;
+    box-shadow: var(--shadow-pebble);
+  }
+  button:not(.btn):not(:disabled):hover {
+    box-shadow: var(--shadow-pebble-hover);
+  }
+  .panel > .grid > .cursor-pointer:hover,
+  .panel .cursor-pointer.rounded-md:hover {
+    transform: translateY(-2px);
+    box-shadow: var(--shadow-soft);
+  }
+}
+
+@media (max-width: 640px) {
+  body::before, body::after { width: 78vw; height: 44vw; }
+  .panel { border-radius: 15px; }
+  .app-content-shell { min-height: calc(100vh - 82px); padding: 0.85rem; border-radius: 20px; }
 }

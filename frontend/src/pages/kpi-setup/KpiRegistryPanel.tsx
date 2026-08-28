@@ -16,7 +16,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useSearchParams } from 'react-router-dom'
-import { api } from '../../api/client'
+import { api, describeError } from '../../api/client'
 import type {
   CompanyDefinitionImportResult,
   CompanyDefinitionsResponse,
@@ -139,6 +139,7 @@ export default function KpiRegistryPanel() {
       />
 
       <ValidationPanel
+        base={base}
         registry={registry.data ?? []}
         loading={registry.loading && !registry.data}
         error={registry.error}
@@ -146,6 +147,7 @@ export default function KpiRegistryPanel() {
         onOpenKpi={setOpenKpi}
         onRegister={() => setRegisterOpen(true)}
         canRegister={scopedTables.length > 0}
+        onChanged={reloadAll}
         selectedKpis={selectedKpis}
         onToggleKpi={(kpiId) =>
           setSelectedKpis((current) => {
@@ -466,7 +468,33 @@ function CompanyDefinitionRow({
 
 /* ------------------------------------------------------- 2. validation status */
 
+/* --------------------------------------------------- 2. validation & approval */
+
+/**
+ * Take a KPI live in one step.
+ *
+ * The governed path is validate → approve → activate, and approval is refused
+ * until validation passes. Exposing that as three separate clicks in a drawer
+ * footer meant nobody could find it, so this runs the whole path and reports the
+ * one thing that matters: is it live, and if not, why not.
+ */
+async function activateVersion(base: string, versionId: string): Promise<string | null> {
+  const report = await api.post<ValidationReport>(
+    `${base}/kpi-versions/${versionId}/validate`,
+    {},
+    { admin: true },
+  )
+  if (!report.ready_for_approval) {
+    const blocking = report.checks?.filter((check) => check.status === 'FAIL') ?? []
+    const detail = blocking.map((check) => check.message || check.label).filter(Boolean).join('; ')
+    return detail || report.summary || 'This KPI did not pass its data checks.'
+  }
+  await api.post(`${base}/kpi-versions/${versionId}/approve`, {}, { admin: true })
+  return null
+}
+
 function ValidationPanel({
+  base,
   registry,
   loading,
   error,
@@ -478,7 +506,9 @@ function ValidationPanel({
   onToggleKpi,
   onSaveSelection,
   selectionSaved,
+  onChanged,
 }: {
+  base: string
   registry: KpiDefinition[]
   loading: boolean
   error: string | null
@@ -490,18 +520,66 @@ function ValidationPanel({
   onToggleKpi: (id: string) => void
   onSaveSelection: () => void
   selectionSaved: boolean
+  onChanged: () => Promise<void>
 }) {
+  const activation = useAction()
+  const [busyKpi, setBusyKpi] = useState<string | null>(null)
+  const [blocked, setBlocked] = useState<Record<string, string>>({})
+
+  const liveVersion = (kpi: KpiDefinition) =>
+    kpi.versions.find((v) => v.status === 'ACTIVE') ?? kpi.versions[kpi.versions.length - 1]
+
+  const pending = registry.filter((kpi) => liveVersion(kpi)?.status !== 'ACTIVE')
+  const liveCount = registry.length - pending.length
+
+  const takeLive = async (kpis: KpiDefinition[]) => {
+    const failures: Record<string, string> = {}
+    await activation.run(async () => {
+      for (const kpi of kpis) {
+        const version = liveVersion(kpi)
+        if (!version || version.status === 'ACTIVE') continue
+        setBusyKpi(kpi.id)
+        try {
+          const reason = await activateVersion(base, version.id)
+          if (reason) failures[kpi.id] = reason
+        } catch (err) {
+          failures[kpi.id] = describeError(err)
+        }
+      }
+      setBusyKpi(null)
+      const live = kpis.length - Object.keys(failures).length
+      if (Object.keys(failures).length) {
+        throw new Error(
+          `${live} of ${kpis.length} went live. ${Object.keys(failures).length} could not be activated — see the notes below.`,
+        )
+      }
+      return live
+    }, kpis.length === 1 ? 'Now live on the dashboard.' : `${kpis.length} KPIs are now live on the dashboard.`)
+    setBlocked(failures)
+    setBusyKpi(null)
+    await onChanged()
+  }
+
   return (
     <Panel
-      title={`Validation & approval — ${registry.length} governed KPI${registry.length === 1 ? '' : 's'}`}
+      title={`KPI registry — ${liveCount} of ${registry.length} live`}
       actions={
         <div className="flex items-center gap-2">
+          {pending.length > 0 && (
+            <button
+              className="btn-primary btn-xs"
+              onClick={() => takeLive(pending)}
+              disabled={activation.pending}
+            >
+              {activation.pending ? 'Activating…' : `Activate ${pending.length}`}
+            </button>
+          )}
           <button
-            className="btn-primary btn-xs"
+            className="btn-ghost btn-xs"
             onClick={onSaveSelection}
             disabled={!registry.length}
           >
-            {selectionSaved ? 'Saved' : 'Save changes'}
+            {selectionSaved ? 'Saved' : 'Save dashboard choice'}
           </button>
           <button
             className="btn-ghost btn-xs"
@@ -509,7 +587,7 @@ function ValidationPanel({
             disabled={!canRegister}
             title={canRegister ? undefined : 'Add a table to the data scope first'}
           >
-            + Define one by hand
+            + Add a KPI
           </button>
         </div>
       }
@@ -517,7 +595,19 @@ function ValidationPanel({
     >
       {selectionSaved && (
         <div className="border-b border-ink-800 px-4 py-2">
-          <Alert tone="success">Dashboard selections updated.</Alert>
+          <Alert tone="success">Dashboard selection updated.</Alert>
+        </div>
+      )}
+      {activation.message && (
+        <div className="border-b border-ink-800 px-4 py-2">
+          <Alert tone="success" onDismiss={activation.reset}>
+            {activation.message}
+          </Alert>
+        </div>
+      )}
+      {activation.error && (
+        <div className="border-b border-ink-800 px-4 py-2">
+          <Alert onDismiss={activation.reset}>{activation.error}</Alert>
         </div>
       )}
       {loading ? (
@@ -530,27 +620,26 @@ function ValidationPanel({
         </div>
       ) : !registry.length ? (
         <EmptyState
-          title="Nothing under governance yet"
+          title="No KPIs yet"
           description={
             definitionCount > 0
-              ? 'Import the company-defined KPIs above. Each one lands in PROPOSED and must pass the nine deterministic checks — including executing against the source — before it can be approved.'
-              : 'A KPI needs a governed contract before it can be monitored. Import the company definitions above, define one by hand, or take an optional suggestion below.'
+              ? 'Import your business KPIs above. Each one is checked against your data before it can go live.'
+              : 'Import your business KPIs above, add one by hand, or take a suggestion below.'
           }
         />
       ) : (
         <div className="grid gap-3 p-4 md:grid-cols-2 xl:grid-cols-3">
           {registry.map((kpi) => {
-            const live =
-              kpi.versions.find((v) => v.status === 'ACTIVE') ??
-              kpi.versions[kpi.versions.length - 1]
-            const fromCompany = live?.proposal_origin === 'COMPANY'
+            const live = liveVersion(kpi)
+            const isLive = live?.status === 'ACTIVE'
             const selected = selectedKpis.includes(kpi.id)
+            const blockedReason = blocked[kpi.id]
             return (
               <div
                 key={kpi.id}
-                className={`rounded-xl border p-3 transition-colors ${
+                className={`flex flex-col rounded-xl border p-3 transition-colors ${
                   selected
-                    ? 'border-accent/60 bg-accent/5 shadow-[0_0_0_1px_rgba(96,165,250,0.2)]'
+                    ? 'border-accent/60 bg-accent/5'
                     : 'border-ink-700 bg-ink-900/70'
                 }`}
               >
@@ -561,49 +650,57 @@ function ValidationPanel({
                     onClick={() => onOpenKpi(kpi.id)}
                   >
                     <span
-                      className={`mt-0.5 grid h-5 w-5 place-items-center rounded-md border text-[10px] ${
+                      className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md border text-[10px] ${
                         selected
                           ? 'border-accent bg-accent text-white'
                           : 'border-ink-600 bg-ink-850 text-slate-500'
                       }`}
+                      title={selected ? 'Shown on the dashboard' : 'Hidden from the dashboard'}
                     >
                       {selected ? '✓' : ''}
                     </span>
                     <div className="min-w-0 flex-1">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="truncate text-sm font-medium text-slate-100">{kpi.name}</span>
-                        <StatusBadge status={kpi.status} />
-                      </div>
-                      <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                        <span>v{kpi.current_version || live?.version || 1}</span>
-                        {fromCompany && <span className="chip">company-defined</span>}
-                        {kpi.versions.length > 1 && <span>{kpi.versions.length} versions</span>}
+                      <div className="truncate text-sm font-medium text-slate-100">{kpi.name}</div>
+                      <div className="mt-1 truncate text-[11px] text-slate-500">
+                        {kpi.short_description || `Version ${live?.version ?? 1}`}
                       </div>
                     </div>
                   </button>
+                  <StatusBadge status={isLive ? 'ACTIVE' : 'DRAFT'} label={isLive ? 'Live' : 'Not live'} />
+                </div>
 
+                {blockedReason && (
+                  <p className="mt-2 rounded-md border border-amber-900/70 bg-amber-950/40 px-2 py-1.5 text-[11px] leading-relaxed text-amber-200">
+                    {blockedReason}
+                  </p>
+                )}
+
+                <div className="mt-3 flex items-center gap-2 border-t border-ink-800 pt-2.5">
+                  {!isLive && (
+                    <button
+                      type="button"
+                      className="btn-primary btn-xs"
+                      disabled={activation.pending}
+                      onClick={() => takeLive([kpi])}
+                    >
+                      {busyKpi === kpi.id ? 'Activating…' : 'Activate'}
+                    </button>
+                  )}
                   <button
                     type="button"
-                    className={`btn-ghost btn-xs ${selected ? 'text-amber-300' : 'text-slate-300'}`}
+                    className="btn-ghost btn-xs"
                     onClick={() => onToggleKpi(kpi.id)}
                   >
-                    {selected ? 'Remove' : 'Add'}
+                    {selected ? 'Hide from dashboard' : 'Show on dashboard'}
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-ghost btn-xs ml-auto text-slate-400"
+                    onClick={() => onOpenKpi(kpi.id)}
+                  >
+                    Details
                   </button>
                 </div>
-
-                <div className="mt-3 rounded-lg border border-ink-700 bg-ink-950/40 p-2.5">
-                  <div className="text-[11px] uppercase tracking-wider text-slate-500">Formula</div>
-                  <div className="mt-1 break-words font-mono text-[11px] text-slate-300">
-                    {live?.formula_expression ?? '—'}
-                  </div>
-                </div>
-
-                {live?.last_validation_status && (
-                  <div className="mt-3 flex items-center justify-between gap-2 text-[11px] text-slate-500">
-                    <span>Validation</span>
-                    <StatusBadge status={live.last_validation_status} />
-                  </div>
-                )}
               </div>
             )
           })}
@@ -851,6 +948,15 @@ function KpiDrawer({
   const contract = detail.data?.version
   const validation = detail.data?.validation
   const readyToApprove = validation?.ready_for_approval ?? false
+  // Older registered contracts can legitimately predate optional governance
+  // fields. Treat absent collections as empty so opening one never blanks the
+  // whole KPI workspace while its data is being upgraded.
+  const dimensions = contract?.dimensions ?? []
+  const drivers = contract?.drivers ?? []
+  const accessPolicies = contract?.access_policies ?? []
+  const lineage = contract?.lineage ?? []
+  const validationChecks = validation?.checks ?? []
+  const versions = detail.data?.definition.versions ?? []
 
   const refresh = async () => {
     await detail.reload()
@@ -1000,13 +1106,13 @@ function KpiDrawer({
               </DefinitionRow>
               <DefinitionRow term="Dimensions">
                 <div className="flex flex-wrap gap-1">
-                  {contract.dimensions.map((d) => (
-                    <span key={d.dimension_name} className="chip" title={d.monitoring_note}>
+                  {dimensions.map((d, index) => (
+                    <span key={`${d.dimension_name}-${d.source_column}-${index}`} className="chip" title={d.monitoring_note}>
                       {d.dimension_name}
                     </span>
                   ))}
                 </div>
-                {contract.dimensions.length > 0 && (
+                {dimensions.length > 0 && (
                   <p className="mt-1.5 text-[11px] leading-snug text-slate-600">
                     A declared dimension authorises a breakdown. It does not schedule per-entity
                     monitoring.
@@ -1015,10 +1121,10 @@ function KpiDrawer({
               </DefinitionRow>
               <DefinitionRow term="Drivers">
                 <div className="flex flex-wrap gap-1">
-                  {contract.drivers.length ? (
-                    contract.drivers.map((d) => (
+                  {drivers.length ? (
+                    drivers.map((d, index) => (
                       <span
-                        key={d.driver_name}
+                        key={`${d.driver_name}-${d.source_column ?? ''}-${index}`}
                         className="chip"
                         title={d.controllable ? 'Controllable lever' : 'Observed factor'}
                       >
@@ -1045,9 +1151,9 @@ function KpiDrawer({
               )}
               <DefinitionRow term="Access">
                 <div className="flex flex-wrap gap-1">
-                  {contract.access_policies.map((policy) => (
+                  {accessPolicies.map((policy, index) => (
                     <span
-                      key={policy.role_key}
+                      key={`${policy.role_key}-${index}`}
                       className={`chip ${policy.allowed ? '' : 'text-slate-600 line-through'}`}
                     >
                       {policy.role_key}
@@ -1059,8 +1165,8 @@ function KpiDrawer({
               </DefinitionRow>
               <DefinitionRow term="Lineage">
                 <ul className="space-y-0.5">
-                  {contract.lineage.map((item, index) => (
-                    <li key={index} className="text-xs">
+                  {lineage.map((item, index) => (
+                    <li key={`${item.role}-${item.table ?? ''}-${item.column ?? ''}-${index}`} className="text-xs">
                       <span className="inline-block w-24 text-slate-500">{item.role}</span>
                       <span className="mono text-slate-300">
                         {item.table}
@@ -1078,7 +1184,7 @@ function KpiDrawer({
 
           <section>
             <h3 className="panel-title mb-2">Validation</h3>
-            {!validation || !validation.checks.length ? (
+            {!validation || !validationChecks.length ? (
               <Alert tone="info">
                 Not yet validated. Nine governance checks must run — including executing the KPI
                 against the source — before this version can be approved.
@@ -1096,8 +1202,8 @@ function KpiDrawer({
                 </div>
 
                 <ul className="divide-y divide-ink-800 rounded-md border border-ink-800">
-                  {validation.checks.map((check) => (
-                    <li key={check.test_type} className="flex items-start gap-3 px-3 py-2">
+                  {validationChecks.map((check, index) => (
+                    <li key={`${check.test_type}-${index}`} className="flex items-start gap-3 px-3 py-2">
                       <span
                         className={
                           check.status === 'PASS'
@@ -1157,7 +1263,7 @@ function KpiDrawer({
           <section>
             <h3 className="panel-title mb-2">Version history</h3>
             <ul className="divide-y divide-ink-800 rounded-md border border-ink-800">
-              {detail.data!.definition.versions.map((version) => (
+              {versions.map((version) => (
                 <li
                   key={version.id}
                   className={`flex flex-wrap items-center gap-3 px-3 py-2 ${

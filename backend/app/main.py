@@ -16,6 +16,7 @@ from app.core.database import Base, SessionLocal, engine
 from app.core.errors import PlatformError
 from app.core.telemetry import TelemetryMiddleware
 from app.seed.bootstrap import sync_reference_data
+from app.services.credential_migration import migrate_legacy_source_credentials
 
 logger = logging.getLogger("bi.ai")
 
@@ -48,11 +49,13 @@ async def lifespan(app: FastAPI):
     session = SessionLocal()
     try:
         result = sync_reference_data(session)
+        migrated_credentials = migrate_legacy_source_credentials(session)
         session.commit()
         logger.info(
-            "Reference data ready: %s roles, %s permissions.",
+            "Reference data ready: %s roles, %s permissions; %s legacy source credential(s) migrated.",
             result["roles_total"],
             result["permissions_total"],
+            migrated_credentials,
         )
     except Exception:
         session.rollback()

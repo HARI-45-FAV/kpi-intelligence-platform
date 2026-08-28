@@ -102,6 +102,26 @@ def decrypt_secret(ciphertext: str) -> str:
         raise ValueError("stored credential could not be decrypted") from exc
 
 
+def migrate_legacy_secret(ciphertext: str) -> str | None:
+    """Re-encrypt a credential created with the original development key.
+
+    Early local workspaces used the documented default before a project-specific
+    ``SECRET_KEY`` was configured.  This helper permits a one-time, explicit
+    migration of those recoverable records; it never guesses arbitrary keys.
+    """
+    legacy_key = "dev-only-secret-change-me-in-production-0123456789abcdef"
+    if settings.secret_key == legacy_key:
+        return None
+    legacy_fernet = Fernet(
+        base64.urlsafe_b64encode(hashlib.sha256(legacy_key.encode("utf-8")).digest())
+    )
+    try:
+        plaintext = legacy_fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+    except InvalidToken:
+        return None
+    return encrypt_secret(plaintext)
+
+
 def redact(value: str | None, keep: int = 2) -> str:
     """Render a secret safe for logs and API responses."""
     if not value:

@@ -162,7 +162,13 @@ DESCRIPTORS_BY_TYPE = {d.source_type: d for d in CONNECTOR_CATALOG}
 def _password_of(source: DataSource) -> str | None:
     if not source.encrypted_credentials:
         return None
-    return decrypt_secret(source.encrypted_credentials)
+    try:
+        return decrypt_secret(source.encrypted_credentials)
+    except ValueError as exc:
+        raise ValidationFailure(
+            "The saved credentials for this data source can no longer be read. "
+            "Reconnect the source to continue."
+        ) from exc
 
 
 def _build_supabase(source: DataSource) -> DataSourceConnector:
@@ -175,9 +181,16 @@ def _build_supabase(source: DataSource) -> DataSourceConnector:
         raise ValidationFailure("This Supabase source has no project URL stored.")
     if not source.encrypted_credentials:
         raise ValidationFailure("This Supabase source has no secret key stored.")
+    try:
+        secret_key = decrypt_secret(source.encrypted_credentials)
+    except ValueError as exc:
+        raise ValidationFailure(
+            "The saved credentials for this data source can no longer be read. "
+            "Reconnect the source to continue."
+        ) from exc
     return SupabaseRestConnector(
         url=url,
-        secret_key=decrypt_secret(source.encrypted_credentials),
+        secret_key=secret_key,
         schema=source.schema_name or "public",
     )
 

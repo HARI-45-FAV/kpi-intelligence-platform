@@ -50,17 +50,17 @@ export default function KpiSetup() {
         <LockButton />
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto rounded-md border border-ink-700 bg-ink-850 p-1">
+      <nav className="flex gap-1 overflow-x-auto rounded-2xl border border-white/80 bg-white/48 p-1.5 shadow-[var(--shadow-soft)] backdrop-blur-xl">
         {SUB_TABS.map((tab) => (
           <NavLink
             key={tab.to}
             to={tab.to}
             end={tab.end}
             className={({ isActive }) =>
-              `whitespace-nowrap rounded px-3 py-1.5 text-sm transition-colors ${
+              `whitespace-nowrap rounded-xl px-3 py-1.5 text-sm transition-all ${
                 isActive
-                  ? 'bg-ink-700 font-medium text-slate-100'
-                  : 'text-slate-400 hover:text-slate-200'
+                  ? 'bg-white/90 font-medium text-slate-100 shadow-sm'
+                  : 'text-slate-400 hover:bg-white/55 hover:text-slate-200'
               }`
             }
           >

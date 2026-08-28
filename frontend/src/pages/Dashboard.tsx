@@ -126,11 +126,6 @@ function readSelectedKpis(): string[] {
   }
 }
 
-function hasSavedSelection(): boolean {
-  if (typeof window === 'undefined') return false
-  return window.localStorage.getItem(KPI_SELECTION_KEY) !== null
-}
-
 function isoToday(): string {
   return new Date().toISOString().slice(0, 10)
 }
@@ -141,14 +136,52 @@ function shiftDays(iso: string, days: number): string {
   return date.toISOString().slice(0, 10)
 }
 
+/* ------------------------------------------------------- registry consumption */
+
+/** Versions that are no longer part of the confirmed registry. */
+const RETIRED_STATUSES = new Set(['REJECTED', 'DEPRECATED'])
+
+/**
+ * One card per KPI, never one per version, and only KPIs that are live.
+ *
+ * A KPI reaches the dashboard by being activated in KPI Registration — that is
+ * the whole contract between the two screens. Registered-but-not-yet-activated
+ * KPIs are counted separately so an empty dashboard can explain itself instead of
+ * just looking broken.
+ */
+function liveContracts(contracts: KpiContract[]): KpiContract[] {
+  const best = new Map<string, KpiContract>()
+  for (const contract of contracts) {
+    if (contract.status !== 'ACTIVE') continue
+    const current = best.get(contract.kpi_definition_id)
+    if (!current || contract.version > current.version) {
+      best.set(contract.kpi_definition_id, contract)
+    }
+  }
+  return [...best.values()].sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/** Registered but not live yet — the reason a dashboard can look empty. */
+function awaitingActivation(contracts: KpiContract[]): number {
+  const ids = new Set<string>()
+  for (const contract of contracts) {
+    if (contract.status === 'ACTIVE' || RETIRED_STATUSES.has(contract.status)) continue
+    ids.add(contract.kpi_definition_id)
+  }
+  return ids.size
+}
+
 /* ------------------------------------------------------------------ dashboard */
 
 export default function Dashboard() {
   const { companyId, membership } = useAuth()
 
+  // Every version, not just ACTIVE ones. A KPI is "confirmed" here once it is in
+  // the registry and not rejected or deprecated — requiring full activation would
+  // blank the dashboard for a registry that is still walking the approval flow.
   const kpis = useResource<{ contracts: KpiContract[]; count: number }>(
     () =>
-      api.get(`/companies/${companyId}/kpi-contracts`, { query: { active_only: true } }),
+      api.get(`/companies/${companyId}/kpi-contracts`, { query: { active_only: false } }),
     [companyId],
   )
 
@@ -163,7 +196,11 @@ export default function Dashboard() {
   const [draftEnd, setDraftEnd] = useState(isoToday)
   const [openStage, setOpenStage] = useState<KpiContract | null>(null)
 
-  const contracts = kpis.data?.contracts ?? []
+  const contracts = useMemo(() => liveContracts(kpis.data?.contracts ?? []), [kpis.data])
+  const notLiveCount = useMemo(
+    () => awaitingActivation(kpis.data?.contracts ?? []),
+    [kpis.data],
+  )
   const [selectionVersion, setSelectionVersion] = useState(0)
 
   useEffect(() => {
@@ -177,11 +214,27 @@ export default function Dashboard() {
   }, [])
 
   const selectedKpis = useMemo(() => readSelectedKpis(), [selectionVersion])
-  const savedSelectionApplied = useMemo(() => hasSavedSelection(), [selectionVersion])
-  const visibleContracts = useMemo(() => {
-    if (!savedSelectionApplied) return contracts
-    return contracts.filter((contract) => selectedKpis.includes(contract.kpi_id))
-  }, [contracts, savedSelectionApplied, selectedKpis])
+
+  // KPI Setup stores definition uuids; a contract carries both that uuid and the
+  // business key, so accept either. Anything else is a stale selection.
+  const matchesSelection = useCallback(
+    (contract: KpiContract) =>
+      selectedKpis.includes(contract.kpi_definition_id) || selectedKpis.includes(contract.kpi_id),
+    [selectedKpis],
+  )
+
+  // A selection that matches nothing in the registry is stale (a different
+  // workspace, deleted KPIs, an older id scheme). Showing every KPI is the honest
+  // fallback — an empty dashboard next to a "Saved (4)" badge is a contradiction.
+  const selectionUsable = useMemo(
+    () => selectedKpis.length > 0 && contracts.some(matchesSelection),
+    [contracts, matchesSelection, selectedKpis],
+  )
+
+  const visibleContracts = useMemo(
+    () => (selectionUsable ? contracts.filter(matchesSelection) : contracts),
+    [contracts, matchesSelection, selectionUsable],
+  )
 
   const agentRun = useCallback(() => {
     setRunning(true)
@@ -218,19 +271,27 @@ export default function Dashboard() {
             {membership?.company_name ?? 'Overall Dashboard'}
           </h1>
           <p className="mt-0.5 text-sm text-slate-500">
-            {visibleContracts.length} confirmed KPI{visibleContracts.length === 1 ? '' : 's'} · read from the
-            governed registry
+            {visibleContracts.length} live KPI{visibleContracts.length === 1 ? '' : 's'}
+            {notLiveCount > 0 && ` · ${notLiveCount} not live yet`}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {notLiveCount > 0 && (
+            <Link
+              to="/kpi-setup/kpis"
+            className="inline-flex items-center rounded-full border border-sky-200 bg-white/65 px-2.5 py-1 text-[11px] font-medium text-sky-700 shadow-sm transition-all hover:bg-white"
+            >
+              Activate {notLiveCount}
+            </Link>
+          )}
           <span
             className={`inline-flex items-center rounded-full border px-2.5 py-1 text-[11px] font-medium ${
-              savedSelectionApplied
-                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
-                : 'border-slate-700 bg-slate-900 text-slate-300'
+              selectionUsable
+                ? 'border-emerald-200 bg-emerald-50/80 text-emerald-700'
+                : 'border-slate-200 bg-white/65 text-slate-500'
             }`}
           >
-            {savedSelectionApplied ? `Saved (${selectedKpis.length})` : 'Using all KPIs'}
+            {selectionUsable ? `Showing ${visibleContracts.length} chosen` : 'Showing all'}
           </span>
         </div>
       </div>
@@ -244,7 +305,7 @@ export default function Dashboard() {
               Date
               <input
                 type="date"
-                className="rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs text-slate-100"
+                className="field w-auto px-2 py-1 text-xs"
                 value={date}
                 onChange={(event) => setDate(event.target.value)}
               />
@@ -262,11 +323,19 @@ export default function Dashboard() {
       >
         {visibleContracts.length === 0 ? (
           <EmptyState
-            title="No KPI cards selected"
-            description="Use KPI Registration to include the KPIs you want on the dashboard, then click Save changes."
+            title={
+              notLiveCount > 0
+                ? `${notLiveCount} KPI${notLiveCount === 1 ? ' is' : 's are'} registered but not live yet`
+                : 'No KPIs yet'
+            }
+            description={
+              notLiveCount > 0
+                ? 'Open KPI Registration and click Activate. Live KPIs appear here automatically.'
+                : 'Register the KPIs you want to track in KPI Registration. They appear here once live.'
+            }
             action={
               <Link to="/kpi-setup/kpis" className="btn-primary btn-xs">
-                Open KPI Registration
+                {notLiveCount > 0 ? 'Activate KPIs' : 'Open KPI Registration'}
               </Link>
             }
           />
@@ -285,7 +354,7 @@ export default function Dashboard() {
               <span className="chip">placeholder values</span>
             </div>
             {/* One reusable card, mapped over the registry. */}
-            <div className="grid gap-px bg-ink-800 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+            <div className="grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
               {visibleContracts.map((contract) => (
                 <KpiResultCard
                   key={contract.kpi_version_id}
@@ -313,8 +382,8 @@ export default function Dashboard() {
                 }}
                 className={`rounded px-2.5 py-1 text-xs transition-colors ${
                   !custom && periodDays === days
-                    ? 'bg-accent text-white'
-                    : 'border border-ink-600 text-slate-400 hover:text-slate-200'
+                    ? 'bg-accent text-white shadow-sm'
+                    : 'border border-white/90 bg-white/55 text-slate-400 hover:bg-white hover:text-slate-200'
                 }`}
               >
                 {label}
@@ -324,8 +393,8 @@ export default function Dashboard() {
               onClick={() => setCustom({ start: draftStart, end: draftEnd })}
               className={`rounded px-2.5 py-1 text-xs transition-colors ${
                 custom
-                  ? 'bg-accent text-white'
-                  : 'border border-ink-600 text-slate-400 hover:text-slate-200'
+                  ? 'bg-accent text-white shadow-sm'
+                  : 'border border-white/90 bg-white/55 text-slate-400 hover:bg-white hover:text-slate-200'
               }`}
             >
               Custom
@@ -340,7 +409,7 @@ export default function Dashboard() {
               <span className="label">Start date</span>
               <input
                 type="date"
-                className="rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs text-slate-100"
+                className="field w-auto px-2 py-1 text-xs"
                 value={draftStart}
                 onChange={(event) => setDraftStart(event.target.value)}
               />
@@ -349,7 +418,7 @@ export default function Dashboard() {
               <span className="label">End date</span>
               <input
                 type="date"
-                className="rounded-md border border-ink-600 bg-ink-850 px-2 py-1 text-xs text-slate-100"
+                className="field w-auto px-2 py-1 text-xs"
                 value={draftEnd}
                 onChange={(event) => setDraftEnd(event.target.value)}
               />
@@ -374,7 +443,7 @@ export default function Dashboard() {
         {visibleContracts.length === 0 ? (
           <EmptyState title="No confirmed KPIs to summarise" />
         ) : (
-          <div className="grid gap-px bg-ink-800 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
+          <div className="grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
             {visibleContracts.map((contract) => (
               <StageCard
                 key={contract.kpi_version_id}
@@ -429,7 +498,7 @@ function KpiResultCard({
   return (
     <button
       onClick={onClick}
-      className="bg-ink-900 p-4 text-left transition-colors hover:bg-ink-850"
+      className="rounded-[22px] border border-white/95 bg-white/68 p-4 text-left shadow-[0_11px_22px_rgba(50,103,145,0.13),0_3px_7px_rgba(50,103,145,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] backdrop-blur-md transition-all hover:-translate-y-1 hover:bg-white/86 hover:shadow-[0_19px_32px_rgba(50,103,145,0.19),0_5px_10px_rgba(50,103,145,0.08)]"
     >
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-medium text-slate-100">{contract.name}</span>
@@ -470,7 +539,7 @@ function StageCard({
   return (
     <button
       onClick={onClick}
-      className="bg-ink-900 p-4 text-left transition-colors hover:bg-ink-850"
+      className="rounded-[22px] border border-white/95 bg-white/68 p-4 text-left shadow-[0_11px_22px_rgba(50,103,145,0.13),0_3px_7px_rgba(50,103,145,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] backdrop-blur-md transition-all hover:-translate-y-1 hover:bg-white/86 hover:shadow-[0_19px_32px_rgba(50,103,145,0.19),0_5px_10px_rgba(50,103,145,0.08)]"
     >
       <div className="text-sm font-medium text-slate-100">{contract.name}</div>
 
