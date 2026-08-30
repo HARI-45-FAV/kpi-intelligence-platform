@@ -35,9 +35,15 @@ import {
   Drawer,
   EmptyState,
   Field,
+  HelpList,
+  HelpSection,
   Modal,
   Panel,
+  SectionHeader,
+  SectionHelp,
+  SettingRow,
   Spinner,
+  StatCard,
   StatusBadge,
 } from '../../components/ui'
 import { useAction, useResource } from '../../components/useResource'
@@ -67,41 +73,50 @@ export default function ComparisonPolicyPanel() {
 
   return (
     <div className="space-y-5">
-      <Panel
-        title="Comparison policy"
+      <SectionHeader
+        title="Comparison Policy"
+        help={<ComparisonHelp />}
         actions={
           <button className="btn-primary btn-xs" onClick={() => setExtractOpen(true)}>
             Extract from a document
           </button>
         }
-        bodyClassName=""
-      >
-        <div className="border-b border-ink-800 p-4">
-          <p className="text-xs leading-relaxed text-slate-500">
-            Detection needs to know which past days are comparable to the day being judged. That
-            answer is company-specific, so it is read from your own documentation rather than
-            assumed: a handbook that says which weekdays, weeks, months or trading events your
-            business compares like-for-like. The engine reads{' '}
-            <strong className="text-slate-300">approved</strong> policies only.
-          </p>
-          <p className="mt-2 text-xs leading-relaxed text-slate-500">
-            {inForce ? (
-              <>
-                In force for every KPI without its own override:{' '}
-                <strong className="text-slate-300">
-                  {inForce.name} v{inForce.version}
-                </strong>
-                .
-              </>
-            ) : (
-              <>
-                No approved policy yet. Detection still answers — it compares recent days and says
-                so — but it claims no weekly, monthly or seasonal pattern until you approve one.
-              </>
-            )}
-          </p>
-        </div>
+      />
 
+      <div className="grid gap-3 sm:grid-cols-3">
+        <StatCard
+          label="Policy in force"
+          value={inForce ? `${inForce.name}` : 'None'}
+          caption={inForce ? `Version ${inForce.version}` : 'Recent days are compared'}
+          tone={inForce ? 'good' : 'muted'}
+        />
+        <StatCard label="Policies defined" value={rows.length} />
+        <StatCard
+          label="Comparison rules active"
+          value={inForce?.enabled_slots.length ?? 0}
+          caption="Ways a like-for-like day is chosen"
+          tone={inForce?.enabled_slots.length ? 'default' : 'muted'}
+        />
+      </div>
+
+      {/* When a policy is in force, its rules are the configuration a reader came
+          for: setting -> current value -> edit, with the calendar mechanics behind
+          Help rather than on the page. */}
+      {inForce && (
+        <Panel
+          title="Rules in force"
+          bodyClassName=""
+          actions={
+            <button className="btn-ghost btn-xs" onClick={() => setOpenConfig(inForce.id)}>
+              Edit
+            </button>
+          }
+        >
+          <SettingsSummary config={inForce} onEdit={() => setOpenConfig(inForce.id)} />
+        </Panel>
+      )}
+
+      <Panel title={inForce ? 'All policies' : 'Policies'} bodyClassName="">
         {configs.loading && !configs.data ? (
           <div className="p-4">
             <Spinner />
@@ -113,7 +128,7 @@ export default function ComparisonPolicyPanel() {
         ) : !rows.length ? (
           <EmptyState
             title="No comparison policy yet"
-            description="Extract one from your KPI handbook, or from any reference document that states which days your business compares like-for-like."
+            description="Extract one from a document that states which days your business compares like-for-like."
             action={
               <button className="btn-primary btn-xs" onClick={() => setExtractOpen(true)}>
                 Extract from a document
@@ -122,28 +137,27 @@ export default function ComparisonPolicyPanel() {
           />
         ) : (
           rows.map((row) => (
-            <button key={row.id} className="row-link" onClick={() => setOpenConfig(row.id)}>
-              <div className="flex flex-wrap items-center gap-3">
-                <span className="min-w-[12rem] font-medium text-slate-100">{row.name}</span>
-                <StatusBadge status={row.status} />
-                <span className="chip">v{row.version}</span>
-                <span className="chip">
-                  {row.scope === 'kpi' ? `KPI: ${row.kpi_key}` : 'All KPIs'}
-                </span>
-                {row.source === 'LLM_EXTRACTION' && (
-                  <span className="chip" title={row.extraction_model ?? undefined}>
-                    extracted
-                  </span>
-                )}
+            <div key={row.id} className="setting-row">
+              <div className="min-w-0 flex-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-[14.5px] font-medium text-slate-100">{row.name}</span>
+                  <span className="chip">v{row.version}</span>
+                  <StatusBadge status={row.status} />
+                  {row.id === configs.data?.company_default_in_force && (
+                    <StatusBadge status="ACTIVE" label="in force" />
+                  )}
+                </div>
+                <div className="mt-1 text-[11px] text-slate-500">
+                  {row.scope === 'kpi' ? `Applies to ${row.kpi_key}` : 'Applies to all KPIs'}
+                  {row.enabled_slots.length
+                    ? ` · ${row.enabled_slots.length} rule(s) enabled`
+                    : ' · no rule enabled yet'}
+                </div>
               </div>
-              <div className="mt-1 text-[11px] text-slate-500">
-                {row.enabled_slots.length
-                  ? `${row.enabled_slots.length} slot(s): ${row.enabled_slots
-                      .map((slot) => titleCase(slot))
-                      .join(' · ')}`
-                  : 'No slot enabled — this policy cannot select a comparable date yet.'}
-              </div>
-            </button>
+              <button className="btn-ghost btn-xs" onClick={() => setOpenConfig(row.id)}>
+                Review
+              </button>
+            </div>
           ))
         )}
       </Panel>
@@ -181,6 +195,137 @@ export default function ComparisonPolicyPanel() {
         />
       )}
     </div>
+  )
+}
+
+/**
+ * The five comparison rules as business settings.
+ *
+ * Same values, same source — every one still arrives from the server, extracted
+ * from the company's own documentation. What changed is that each reads as
+ * "setting, current value, edit" instead of as a definition list of calendar
+ * mechanics.
+ */
+function SettingsSummary({
+  config,
+  onEdit,
+}: {
+  config: BucketConfigSummary
+  onEdit: () => void
+}) {
+  const slots = config.buckets ?? {}
+  const dow = slots.same_day_of_week
+  const wom = slots.same_week_of_month
+  const mos = slots.same_month_or_season
+  const events = slots.business_event
+  const yoy = slots.yoy_period
+
+  const rows: Array<[string, boolean | undefined, React.ReactNode]> = [
+    [
+      'Same day of week',
+      dow?.enabled,
+      dow?.days?.length ? dow.days.map(weekdayName).join(', ') : 'Not stated',
+    ],
+    [
+      'Same week of month',
+      wom?.enabled,
+      wom?.weeks?.length ? wom.weeks.map((w) => `Week ${w}`).join(', ') : 'Not stated',
+    ],
+    [
+      'Same month or season',
+      mos?.enabled,
+      mos?.months?.length ? mos.months.map(monthName).join(', ') : 'Not stated',
+    ],
+    [
+      'Business events',
+      events?.enabled,
+      events?.events?.length
+        ? events.events.map((event) => event.name).join(', ')
+        : 'Not stated',
+    ],
+    [
+      'Year over year',
+      yoy?.enabled,
+      yoy?.tolerance_days != null ? `±${yoy.tolerance_days} day(s)` : 'Not stated',
+    ],
+  ]
+
+  return (
+    <div>
+      {rows.map(([name, enabled, value]) => (
+        <SettingRow
+          key={name}
+          name={name}
+          value={enabled ? value : <span className="text-slate-500">Off</span>}
+          status={
+            <StatusBadge
+              status={enabled ? 'ACTIVE' : 'SKIPPED'}
+              label={enabled ? 'On' : 'Off'}
+            />
+          }
+          action={
+            <button className="btn-ghost btn-xs" onClick={onEdit}>
+              Edit
+            </button>
+          }
+        />
+      ))}
+    </div>
+  )
+}
+
+function ComparisonHelp() {
+  return (
+    <SectionHelp title="About the comparison policy">
+      <HelpSection heading="What this section is">
+        <p>
+          The rule for deciding which past days are a fair comparison for the day being judged.
+          "Sales were low today" only means something once you know what today is being compared
+          against.
+        </p>
+      </HelpSection>
+      <HelpSection heading="What each rule means">
+        <HelpList
+          items={[
+            [
+              'Same day of week',
+              'Compare a Saturday against other Saturdays. Use when trade varies by weekday.',
+            ],
+            [
+              'Same week of month',
+              'Compare the first week of a month against other first weeks — for pay cycles and month-end effects.',
+            ],
+            [
+              'Same month or season',
+              'Compare against the same months, for businesses with a seasonal shape.',
+            ],
+            [
+              'Business events',
+              'Named trading events — a sale, a festival, a promotion — compared against each other rather than against ordinary days.',
+            ],
+            [
+              'Year over year',
+              'Compare against the same point last year, within a tolerance of a few days.',
+            ],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="Where the values come from">
+        <p>
+          They are read from your own documentation, not assumed. Uploading a handbook that states
+          how your business compares periods and extracting from it produces a draft; the draft
+          changes nothing until it is approved.
+        </p>
+      </HelpSection>
+      <HelpSection heading="Why it matters">
+        <p>
+          The wrong comparison produces confident nonsense: a retailer whose weekends are always
+          busier will see every Monday flagged as a collapse if Monday is compared against Sunday.
+          Until a policy is approved, the platform compares recent days and says so — it will not
+          claim a weekly or seasonal pattern it has not been told about.
+        </p>
+      </HelpSection>
+    </SectionHelp>
   )
 }
 

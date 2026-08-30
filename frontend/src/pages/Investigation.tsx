@@ -580,7 +580,7 @@ export default function Investigation() {
   const contractDimensionList = useMemo(
     () =>
       (contract?.dimensions ?? []).map((item) => ({
-        name: item.name ?? item.dimension_name,
+        name: item.dimension_name,
         is_default: item.is_default_breakdown ?? false,
         hierarchy: [],
         approx_cardinality: item.approx_cardinality ?? null,

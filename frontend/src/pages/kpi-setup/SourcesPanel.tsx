@@ -33,10 +33,15 @@ import {
   Drawer,
   EmptyState,
   Field,
+  HelpList,
+  HelpSection,
   Metric,
   Modal,
   Panel,
+  SectionHeader,
+  SectionHelp,
   Spinner,
+  StatCard,
   StatusBadge,
 } from '../../components/ui'
 import { useAction, useResource } from '../../components/useResource'
@@ -81,18 +86,43 @@ export default function SourcesPanel() {
 
   const selectedCount = tables.data?.filter((t) => t.selected).length ?? 0
   const profiledCount = tables.data?.filter((t) => t.profiled_at).length ?? 0
+  const hasTables = (tables.data?.length ?? 0) > 0
 
   return (
     <div className="space-y-5">
-      <Panel
-        title="Data sources"
+      <SectionHeader
+        title="Data Sources"
+        help={<SourcesHelp />}
         actions={
           <button className="btn-primary btn-xs" onClick={() => setAddOpen(true)}>
             + Add source
           </button>
         }
-        bodyClassName=""
-      >
+      />
+
+      {/* The four numbers that answer "what is connected and analysed" before
+          any table is read. Kept above the source list because that is the
+          order the question is asked in. */}
+      {hasTables && (
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <StatCard label="Tables in scope" value={formatCompact(selectedCount)} />
+          <StatCard
+            label="Profiles"
+            value={formatCompact(profiledCount)}
+            tone={profiledCount ? 'default' : 'muted'}
+          />
+          <StatCard
+            label="Relationships"
+            value={formatCompact(relationships.data?.relationships.length ?? 0)}
+          />
+          <StatCard
+            label="Source pairs"
+            value={formatCompact(reconciliation.data?.pairs.length ?? 0)}
+          />
+        </div>
+      )}
+
+      <Panel title="Connected sources" bodyClassName="">
         {sources.loading && !sources.data ? (
           <div className="p-4">
             <Spinner />
@@ -103,8 +133,8 @@ export default function SourcesPanel() {
           </div>
         ) : !sources.data?.length ? (
           <EmptyState
-            title="No data source registered"
-            description="Connect your Supabase project. Credentials are encrypted at rest and never returned by the API."
+            title="No data source connected"
+            description="Connect a source to begin. Credentials are encrypted and never returned by the API."
             action={
               <button className="btn-primary btn-xs" onClick={() => setAddOpen(true)}>
                 + Add source
@@ -112,7 +142,7 @@ export default function SourcesPanel() {
             }
           />
         ) : (
-          <div>
+          <div className="grid gap-3 p-4 lg:grid-cols-2">
             {sources.data.map((source) => (
               <SourceRow key={source.id} source={source} base={base} onChanged={reloadAll} />
             ))}
@@ -120,7 +150,7 @@ export default function SourcesPanel() {
         )}
       </Panel>
 
-      {(tables.data?.length ?? 0) > 0 && (
+      {hasTables && (
         <>
           <DataScope base={base} tables={tables.data ?? []} onSaved={reloadAll} />
 
@@ -143,10 +173,9 @@ export default function SourcesPanel() {
             }
           >
             <div className="space-y-3">
-              <p className="text-xs leading-relaxed text-slate-500">
-                Profiles every table in scope, then detects grain, relationships, join safety,
-                freshness and cross-source compatibility. All of it is aggregate SQL pushed down to
-                the source — no table is streamed into the application.
+              <p className="text-sm text-slate-400">
+                Profiles every table in scope, then checks grain, relationships, join safety and
+                freshness.
               </p>
               {analysis.error && <Alert>{analysis.error}</Alert>}
               {analysis.message && (
@@ -154,20 +183,6 @@ export default function SourcesPanel() {
                   {analysis.message}
                 </Alert>
               )}
-              <div className="grid gap-6 sm:grid-cols-4">
-                <Metric label="In scope" value={formatCompact(selectedCount)} hint="tables" />
-                <Metric label="Profiled" value={formatCompact(profiledCount)} hint="tables" />
-                <Metric
-                  label="Relationships"
-                  value={formatCompact(relationships.data?.relationships.length ?? 0)}
-                  hint="declared + inferred"
-                />
-                <Metric
-                  label="Source pairs"
-                  value={formatCompact(reconciliation.data?.pairs.length ?? 0)}
-                  hint="reconciliation checked"
-                />
-              </div>
             </div>
           </Panel>
 
@@ -190,14 +205,11 @@ export default function SourcesPanel() {
                   .map((table) => (
                     <tr
                       key={table.id}
-                      className="cursor-pointer border-b border-ink-800 last:border-0 hover:bg-ink-850"
+                      className="cursor-pointer border-b border-ink-800 transition-colors last:border-0 hover:bg-white/60"
                       onClick={() => setOpenTable(table.id)}
                     >
                       <td className="table-cell">
                         <span className="font-medium text-slate-200">{table.table_name}</span>
-                        <span className="ml-2 text-[11px] text-slate-600">
-                          {table.data_source_name}
-                        </span>
                       </td>
                       <td className="table-cell tabular-nums text-slate-400">
                         {formatCompact(table.approx_row_count)}
@@ -256,8 +268,70 @@ export default function SourcesPanel() {
   )
 }
 
+function SourcesHelp() {
+  return (
+    <SectionHelp title="About data sources and scope">
+      <HelpSection heading="What this section is">
+        <p>
+          Where your business data lives, and which parts of it the platform is allowed to analyse.
+          Connecting a source does not grant analytical access on its own — you choose that
+          explicitly under Data scope.
+        </p>
+      </HelpSection>
+      <HelpSection heading="The steps">
+        <HelpList
+          items={[
+            ['Add source', 'Register a database. Credentials are encrypted before storage.'],
+            ['Test connection', 'Confirms the platform can reach it and read metadata.'],
+            ['Discover tables', 'Reads the list of tables and columns. Reads no business rows.'],
+            [
+              'Data scope',
+              'Tick only the tables the platform may analyse. Leave sensitive tables unticked.',
+            ],
+            [
+              'Run full analysis',
+              'Profiles the tables in scope and checks how they relate to each other.',
+            ],
+            ['Governance', 'Per-source ownership, sensitivity and access detail.'],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="The numbers at the top">
+        <HelpList
+          items={[
+            ['Tables in scope', 'How many tables the platform may analyse.'],
+            ['Profiles', 'How many of those have been measured.'],
+            ['Relationships', 'Connections found between tables, declared or inferred.'],
+            [
+              'Source pairs',
+              'Table pairs checked for whether their figures can be compared like-for-like.',
+            ],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="Why it matters">
+        <p>
+          Nothing is analysed merely because it exists in your database. Scope is the boundary that
+          keeps personal data out of profiling entirely, rather than reading it and hiding the
+          result afterwards. Setting a primary time column on a time-series table is what makes
+          freshness and period-over-period comparison possible.
+        </p>
+      </HelpSection>
+    </SectionHelp>
+  )
+}
+
 /* ------------------------------------------------------------------ source row */
 
+/**
+ * One source, as a business reader needs it: what it is called, whether it is
+ * connected, and what can be done with it.
+ *
+ * Host, database, schema, connection reference, refresh cadence, credential
+ * indicators, measured grain and quality score are all still governed and still
+ * available — they live on the Governance screen for this source. On a list whose
+ * job is "is this working?", they were noise.
+ */
 function SourceRow({
   source,
   base,
@@ -272,83 +346,62 @@ function SourceRow({
   const discoverAction = useAction()
 
   return (
-    <div className="border-b border-ink-800 px-4 py-3 last:border-0">
+    <div className="surface-card p-4">
       <div className="flex flex-wrap items-center gap-3">
         <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="font-medium text-slate-200">{source.name}</span>
-            <span className="chip">{titleCase(source.source_type)}</span>
+          <div className="truncate text-[15px] font-semibold text-slate-100">{source.name}</div>
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
             <StatusBadge status={source.connection_status} />
             <StatusBadge status={source.health_status} />
-            {source.has_credentials && (
-              <span className="chip" title="Credentials stored encrypted; never returned">
-                🔑 stored
-              </span>
-            )}
-          </div>
-          <div className="mt-1 text-[11px] text-slate-600">
-            {[source.host, source.database_name, source.schema_name, source.connection_reference]
-              .filter(Boolean)
-              .join(' · ') || 'local'}
-            {' · '}
-            {titleCase(source.refresh_frequency)} refresh · {source.discovered_table_count} tables
-            discovered, {source.selected_table_count} in scope
-          </div>
-          {/* The last measured verdict, replayed. Never recomputed by this list. */}
-          <div className="mt-1 text-[11px] text-slate-600">
-            {source.health_checked_at
-              ? `Health measured ${formatRelative(source.health_checked_at)}`
-              : 'Health never measured'}
-            {source.grain ? ` · ${source.grain}` : ''}
-            {source.quality_score !== null && source.quality_score !== undefined
-              ? ` · quality ${source.quality_score}`
-              : ''}
+            <span className="text-[11px] text-slate-500">
+              {source.selected_table_count} of {source.discovered_table_count} tables in scope
+            </span>
           </div>
         </div>
+      </div>
 
-        <div className="flex shrink-0 gap-2">
-          <Link className="btn-ghost btn-xs" to={`/kpi-setup/sources/${source.id}`}>
-            Governance
-          </Link>
-          <button
-            className="btn-ghost btn-xs"
-            disabled={testAction.pending}
-            onClick={async () => {
-              const result = await testAction.run(() =>
-                api.post<ConnectionTest>(
-                  `${base}/data-sources/${source.id}/test`,
-                  {},
-                  { admin: true },
-                ),
-              )
-              if (result) {
-                setTest(result)
-                await onChanged()
-              }
-            }}
-          >
-            {testAction.pending ? 'Testing…' : 'Test connection'}
-          </button>
-          <button
-            className="btn-ghost btn-xs"
-            disabled={discoverAction.pending || source.connection_status !== 'CONNECTED'}
-            title={
-              source.connection_status !== 'CONNECTED'
-                ? 'Test the connection first'
-                : 'Read table and column metadata'
+      <div className="mt-3.5 flex flex-wrap gap-2 border-t border-ink-800 pt-3">
+        <Link className="btn-ghost btn-xs" to={`/kpi-setup/sources/${source.id}`}>
+          Governance
+        </Link>
+        <button
+          className="btn-ghost btn-xs"
+          disabled={testAction.pending}
+          onClick={async () => {
+            const result = await testAction.run(() =>
+              api.post<ConnectionTest>(
+                `${base}/data-sources/${source.id}/test`,
+                {},
+                { admin: true },
+              ),
+            )
+            if (result) {
+              setTest(result)
+              await onChanged()
             }
-            onClick={async () => {
-              const ok = await discoverAction.run(
-                () =>
-                  api.post(`${base}/data-sources/${source.id}/discover`, {}, { admin: true }),
-                'Tables discovered.',
-              )
-              if (ok) await onChanged()
-            }}
-          >
-            {discoverAction.pending ? 'Discovering…' : 'Discover tables'}
-          </button>
-        </div>
+          }}
+        >
+          {testAction.pending ? 'Testing…' : 'Test connection'}
+        </button>
+        <button
+          className="btn-ghost btn-xs"
+          disabled={discoverAction.pending || source.connection_status !== 'CONNECTED'}
+          title={
+            source.connection_status !== 'CONNECTED'
+              ? 'Test the connection first'
+              : 'Read table and column metadata'
+          }
+          onClick={async () => {
+            const ok = await discoverAction.run(
+              () =>
+                api.post(`${base}/data-sources/${source.id}/discover`, {}, { admin: true }),
+              'Tables discovered.',
+            )
+            if (ok) await onChanged()
+          }}
+        >
+          {discoverAction.pending ? 'Discovering…' : 'Discover tables'}
+        </button>
       </div>
 
       {(testAction.error || discoverAction.error) && (
@@ -365,12 +418,13 @@ function SourceRow({
       )}
 
       {test && (
-        <div className="mt-3 rounded-md border border-ink-700 bg-ink-850 p-3">
-          <div className="mb-2 flex items-center justify-between">
+        <div className="mt-3 rounded-xl border border-white/85 bg-white/70 p-3">
+          <div className="mb-2 flex items-center justify-between gap-2">
             <span className="text-xs font-medium text-slate-300">{test.message}</span>
             <button
               onClick={() => setTest(null)}
-              className="text-xs text-slate-600 hover:text-slate-400"
+              data-bare
+              className="text-xs text-slate-600 transition-colors hover:text-slate-400"
             >
               dismiss
             </button>
@@ -378,7 +432,7 @@ function SourceRow({
           <ul className="space-y-1">
             {test.checks.map((check, index) => (
               <li key={index} className="flex items-start gap-2 text-xs">
-                <span className={check.ok ? 'text-emerald-400' : 'text-rose-400'}>
+                <span className={check.ok ? 'text-emerald-600' : 'text-rose-500'}>
                   {check.ok ? '✓' : '✕'}
                 </span>
                 <span className="text-slate-300">{check.check}</span>
@@ -386,12 +440,6 @@ function SourceRow({
               </li>
             ))}
           </ul>
-          {test.duration_ms !== null && test.duration_ms !== undefined && (
-            <div className="mt-2 text-[11px] text-slate-600">
-              Completed in {test.duration_ms} ms
-              {test.server_version ? ` · server ${test.server_version}` : ''}
-            </div>
-          )}
         </div>
       )}
     </div>
@@ -643,10 +691,8 @@ function DataScope({
       }
     >
       <div className="space-y-4">
-        <p className="text-xs leading-relaxed text-slate-500">
-          Only enabled tables enter profiling, the catalog and KPI registration. Nothing is analysed
-          because it merely exists in the database. Set a primary time column on any table that is a
-          time series — it drives freshness and cross-source reconciliation.
+        <p className="text-sm text-slate-400">
+          Only enabled tables are analysed. Set a time column on any table that is a time series.
         </p>
         {save.error && <Alert>{save.error}</Alert>}
         {save.message && (
@@ -657,21 +703,23 @@ function DataScope({
 
         {grouped.map(([sourceName, group], groupIndex) => (
           <div key={`${sourceName}-${groupIndex}`}>
-            <div className="mb-2 text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-              {sourceName}
-            </div>
-            <div className="space-y-1">
+            <div className="section-label mb-2">{sourceName}</div>
+            <div className="grid gap-2 lg:grid-cols-2">
               {group.map((table, tableIndex) => {
                 const state = draft[table.id] ?? { enabled: false }
                 return (
                   <div
                     key={`${sourceName}-${table.id}-${tableIndex}`}
-                    className="flex flex-wrap items-center gap-3 rounded-md border border-ink-800 bg-ink-850 px-3 py-2"
+                    className={`flex flex-wrap items-center gap-3 rounded-xl border px-3 py-2.5 transition-all ${
+                      state.enabled
+                        ? 'border-accent/45 bg-white/80 shadow-[0_4px_12px_rgba(48,100,143,0.09)]'
+                        : 'border-white/85 bg-white/45'
+                    }`}
                   >
-                    <label className="flex flex-1 items-center gap-2.5">
+                    <label className="flex flex-1 cursor-pointer items-center gap-2.5">
                       <input
                         type="checkbox"
-                        className="accent-accent"
+                        className="h-4 w-4 accent-accent"
                         checked={state.enabled}
                         onChange={(e) =>
                           setDraft((prev) => ({
@@ -680,16 +728,16 @@ function DataScope({
                           }))
                         }
                       />
-                      <span className="text-sm text-slate-200">{table.table_name}</span>
-                      <span className="text-[11px] text-slate-600">
-                        {formatCompact(table.approx_row_count)} rows · {table.column_count} cols
+                      <span className="text-sm font-medium text-slate-200">{table.table_name}</span>
+                      <span className="text-[11px] text-slate-500">
+                        {formatCompact(table.approx_row_count)} rows
                       </span>
                     </label>
 
                     {state.enabled && (
                       <input
-                        className="w-44 rounded border border-ink-600 bg-ink-900 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600"
-                        placeholder="time column (optional)"
+                        className="w-40 rounded-lg border border-white/90 bg-white/70 px-2 py-1 text-xs text-slate-200 placeholder:text-slate-600 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/15"
+                        placeholder="time column"
                         value={state.time ?? ''}
                         onChange={(e) =>
                           setDraft((prev) => ({

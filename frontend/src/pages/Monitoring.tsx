@@ -388,7 +388,7 @@ function VerdictCard({
   return (
     <button
       onClick={onClick}
-      className="rounded-[22px] border border-white/95 bg-white/68 p-4 text-left shadow-[0_11px_22px_rgba(50,103,145,0.13),0_3px_7px_rgba(50,103,145,0.06),inset_0_1px_0_rgba(255,255,255,0.95)] backdrop-blur-md transition-all hover:-translate-y-1 hover:bg-white/86 hover:shadow-[0_19px_32px_rgba(50,103,145,0.19),0_5px_10px_rgba(50,103,145,0.08)]"
+      className="surface-card surface-card-lift p-4 text-left"
     >
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-medium text-slate-100">{result.kpi}</span>

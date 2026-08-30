@@ -1,13 +1,12 @@
 /**
  * Who can access what.
  *
- * The backend model is unchanged: 23 named permissions, checked individually,
- * across every role. What this screen changes is what it asks the reader to hold
- * in their head. It leads with the four boundaries a business actually decides
- * about — the workspace, KPI definitions, sensitive data and documents — for the
- * three roles the access model is explained with. Every other role stays
- * available in the role picker and is enforced exactly as before; the full
- * permission matrix is one click away rather than the default view.
+ * The backend model is unchanged: named permissions, checked individually, across
+ * every role. What this screen changes is what it asks the reader to hold in their
+ * head. Each role reads as name / access level / status / Manage, and the full
+ * breakdown — what it reaches, what it does not, and the exact permission list —
+ * opens from Manage. Every role stays selectable in the pickers and is enforced
+ * exactly as before.
  */
 
 import { useMemo, useState } from 'react'
@@ -15,7 +14,19 @@ import { api } from '../../api/client'
 import type { Member, RoleInfo } from '../../api/types'
 import { useAuth } from '../../auth/AuthContext'
 import { formatDateTime } from '../../components/format'
-import { Alert, EmptyState, Field, Modal, Panel, Spinner, StatusBadge } from '../../components/ui'
+import {
+  Alert,
+  EmptyState,
+  Field,
+  HelpList,
+  HelpSection,
+  Modal,
+  Panel,
+  SectionHeader,
+  SectionHelp,
+  Spinner,
+  StatusBadge,
+} from '../../components/ui'
 import { useAction, useResource } from '../../components/useResource'
 
 /**
@@ -53,15 +64,19 @@ export default function SecurityPanel() {
 
   return (
     <div className="space-y-5">
-      <Panel
-        title="Members & roles"
+      <SectionHeader
+        title="Security"
+        help={<SecurityHelp roles={roles.data ?? []} />}
         actions={
           <button className="btn-primary btn-xs" onClick={() => setInviteOpen(true)}>
             + Add member
           </button>
         }
-        bodyClassName=""
-      >
+      />
+
+      <RolesOverview roles={roles.data ?? []} loading={roles.loading && !roles.data} />
+
+      <Panel title="Members" bodyClassName="">
         {members.loading && !members.data ? (
           <div className="p-4">
             <Spinner />
@@ -103,8 +118,6 @@ export default function SecurityPanel() {
         )}
       </Panel>
 
-      <AccessOverview roles={roles.data ?? []} loading={roles.loading && !roles.data} />
-
       {inviteOpen && (
         <InviteModal
           base={base}
@@ -117,6 +130,249 @@ export default function SecurityPanel() {
         />
       )}
     </div>
+  )
+}
+
+/**
+ * Roles as cards: name, how much access it carries, whether it is in use.
+ *
+ * The permission model is untouched — 25 named permissions, still checked
+ * individually, still derived by the backend into `access_areas`. What moved is
+ * the prose: the per-role description and the full permission matrix are in the
+ * Help dialog and the Manage dialog, so this surface answers "who can do roughly
+ * what" at a glance and the exact answer stays one click away.
+ */
+function RolesOverview({ roles, loading }: { roles: RoleInfo[]; loading: boolean }) {
+  const [manageRole, setManageRole] = useState<RoleInfo | null>(null)
+
+  const core = useMemo(() => roles.filter((role) => role.is_core), [roles])
+  const shown = core.length ? core : roles
+  const additional = useMemo(() => roles.filter((role) => !role.is_core), [roles])
+
+  if (loading) {
+    return (
+      <Panel title="Roles">
+        <Spinner />
+      </Panel>
+    )
+  }
+
+  return (
+    <>
+      <Panel
+        title="Roles"
+        actions={
+          additional.length > 0 ? (
+            <span className="text-[11px] text-slate-500">
+              {roles.length} roles · {additional.length} additional
+            </span>
+          ) : undefined
+        }
+      >
+        <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+          {shown.map((role) => (
+            <RoleCard key={role.role_key} role={role} onManage={() => setManageRole(role)} />
+          ))}
+          {additional.map((role) => (
+            <RoleCard key={role.role_key} role={role} onManage={() => setManageRole(role)} />
+          ))}
+        </div>
+      </Panel>
+
+      {manageRole && (
+        <RoleDetailModal role={manageRole} onClose={() => setManageRole(null)} />
+      )}
+    </>
+  )
+}
+
+/** How much of the platform a role reaches, as one business-readable phrase. */
+function accessLevel(role: RoleInfo): { label: string; tone: 'good' | 'warn' | 'muted' } {
+  const areas = role.access_areas ?? {}
+  const granted = ACCESS_AREAS.filter((area) => areas[area.key]).length
+  if (role.is_admin_role || granted === ACCESS_AREAS.length) {
+    return { label: 'Full access', tone: 'good' }
+  }
+  if (granted === 0) return { label: 'View only', tone: 'muted' }
+  return { label: 'Partial access', tone: 'warn' }
+}
+
+function RoleCard({ role, onManage }: { role: RoleInfo; onManage: () => void }) {
+  const level = accessLevel(role)
+  return (
+    <div className="surface-card surface-card-lift flex flex-col p-4">
+      <div className="flex items-start justify-between gap-2">
+        <span className="truncate text-[15px] font-semibold text-slate-100">{role.name}</span>
+        {role.is_admin_role && <span className="chip">Admin</span>}
+      </div>
+      <div className="mt-2 flex flex-wrap items-center gap-2">
+        <StatusBadge
+          status={level.tone === 'good' ? 'GOOD' : level.tone === 'warn' ? 'WARNING' : 'UNKNOWN'}
+          label={level.label}
+        />
+        <StatusBadge status="ACTIVE" label="Active" />
+      </div>
+      <div className="mt-3.5 flex items-center justify-between gap-2 border-t border-ink-800 pt-3">
+        <span className="text-[11px] text-slate-500">{role.permissions.length} permissions</span>
+        <button className="btn-ghost btn-xs" onClick={onManage}>
+          Manage
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** Everything about one role: what it reaches, what it does not, and the exact
+ *  permissions behind that. Read-only, exactly as this screen always was. */
+function RoleDetailModal({ role, onClose }: { role: RoleInfo; onClose: () => void }) {
+  const areas = role.access_areas ?? {}
+  const allowed = ACCESS_AREAS.filter((area) => areas[area.key])
+  const denied = ACCESS_AREAS.filter((area) => !areas[area.key])
+
+  return (
+    <Modal open onClose={onClose} title={role.name} width="max-w-2xl">
+      <div className="space-y-5">
+        <div className="flex flex-wrap items-center gap-2">
+          <StatusBadge status="ACTIVE" label={accessLevel(role).label} />
+          {role.is_admin_role && <span className="chip">Admin role</span>}
+          {!role.is_core && <span className="chip text-slate-500">Additional</span>}
+        </div>
+
+        {role.access_summary && (
+          <p className="text-[13px] leading-relaxed text-slate-300">{role.access_summary}</p>
+        )}
+
+        <HelpSection heading="Can access">
+          {allowed.length ? (
+            <ul className="space-y-1.5">
+              {allowed.map((area) => (
+                <li key={area.key} className="flex gap-2 text-[13px]">
+                  <span className="text-emerald-700">✓</span>
+                  <span>
+                    <span className="font-medium text-slate-100">{area.label}</span>
+                    <span className="text-slate-500"> — {area.note}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-[13px] text-slate-500">
+              No configuration areas. This role reads reported KPI results only.
+            </p>
+          )}
+        </HelpSection>
+
+        <HelpSection heading="Cannot access">
+          {denied.length ? (
+            <ul className="space-y-1.5">
+              {denied.map((area) => (
+                <li key={area.key} className="flex gap-2 text-[13px]">
+                  <span className="text-slate-500">✕</span>
+                  <span>
+                    <span className="font-medium text-slate-300">{area.label}</span>
+                    <span className="text-slate-500"> — {area.note}</span>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-[13px] text-slate-500">Nothing is withheld from this role.</p>
+          )}
+        </HelpSection>
+
+        <HelpSection heading="KPI and data visibility">
+          <p>
+            This role sees every KPI approved for the company. Data visibility can be narrowed
+            further per member: a member may be restricted to certain rows — one region, say — and
+            denied specific columns. Those limits are set on the member, not the role, under
+            Members.
+          </p>
+          <p>
+            {areas.sensitive_data
+              ? 'This role may read columns classified as personal or confidential.'
+              : 'Columns classified as personal or confidential are never read for this role — they are skipped during profiling rather than read and hidden afterwards.'}
+          </p>
+        </HelpSection>
+
+        <HelpSection heading="Investigation and actions">
+          <p>
+            {areas.kpi_definitions
+              ? 'This role can create, edit and approve what a KPI means, and can investigate why a figure moved.'
+              : 'This role can review KPI results and investigate why a figure moved, but cannot change what a KPI means.'}
+          </p>
+        </HelpSection>
+
+        <details className="rounded-xl border border-white/85 bg-white/60 px-3 py-2">
+          <summary className="cursor-pointer text-[12px] font-medium text-slate-400">
+            Exact permissions ({role.permissions.length})
+          </summary>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {role.permissions.map((permission) => (
+              <span
+                key={permission}
+                className={`chip mono ${
+                  permission.startsWith('data.read') ? 'border-amber-300 text-amber-700' : ''
+                }`}
+              >
+                {permission}
+              </span>
+            ))}
+          </div>
+        </details>
+      </div>
+    </Modal>
+  )
+}
+
+function SecurityHelp({ roles }: { roles: RoleInfo[] }) {
+  return (
+    <SectionHelp title="About access and permissions">
+      <HelpSection heading="What this section is">
+        <p>
+          Who belongs to this workspace, what each role may reach, and how an individual member's
+          view can be narrowed further.
+        </p>
+      </HelpSection>
+      <HelpSection heading="What you see on a role card">
+        <HelpList
+          items={[
+            ['Role name', 'The named role members are assigned to.'],
+            [
+              'Access level',
+              'Full access reaches every configuration area; partial reaches some; view only reads reported results.',
+            ],
+            ['Status', 'Whether the role is available for assignment.'],
+            ['Manage', 'The complete breakdown: what it can and cannot reach, and every permission.'],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="The four access areas">
+        <HelpList items={ACCESS_AREAS.map((area) => [area.label, area.note] as [string, string])} />
+      </HelpSection>
+      <HelpSection heading="Per-member limits">
+        <HelpList
+          items={[
+            [
+              'Row scope',
+              'Restricts a member to particular rows — for example a regional manager who sees only their own region.',
+            ],
+            [
+              'Denied columns',
+              'Hides named columns from one member, on top of whatever their role allows.',
+            ],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="Why it matters">
+        <p>
+          Permissions are checked one by one and never inferred from a role's name, so adding a role
+          cannot quietly widen access. Each company is also isolated from every other: the company
+          named in a request is treated as a claim and re-checked against membership on every
+          request. There {roles.length === 1 ? 'is' : 'are'} {roles.length} role
+          {roles.length === 1 ? '' : 's'} configured for this workspace.
+        </p>
+      </HelpSection>
+    </SectionHelp>
   )
 }
 
@@ -153,142 +409,6 @@ function RoleOptions({ roles }: { roles: RoleInfo[] }) {
         </optgroup>
       )}
     </>
-  )
-}
-
-function AccessOverview({ roles, loading }: { roles: RoleInfo[]; loading: boolean }) {
-  const [showAdvanced, setShowAdvanced] = useState(false)
-
-  // Core roles lead. `is_core` comes from the backend permission catalogue, so
-  // this screen follows that single source rather than a duplicate list here.
-  const core = useMemo(() => roles.filter((role) => role.is_core), [roles])
-  const additional = useMemo(() => roles.filter((role) => !role.is_core), [roles])
-  const shown = core.length ? core : roles
-
-  if (loading) {
-    return (
-      <Panel title="Who can access what?">
-        <Spinner />
-      </Panel>
-    )
-  }
-
-  return (
-    <Panel title="Who can access what?" bodyClassName="">
-      <div className="overflow-x-auto">
-        <table className="w-full">
-          <thead>
-            <tr className="border-b border-ink-700">
-              <th className="table-head">Role</th>
-              {ACCESS_AREAS.map((area) => (
-                <th key={area.key} className="table-head" title={area.note}>
-                  {area.label}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {shown.map((role) => (
-              <tr key={role.role_key} className="border-b border-ink-800 last:border-0">
-                <td className="table-cell align-top">
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium text-slate-100">{role.name}</span>
-                    {role.is_admin_role && <span className="chip">admin</span>}
-                  </div>
-                  {role.access_summary && (
-                    <p className="mt-1 max-w-md text-[11px] leading-snug text-slate-500">
-                      {role.access_summary}
-                    </p>
-                  )}
-                </td>
-                {ACCESS_AREAS.map((area) => (
-                  <td key={area.key} className="table-cell align-top">
-                    {role.access_areas?.[area.key] ? (
-                      <span className="text-emerald-400">✓ Yes</span>
-                    ) : (
-                      <span className="text-slate-600">— No</span>
-                    )}
-                  </td>
-                ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-
-      <p className="border-t border-ink-800 px-4 py-3 text-[11px] leading-relaxed text-slate-500">
-        Every company is also isolated from every other: the company in a request URL is treated as
-        a claim by the caller, and membership is re-checked against the database on each request. A
-        member can additionally be limited to specific rows — one region, say — and denied specific
-        columns; set those per member above.
-      </p>
-
-      <div className="border-t border-ink-800">
-        <button
-          className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left text-sm text-slate-300 hover:bg-ink-850"
-          onClick={() => setShowAdvanced((v) => !v)}
-          aria-expanded={showAdvanced}
-        >
-          <span className="text-slate-500">{showAdvanced ? '▾' : '▸'}</span>
-          Advanced permissions
-          <span className="chip">{roles.length} roles</span>
-          {additional.length > 0 && !showAdvanced && (
-            <span className="text-[11px] text-slate-600">
-              including {additional.map((r) => r.name).join(', ')}
-            </span>
-          )}
-        </button>
-
-        {showAdvanced && (
-          <div className="border-t border-ink-800">
-            <p className="px-4 py-3 text-xs leading-relaxed text-slate-500">
-              Permissions are checked individually, never inferred from a role name, so adding a
-              role cannot accidentally widen access. The three{' '}
-              <code className="mono">data.read_*</code> permissions are what make profiling
-              access-aware: a role without them never reads the column at all, rather than reading
-              it and having the result stripped out afterwards.
-            </p>
-            {roles.map((role) => (
-              <div key={role.role_key} className="border-t border-ink-800 px-4 py-3">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium text-slate-100">{role.name}</span>
-                  <span className="chip mono">{role.role_key}</span>
-                  {role.is_admin_role && <StatusBadge status="ACTIVE" label="admin" />}
-                  {!role.is_core && (
-                    <span
-                      className="chip text-slate-500"
-                      title="Fully supported and enforced; not part of the core access model"
-                    >
-                      additional
-                    </span>
-                  )}
-                  <span className="text-[11px] text-slate-600">
-                    {role.permissions.length} permissions
-                  </span>
-                </div>
-                {role.description && (
-                  <p className="mt-1 text-xs text-slate-500">{role.description}</p>
-                )}
-                <div className="mt-2 flex flex-wrap gap-1">
-                  {role.permissions.map((permission) => (
-                    <span
-                      key={permission}
-                      className={`chip mono ${
-                        permission.startsWith('data.read')
-                          ? 'border-amber-900/60 text-amber-300'
-                          : ''
-                      }`}
-                    >
-                      {permission}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    </Panel>
   )
 }
 

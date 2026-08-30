@@ -35,10 +35,14 @@ import {
   Drawer,
   EmptyState,
   Field,
-  Metric,
+  HelpList,
+  HelpSection,
   Modal,
   Panel,
+  SectionHeader,
+  SectionHelp,
   Spinner,
+  StatCard,
   StatusBadge,
 } from '../../components/ui'
 import { useAction, useResource } from '../../components/useResource'
@@ -46,15 +50,31 @@ import { useCopilot, useCopilotScreen } from '../../copilot/CopilotProvider'
 
 const KPI_SELECTION_KEY = 'bi.ai.dashboard-kpis'
 
-function readSelectedKpis(): string[] {
-  if (typeof window === 'undefined') return []
+/**
+ * The stored dashboard selection, or `null` when the administrator has never
+ * made one.
+ *
+ * The distinction is the whole fix for the registry toggle. The stored value is
+ * a list of KPI ids, and an empty list is a legitimate choice — "show none of
+ * them". Collapsing "never chosen" and "chose none" into the same `[]` meant the
+ * panel could not tell them apart, so it defaulted an empty selection back to
+ * *every* KPI: switching the last one off silently switched them all on again,
+ * and the OFF direction of the toggle was unreachable. Returning `null` for a
+ * missing key keeps the default-to-all behaviour for a fresh workspace while
+ * letting a deliberate empty selection stand.
+ *
+ * The stored format is unchanged — still a JSON array of ids — so the Dashboard
+ * reads it exactly as before.
+ */
+function readSelectedKpis(): string[] | null {
+  if (typeof window === 'undefined') return null
   try {
     const raw = window.localStorage.getItem(KPI_SELECTION_KEY)
-    if (!raw) return []
+    if (raw === null) return null
     const parsed = JSON.parse(raw)
-    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : null
   } catch {
-    return []
+    return null
   }
 }
 
@@ -102,20 +122,26 @@ export default function KpiRegistryPanel() {
   )
 
   const [registerOpen, setRegisterOpen] = useState(false)
-  const [selectedKpis, setSelectedKpis] = useState<string[]>(() => readSelectedKpis())
+  // `null` until the administrator has chosen, which is what lets an empty
+  // selection mean "none" instead of being reset to "all" on the next load.
+  const [selectedKpis, setSelectedKpis] = useState<string[] | null>(() => readSelectedKpis())
   const [selectionSaved, setSelectionSaved] = useState(false)
 
   useEffect(() => {
     const valid = registry.data?.map((kpi) => kpi.id) ?? []
     if (!valid.length) return
     setSelectedKpis((current) => {
+      // No stored choice yet: default to showing everything.
+      if (current === null) return valid
+      // Otherwise honour the choice, dropping ids that no longer exist. An
+      // empty result stays empty — that is a deliberate "show none".
       const filtered = current.filter((id) => valid.includes(id))
-      return filtered.length ? filtered : valid
+      return filtered.length === current.length ? current : filtered
     })
   }, [registry.data])
 
   const saveSelection = useCallback(() => {
-    const ordered = [...new Set(selectedKpis)]
+    const ordered = [...new Set(selectedKpis ?? [])]
     writeSelectedKpis(ordered)
     setSelectionSaved(true)
     window.setTimeout(() => setSelectionSaved(false), 1800)
@@ -132,6 +158,8 @@ export default function KpiRegistryPanel() {
 
   return (
     <div className="space-y-5">
+      <SectionHeader title="KPIs" help={<KpisHelp />} />
+
       <CompanyDefinitionsPanel
         base={base}
         state={company}
@@ -149,11 +177,13 @@ export default function KpiRegistryPanel() {
         onRegister={() => setRegisterOpen(true)}
         canRegister={scopedTables.length > 0}
         onChanged={reloadAll}
-        selectedKpis={selectedKpis}
+        selectedKpis={selectedKpis ?? []}
         onToggleKpi={(kpiId) =>
           setSelectedKpis((current) => {
-            const exists = current.includes(kpiId)
-            return exists ? current.filter((id) => id !== kpiId) : [...current, kpiId]
+            const list = current ?? []
+            return list.includes(kpiId)
+              ? list.filter((id) => id !== kpiId)
+              : [...list, kpiId]
           })
         }
         onSaveSelection={saveSelection}
@@ -197,6 +227,50 @@ export default function KpiRegistryPanel() {
 }
 
 /* ------------------------------------------- 1. company-defined KPIs (primary) */
+
+function KpisHelp() {
+  return (
+    <SectionHelp title="About KPIs and contracts">
+      <HelpSection heading="What this section is">
+        <p>
+          The metrics your business has defined, and whether each one can be reliably calculated
+          from the data you connected. A KPI only becomes available to the rest of the platform once
+          it is live.
+        </p>
+      </HelpSection>
+      <HelpSection heading="What you see on each card">
+        <HelpList
+          items={[
+            ['KPI name', 'The metric as your business names it.'],
+            [
+              'Live / Not live',
+              'Whether the platform will calculate and report this metric right now.',
+            ],
+            [
+              'Matches the data',
+              'The definition resolves against real columns in the tables you put in scope.',
+            ],
+            [
+              'Awaiting checks',
+              'Not yet verified against your data. Activate runs the checks and reports what failed.',
+            ],
+            ['Open contract', 'The full definition: calculation, lineage, versions and approvals.'],
+            ['Show / Hide', 'Whether this KPI appears on the main dashboard.'],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="Why it matters">
+        <p>
+          A KPI here is a governed contract, not a saved query. It records what the business means
+          by the metric, which columns produce it, who approved it and when — so a number reported
+          months from now can still be explained and reproduced. The calculation is checked against
+          your data before approval, which is what stops a plausible-looking but wrong figure from
+          reaching a dashboard.
+        </p>
+      </HelpSection>
+    </SectionHelp>
+  )
+}
 
 function CompanyDefinitionsPanel({
   base,
@@ -269,25 +343,19 @@ function CompanyDefinitionsPanel({
         />
       ) : (
         <>
-          <div className="grid gap-4 border-b border-ink-800 p-4 sm:grid-cols-4">
-            <Metric label="Defined by the business" value={formatNumber(counts?.total ?? 0)} />
-            <Metric label="Active" value={formatNumber(counts?.active ?? 0)} />
-            <Metric
-              label="Validated against data"
+          <div className="grid gap-3 border-b border-ink-800 p-4 sm:grid-cols-2 xl:grid-cols-4">
+            <StatCard label="Defined by the business" value={formatNumber(counts?.total ?? 0)} />
+            <StatCard label="Active" value={formatNumber(counts?.active ?? 0)} />
+            <StatCard
+              label="Matches the data"
               value={formatNumber(counts?.resolved ?? 0)}
               tone={counts?.needs_mapping ? 'warn' : 'good'}
             />
-            <Metric
+            <StatCard
               label="Need attention"
               value={formatNumber(counts?.needs_mapping ?? 0)}
-              tone={counts?.needs_mapping ? 'warn' : undefined}
+              tone={counts?.needs_mapping ? 'warn' : 'muted'}
             />
-          </div>
-
-          <div className="border-b border-ink-800 px-4 py-2.5 text-xs text-slate-500">
-            Read from <span className="mono text-slate-300">{table.table}</span>
-            {table.data_source_name && <> via {table.data_source_name}</>} ·{' '}
-            {counts?.registered ?? 0} already in governance
           </div>
 
           {importAll.error && (
@@ -301,9 +369,8 @@ function CompanyDefinitionsPanel({
                 tone={lastResult.counts.imported ? 'success' : 'info'}
                 onDismiss={() => setLastResult(null)}
               >
-                {lastResult.counts.imported} imported as PROPOSED
-                {lastResult.counts.skipped > 0 && `, ${lastResult.counts.skipped} skipped`}. They
-                are listed under Validation below and stay on this page.
+                {lastResult.counts.imported} imported
+                {lastResult.counts.skipped > 0 && `, ${lastResult.counts.skipped} skipped`}.
               </Alert>
             </div>
           )}
@@ -332,9 +399,6 @@ function CompanyDefinitionsPanel({
               <Alert>{importOne.error}</Alert>
             </div>
           )}
-          <p className="border-t border-ink-800 px-4 py-3 text-[11px] leading-relaxed text-slate-600">
-            {data?.note}
-          </p>
         </>
       )}
     </Panel>
@@ -356,24 +420,21 @@ function CompanyDefinitionRow({
   const resolved = definition.resolution_status === 'RESOLVED'
 
   return (
-    <div className="border-b border-ink-800 px-4 py-3 last:border-0">
+    <div className="border-b border-ink-800 px-4 py-3 last:border-0 transition-colors hover:bg-white/45">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="min-w-[10rem] font-medium text-slate-100">{definition.name}</span>
+        <span className="min-w-[10rem] flex-1 font-medium text-slate-100">{definition.name}</span>
         {!definition.is_active && <span className="chip text-slate-500">inactive in source</span>}
         <StatusBadge
           status={resolved ? 'ACTIVE' : 'WARNING'}
           label={resolved ? 'Matches the data' : 'Needs attention'}
         />
-        <span className="mono flex-1 truncate text-xs text-slate-500">
-          {definition.formula_expression ?? definition.source_formula}
-        </span>
 
         {definition.already_registered && definition.registered_kpi_id ? (
           <button
             className="btn-ghost btn-xs"
             onClick={() => onOpen(definition.registered_kpi_id!)}
           >
-            Open contract
+            View contract
           </button>
         ) : (
           <button
@@ -394,16 +455,15 @@ function CompanyDefinitionRow({
         </button>
       </div>
 
-      <p className="mt-1 max-w-3xl text-xs leading-snug text-slate-500">
-        {definition.business_definition}
-      </p>
-
       {definition.issues.length > 0 && !expanded && (
-        <p className="mt-1.5 text-[11px] text-amber-400">{definition.issues[0]}</p>
+        <p className="mt-1.5 text-[11px] text-amber-700">{definition.issues[0]}</p>
       )}
 
       {expanded && (
-        <div className="mt-3 rounded-md border border-ink-700 bg-ink-850 p-3">
+        <div className="mt-3 rounded-xl border border-white/85 bg-white/70 p-3">
+          <p className="mb-2 text-xs leading-snug text-slate-400">
+            {definition.business_definition}
+          </p>
           <dl className="text-xs">
             <DefinitionRow term="Formula in source">
               <span className="mono">{definition.source_formula}</span>
@@ -638,45 +698,46 @@ function ValidationPanel({
             return (
               <div
                 key={kpi.id}
-                className={`flex flex-col rounded-xl border p-3 transition-colors ${
-                  selected
-                    ? 'border-accent/60 bg-accent/5'
-                    : 'border-ink-700 bg-ink-900/70'
+                className={`surface-card surface-card-lift flex flex-col p-4 ${
+                  selected ? 'border-accent/50' : ''
                 }`}
               >
+                {/* Name and contract status only. The formula, lineage, grain and
+                    the nine validation checks are all in the contract drawer. */}
                 <div className="flex items-start justify-between gap-2">
                   <button
                     type="button"
-                    className="flex flex-1 items-start gap-3 text-left"
+                    data-bare
+                    className="min-w-0 flex-1 text-left"
                     onClick={() => onOpenKpi(kpi.id)}
                   >
-                    <span
-                      className={`mt-0.5 grid h-5 w-5 shrink-0 place-items-center rounded-md border text-[10px] ${
-                        selected
-                          ? 'border-accent bg-accent text-white'
-                          : 'border-ink-600 bg-ink-850 text-slate-500'
-                      }`}
-                      title={selected ? 'Shown on the dashboard' : 'Hidden from the dashboard'}
-                    >
-                      {selected ? '✓' : ''}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-sm font-medium text-slate-100">{kpi.name}</div>
-                      <div className="mt-1 truncate text-[11px] text-slate-500">
-                        {kpi.short_description || `Version ${live?.version ?? 1}`}
-                      </div>
+                    <div className="truncate text-[15px] font-semibold text-slate-100">
+                      {kpi.name}
                     </div>
                   </button>
-                  <StatusBadge status={isLive ? 'ACTIVE' : 'DRAFT'} label={isLive ? 'Live' : 'Not live'} />
+                  <StatusBadge
+                    status={isLive ? 'ACTIVE' : 'DRAFT'}
+                    label={isLive ? 'Live' : 'Not live'}
+                  />
+                </div>
+
+                <div className="mt-2 flex flex-wrap items-center gap-2">
+                  <StatusBadge
+                    status={isLive ? 'GOOD' : 'UNDER_REVIEW'}
+                    label={isLive ? 'Matches the data' : 'Awaiting checks'}
+                  />
+                  <span className="text-[11px] text-slate-500">
+                    {selected ? 'On dashboard' : 'Hidden'}
+                  </span>
                 </div>
 
                 {blockedReason && (
-                  <p className="mt-2 rounded-md border border-amber-900/70 bg-amber-950/40 px-2 py-1.5 text-[11px] leading-relaxed text-amber-200">
+                  <p className="mt-2.5 rounded-lg border border-amber-200 bg-amber-50/80 px-2.5 py-1.5 text-[11px] leading-relaxed text-amber-700">
                     {blockedReason}
                   </p>
                 )}
 
-                <div className="mt-3 flex items-center gap-2 border-t border-ink-800 pt-2.5">
+                <div className="mt-3.5 flex flex-wrap items-center gap-2 border-t border-ink-800 pt-3">
                   {!isLive && (
                     <button
                       type="button"
@@ -690,16 +751,20 @@ function ValidationPanel({
                   <button
                     type="button"
                     className="btn-ghost btn-xs"
-                    onClick={() => onToggleKpi(kpi.id)}
+                    onClick={() => onOpenKpi(kpi.id)}
                   >
-                    {selected ? 'Hide from dashboard' : 'Show on dashboard'}
+                    Open contract
                   </button>
                   <button
                     type="button"
-                    className="btn-ghost btn-xs ml-auto text-slate-400"
-                    onClick={() => onOpenKpi(kpi.id)}
+                    className="btn-ghost btn-xs ml-auto"
+                    aria-pressed={selected}
+                    title={
+                      selected ? 'Remove from the dashboard' : 'Show this KPI on the dashboard'
+                    }
+                    onClick={() => onToggleKpi(kpi.id)}
                   >
-                    Details
+                    {selected ? 'Hide' : 'Show'}
                   </button>
                 </div>
               </div>

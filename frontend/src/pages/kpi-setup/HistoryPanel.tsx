@@ -1,10 +1,21 @@
-/** Catalog versions and the governance audit trail. */
+/** Catalog versions and the governance change history. */
 
 import { api } from '../../api/client'
 import type { AuditEntry, CatalogVersionInfo } from '../../api/types'
 import { useAuth } from '../../auth/AuthContext'
-import { formatDateTime, formatNumber, formatRelative } from '../../components/format'
-import { Alert, EmptyState, Panel, Spinner, StatusBadge } from '../../components/ui'
+import { formatDateTime, formatNumber, formatRelative, titleCase } from '../../components/format'
+import {
+  Alert,
+  EmptyState,
+  HelpList,
+  HelpSection,
+  Panel,
+  SectionHeader,
+  SectionHelp,
+  Spinner,
+  StatCard,
+  StatusBadge,
+} from '../../components/ui'
 import { useAction, useResource } from '../../components/useResource'
 
 export default function HistoryPanel() {
@@ -23,8 +34,9 @@ export default function HistoryPanel() {
 
   return (
     <div className="space-y-5">
-      <Panel
-        title="Catalog versions"
+      <SectionHeader
+        title="History"
+        help={<HistoryHelp />}
         actions={
           <button
             className="btn-primary btn-xs"
@@ -40,30 +52,37 @@ export default function HistoryPanel() {
             {publish.pending ? 'Publishing…' : 'Publish catalog version'}
           </button>
         }
-        bodyClassName=""
-      >
-        <div className="border-b border-ink-800 p-4">
-          <p className="text-xs leading-relaxed text-slate-500">
-            Two version concepts, never conflated. A <strong>catalog version</strong> records what the
-            platform knew about this company's data at a point in time; a <strong>KPI version</strong>{' '}
-            records what the company meant by a metric. Publishing freezes an immutable snapshot with
-            a checksum, so an insight recorded months from now stays reproducible after the schema
-            moves on.
-          </p>
-          {publish.error && (
-            <div className="mt-3">
-              <Alert>{publish.error}</Alert>
-            </div>
-          )}
-          {publish.message && (
-            <div className="mt-3">
-              <Alert tone="success" onDismiss={publish.reset}>
-                {publish.message}
-              </Alert>
-            </div>
-          )}
-        </div>
+      />
 
+      <div className="grid gap-3 sm:grid-cols-3">
+        <StatCard
+          label="Catalog versions"
+          value={formatNumber(versions.data?.length ?? 0)}
+          caption="Immutable snapshots"
+        />
+        <StatCard
+          label="Latest version"
+          value={versions.data?.length ? `v${versions.data[0].version}` : '—'}
+          caption={
+            versions.data?.length ? formatRelative(versions.data[0].published_at) : 'Not published'
+          }
+          tone={versions.data?.length ? 'default' : 'muted'}
+        />
+        <StatCard
+          label="Audit entries"
+          value={formatNumber(audit.data?.length ?? 0)}
+          caption="Recorded changes"
+        />
+      </div>
+
+      {publish.error && <Alert>{publish.error}</Alert>}
+      {publish.message && (
+        <Alert tone="success" onDismiss={publish.reset}>
+          {publish.message}
+        </Alert>
+      )}
+
+      <Panel title="Catalog versions" bodyClassName="">
         {versions.loading && !versions.data ? (
           <div className="p-4">
             <Spinner />
@@ -75,7 +94,7 @@ export default function HistoryPanel() {
         ) : !versions.data?.length ? (
           <EmptyState
             title="No catalog version published"
-            description="Publish once the sources, scope, profiling and KPI contracts are settled. Sprint 2 reads a published catalog rather than rediscovering the business each run."
+            description="Publish once your sources, scope and KPI contracts are settled."
           />
         ) : (
           <div className="overflow-x-auto">
@@ -90,12 +109,14 @@ export default function HistoryPanel() {
                   <th className="table-head">Relations</th>
                   <th className="table-head">Docs</th>
                   <th className="table-head">Active KPIs</th>
-                  <th className="table-head">Checksum</th>
                 </tr>
               </thead>
               <tbody>
                 {versions.data.map((version) => (
-                  <tr key={version.id} className="border-b border-ink-800 last:border-0">
+                  <tr
+                    key={version.id}
+                    className="border-b border-ink-800 transition-colors last:border-0 hover:bg-white/50"
+                  >
                     <td className="table-cell font-medium text-slate-100">v{version.version}</td>
                     <td className="table-cell text-slate-400" title={version.note ?? undefined}>
                       {formatDateTime(version.published_at)}
@@ -115,11 +136,8 @@ export default function HistoryPanel() {
                     <td className="table-cell tabular-nums text-slate-400">
                       {version.document_count}
                     </td>
-                    <td className="table-cell tabular-nums text-slate-200">
+                    <td className="table-cell tabular-nums font-medium text-slate-200">
                       {version.active_kpi_count}
-                    </td>
-                    <td className="table-cell mono text-[11px] text-slate-600">
-                      {version.checksum_sha256?.slice(0, 12) ?? '—'}
                     </td>
                   </tr>
                 ))}
@@ -129,7 +147,7 @@ export default function HistoryPanel() {
         )}
       </Panel>
 
-      <Panel title="Governance audit trail" bodyClassName="">
+      <Panel title="Change history" bodyClassName="">
         {audit.loading && !audit.data ? (
           <div className="p-4">
             <Spinner />
@@ -139,25 +157,24 @@ export default function HistoryPanel() {
             <Alert>{audit.error}</Alert>
           </div>
         ) : !audit.data?.length ? (
-          <EmptyState title="No audit entries yet" />
+          <EmptyState title="No changes recorded yet" />
         ) : (
           <ul>
             {audit.data.map((entry) => (
               <li
                 key={entry.id}
-                className="flex items-start gap-3 border-b border-ink-800 px-4 py-2.5 last:border-0"
+                className="flex items-start gap-3 border-b border-ink-800 px-4 py-2.5 transition-colors last:border-0 hover:bg-white/50"
               >
                 <span
                   className={`mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full ${
-                    entry.outcome === 'SUCCESS' ? 'bg-emerald-600' : 'bg-rose-600'
+                    entry.outcome === 'SUCCESS' ? 'bg-emerald-600' : 'bg-rose-500'
                   }`}
                 />
                 <div className="min-w-0 flex-1">
                   <div className="flex flex-wrap items-baseline gap-2">
-                    <code className="mono text-accent-soft">{entry.action}</code>
-                    {entry.resource_label && (
-                      <span className="text-sm text-slate-300">{entry.resource_label}</span>
-                    )}
+                    <span className="text-sm font-medium text-slate-200">
+                      {entry.resource_label || titleCase(entry.action.replace(/[._]/g, ' '))}
+                    </span>
                     {(entry.old_version || entry.new_version) && (
                       <span className="chip">
                         {entry.old_version || '—'} → {entry.new_version || '—'}
@@ -168,12 +185,12 @@ export default function HistoryPanel() {
                   {entry.summary && (
                     <p className="mt-0.5 text-xs leading-snug text-slate-500">{entry.summary}</p>
                   )}
-                  <div className="mt-0.5 text-[11px] text-slate-600">
+                  <div className="mt-0.5 text-[11px] text-slate-500">
                     {entry.actor_email ?? 'system'}
                   </div>
                 </div>
                 <span
-                  className="shrink-0 text-[11px] text-slate-600"
+                  className="shrink-0 text-[11px] text-slate-500"
                   title={formatDateTime(entry.occurred_at)}
                 >
                   {formatRelative(entry.occurred_at)}
@@ -183,13 +200,48 @@ export default function HistoryPanel() {
           </ul>
         )}
       </Panel>
-
-      <p className="text-[11px] leading-relaxed text-slate-600">
-        The audit trail is append-only by construction — no endpoint updates or deletes it — and
-        credentials are scrubbed before an entry is written. That is what makes "who approved Revenue
-        v2, and when, and against which handbook version" answerable{' '}
-        {formatNumber(audit.data?.length ?? 0)} entries later.
-      </p>
     </div>
+  )
+}
+
+function HistoryHelp() {
+  return (
+    <SectionHelp title="About history and versions">
+      <HelpSection heading="What this section is">
+        <p>
+          The record of what this workspace looked like over time, and of every governed change made
+          to it.
+        </p>
+      </HelpSection>
+      <HelpSection heading="Two kinds of version">
+        <HelpList
+          items={[
+            [
+              'Catalog version',
+              'A frozen snapshot of what the platform knew about your data — sources, tables, profiles, relationships, documents and live KPIs — at one moment.',
+            ],
+            [
+              'KPI version',
+              'What your business meant by one metric. Managed on the KPIs tab, not here.',
+            ],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="Change history">
+        <p>
+          Every governed action — a KPI approved, a scope changed, a member's role edited — is
+          recorded with who did it and when. Entries are only ever added, never edited or removed,
+          and credentials are stripped before anything is written.
+        </p>
+      </HelpSection>
+      <HelpSection heading="Why it matters">
+        <p>
+          Publishing freezes a snapshot with a checksum, so an insight recorded months from now can
+          still be reproduced after your database has moved on. Together with the change history, it
+          makes questions like "who approved this KPI, when, and against which handbook version"
+          answerable long after the fact.
+        </p>
+      </HelpSection>
+    </SectionHelp>
   )
 }

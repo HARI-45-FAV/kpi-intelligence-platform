@@ -9,10 +9,13 @@ import {
   Alert,
   DefinitionRow,
   Drawer,
-  EmptyState,
   Field,
+  HelpList,
+  HelpSection,
   Modal,
   Panel,
+  SectionHeader,
+  SectionHelp,
   Spinner,
   StatusBadge,
 } from '../../components/ui'
@@ -41,53 +44,52 @@ export default function DocumentsPanel() {
 
   return (
     <div className="space-y-5">
-      <Panel
-        title="Company documents"
+      <SectionHeader
+        title="Documents"
+        help={<DocumentsHelp />}
         actions={
           <button className="btn-primary btn-xs" onClick={() => setUploadOpen(true)}>
             + Upload document
           </button>
         }
-        bodyClassName=""
-      >
-        <div className="border-b border-ink-800 p-4">
-          <p className="text-xs leading-relaxed text-slate-500">
-            Sprint 1 stores, versions and access-controls documents. Chunking, embeddings and
-            retrieval belong to the RAG sprint, which will read the entitlement rules proven here
-            — filtering <em>before</em> search rather than censoring results afterwards.
-          </p>
-        </div>
+      />
 
-        {documents.loading && !documents.data ? (
-          <div className="p-4">
-            <Spinner />
-          </div>
-        ) : documents.error ? (
-          <div className="p-4">
-            <Alert>{documents.error}</Alert>
-          </div>
-        ) : !documents.data?.length ? (
-          <EmptyState
-            title="No documents yet"
-            description="Upload the KPI handbook, finance definitions or pricing policy. A KPI version can then cite a specific document version as its definition source."
-          />
-        ) : (
-          <>
-            <DocumentGroup
-              label="Reference — how the company operates"
-              hint={types.data?.classes.REFERENCE}
-              documents={reference}
-              onOpen={setOpenDoc}
-            />
-            <DocumentGroup
-              label="Events — what happened"
-              hint={types.data?.classes.EVENT}
-              documents={events}
-              onOpen={setOpenDoc}
-            />
-          </>
-        )}
-      </Panel>
+      {documents.loading && !documents.data ? (
+        <Panel>
+          <Spinner />
+        </Panel>
+      ) : documents.error ? (
+        <Alert>{documents.error}</Alert>
+      ) : !documents.data?.length ? (
+        <Panel>
+          <button
+            type="button"
+            data-bare
+            className="dropzone w-full"
+            onClick={() => setUploadOpen(true)}
+          >
+            <span className="text-[15px] font-semibold text-slate-100">
+              Upload your first document
+            </span>
+            <span className="max-w-sm text-xs leading-relaxed text-slate-500">
+              A KPI handbook, finance definitions or a pricing policy. A KPI can then cite it as the
+              source of its definition.
+            </span>
+            <span className="btn-primary btn-xs mt-1.5">Choose a document</span>
+          </button>
+        </Panel>
+      ) : (
+        <>
+          <Panel title="Reference — how the company operates" bodyClassName="">
+            <DocumentGroup documents={reference} onOpen={setOpenDoc} />
+          </Panel>
+          {events.length > 0 && (
+            <Panel title="Events — what happened" bodyClassName="">
+              <DocumentGroup documents={events} onOpen={setOpenDoc} />
+            </Panel>
+          )}
+        </>
+      )}
 
       {uploadOpen && (
         <UploadModal
@@ -113,45 +115,89 @@ export default function DocumentsPanel() {
   )
 }
 
+function DocumentsHelp() {
+  return (
+    <SectionHelp title="About company documents">
+      <HelpSection heading="What this section is">
+        <p>
+          The written record of how your business operates — handbooks, finance definitions, pricing
+          and policy documents — stored so the platform can point at them.
+        </p>
+      </HelpSection>
+      <HelpSection heading="What you see">
+        <HelpList
+          items={[
+            ['Document name', 'The title you gave it.'],
+            ['Type', 'What kind of document it is, which decides how it may be used.'],
+            ['Version', 'Revisions are added, never overwritten.'],
+            ['Status', 'Whether this document is in force.'],
+            ['Access', 'Which roles are permitted to read it. Empty means every member.'],
+            ['View / Manage', 'Read a version, or add a new one.'],
+          ]}
+        />
+      </HelpSection>
+      <HelpSection heading="Reference and Events">
+        <p>
+          <strong className="text-slate-100">Reference</strong> documents describe how the business
+          works in general — they give a KPI its business meaning.{' '}
+          <strong className="text-slate-100">Event</strong> documents record something that
+          happened on particular dates, which is what lets an unusual figure be explained by a known
+          event rather than treated as an anomaly.
+        </p>
+      </HelpSection>
+      <HelpSection heading="Why it matters">
+        <p>
+          This is how business context reaches the KPI intelligence system. A KPI that cites your
+          handbook is not using a definition someone invented — it is using yours, and it names the
+          exact version it relied on. Because revisions never overwrite each other, a KPI approved
+          against version 2 stays explainable long after version 3 exists.
+        </p>
+      </HelpSection>
+    </SectionHelp>
+  )
+}
+
+/**
+ * One document per row: name, what it is, whether it is current, who may read it.
+ *
+ * Storage mechanics — the internal document key, checksum, byte size, filename
+ * and whether the content was pasted or uploaded — are governed and unchanged;
+ * they live in the document's own drawer instead of on a list a business reader
+ * scans.
+ */
 function DocumentGroup({
-  label,
-  hint,
   documents,
   onOpen,
 }: {
-  label: string
-  hint?: string
   documents: CompanyDocument[]
   onOpen: (id: string) => void
 }) {
-  if (!documents.length) return null
+  if (!documents.length) {
+    return <div className="px-4 py-6 text-sm text-slate-500">No documents in this category.</div>
+  }
   return (
     <div>
-      <div className="border-b border-ink-800 bg-ink-850 px-4 py-2">
-        <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
-          {label}
-        </div>
-        {hint && <div className="mt-0.5 text-[11px] text-slate-600">{hint}</div>}
-      </div>
       {documents.map((document) => (
-        <button key={document.id} className="row-link" onClick={() => onOpen(document.id)}>
+        <button key={document.id} className="row-link" onClick={() => onOpen(document.id)} data-bare>
           <div className="flex flex-wrap items-center gap-3">
-            <span className="min-w-[12rem] font-medium text-slate-100">{document.title}</span>
+            <span className="min-w-[13rem] flex-1 text-[14.5px] font-medium text-slate-100">
+              {document.title}
+            </span>
             <span className="chip">{titleCase(document.document_type)}</span>
             <span className="chip">v{document.current_version}</span>
             <StatusBadge status={document.status} />
-            <span className="flex-1" />
             <div className="flex flex-wrap gap-1">
               {document.access_scope.length ? (
                 document.access_scope.map((role) => (
                   <span key={role} className="chip">
-                    {role}
+                    {titleCase(role)}
                   </span>
                 ))
               ) : (
-                <span className="text-[11px] text-slate-600">all roles</span>
+                <span className="text-[11px] text-slate-500">All roles</span>
               )}
             </div>
+            <span className="text-xs font-medium text-accent">View</span>
           </div>
         </button>
       ))}
@@ -380,27 +426,19 @@ function DocumentDrawer({
       ) : detail.data ? (
         <div className="space-y-5">
           <dl>
-            <DefinitionRow term="Key">
-              <span className="mono">{detail.data.document_key}</span>
-            </DefinitionRow>
             <DefinitionRow term="Description">{detail.data.description ?? '—'}</DefinitionRow>
             <DefinitionRow term="Access scope">
               {detail.data.access_scope.length ? (
                 <div className="flex flex-wrap gap-1">
                   {detail.data.access_scope.map((role) => (
                     <span key={role} className="chip">
-                      {role}
+                      {titleCase(role)}
                     </span>
                   ))}
                 </div>
               ) : (
                 'Every member of this company'
               )}
-            </DefinitionRow>
-            <DefinitionRow term="Retrieval">
-              <span className="text-slate-500">
-                Not indexed. Embeddings and retrieval arrive with the RAG sprint.
-              </span>
             </DefinitionRow>
           </dl>
 
@@ -494,10 +532,6 @@ function DocumentDrawer({
                   </li>
                 ))}
             </ul>
-            <p className="mt-2 text-[11px] leading-relaxed text-slate-600">
-              A revision never overwrites an earlier version. A KPI contract citing "Handbook v2"
-              must stay resolvable long after v3 exists.
-            </p>
           </section>
         </div>
       ) : null}

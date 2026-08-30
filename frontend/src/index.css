@@ -16,6 +16,12 @@
     --text-secondary: #58728a;
     --primary-blue: #1978c5;
     --primary-blue-hover: #1268ae;
+    /* Accenture-inspired violet. Used only for identity moments — the active
+       navigation pill, a focus ring, a stat-card accent bar — so the palette
+       stays two-colour and never turns into a rainbow. */
+    --accent-violet: #6d4aec;
+    --accent-violet-soft: #8f6ff5;
+    --accent-violet-wash: rgba(109, 74, 236, 0.08);
     --success: #168563;
     --warning: #b77518;
     --critical: #c24f59;
@@ -34,11 +40,17 @@
     @apply text-slate-200 antialiased;
     min-height: 100vh;
     color: var(--text-primary);
+    /* A sky with actual presence. The earlier version layered wide white
+       washes over a pale gradient, which read as "almost white" and left the
+       glass panels nothing to contrast against. Deeper blues below, with the
+       white washes pulled back to highlights, so translucent surfaces read as
+       floating rather than as flat white boxes. Text stays #18314a on all of
+       it, so contrast is unaffected. */
     background:
-      radial-gradient(ellipse 70% 45% at 6% -8%, rgba(255, 255, 255, 0.92), transparent 68%),
-      radial-gradient(ellipse 55% 35% at 95% 9%, rgba(255, 255, 255, 0.75), transparent 72%),
-      radial-gradient(ellipse 52% 32% at 48% 98%, rgba(191, 221, 241, 0.65), transparent 75%),
-      linear-gradient(145deg, #eaf6fe 0%, #d9ecf9 47%, #c4e0f1 100%);
+      radial-gradient(ellipse 58% 38% at 7% -6%, rgba(255, 255, 255, 0.6), transparent 64%),
+      radial-gradient(ellipse 48% 30% at 96% 5%, rgba(226, 242, 253, 0.62), transparent 70%),
+      radial-gradient(ellipse 62% 42% at 50% 104%, rgba(126, 180, 219, 0.5), transparent 74%),
+      linear-gradient(157deg, #d3e8f8 0%, #bcdaf1 44%, #a4cbe9 100%);
     background-attachment: fixed;
     font-feature-settings: 'cv02', 'cv03', 'cv04', 'tnum';
   }
@@ -52,8 +64,8 @@
     content: '';
     pointer-events: none;
     border-radius: 999px;
-    filter: blur(44px);
-    opacity: 0.56;
+    filter: blur(48px);
+    opacity: 0.42;
   }
   body::before {
     top: 16vh;
@@ -85,11 +97,16 @@
 
 @layer components {
   .panel {
-    @apply border border-white/80;
+    @apply border border-white/75;
     border-radius: var(--radius-card);
-    background: var(--glass-bg-strong);
-    box-shadow: var(--shadow-soft), inset 0 1px 0 var(--glass-highlight), inset 0 -1px 0 rgba(166, 204, 230, 0.16);
-    backdrop-filter: blur(18px);
+    /* Genuinely translucent now that the sky behind it has colour — the blur
+       is what makes it read as glass rather than as opaque white. */
+    background: linear-gradient(160deg, rgba(255, 255, 255, 0.84), rgba(240, 249, 254, 0.7));
+    box-shadow:
+      0 18px 40px rgba(38, 88, 130, 0.16),
+      0 4px 12px rgba(38, 88, 130, 0.07),
+      inset 0 1px 0 rgba(255, 255, 255, 0.9);
+    backdrop-filter: blur(22px) saturate(1.12);
   }
   .panel-head {
     @apply flex items-center justify-between gap-3 border-b border-ink-700/75 px-4 py-3;
@@ -99,34 +116,46 @@
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-sm font-medium
+    @apply inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 text-sm font-medium
            transition-all duration-200 ease-out
            disabled:cursor-not-allowed disabled:opacity-45;
     border-radius: var(--radius-control);
     box-shadow: var(--shadow-pebble);
   }
   .btn:not(:disabled):hover {
-    transform: translateY(-1px);
+    transform: translateY(-1.5px);
     box-shadow: var(--shadow-pebble-hover);
   }
+  /* Press settles the control back onto the surface; release returns it to
+     the floating position above. */
   .btn:not(:disabled):active {
-    transform: translateY(0);
-    box-shadow: none;
+    transform: translateY(0.5px);
+    box-shadow: 0 2px 5px rgba(47, 100, 141, 0.14), inset 0 1px 3px rgba(37, 84, 122, 0.16);
   }
   .btn-primary {
-    @apply btn bg-accent text-white hover:bg-accent/85;
-    box-shadow: 0 9px 18px rgba(25, 120, 197, 0.28), 0 3px 6px rgba(25, 120, 197, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.34);
+    @apply btn text-white;
+    background: linear-gradient(160deg, #2487d4, var(--primary-blue) 62%, #1568ad);
+    box-shadow:
+      0 10px 22px rgba(25, 120, 197, 0.32),
+      0 3px 7px rgba(25, 120, 197, 0.16),
+      inset 0 1px 0 rgba(255, 255, 255, 0.38);
+  }
+  .btn-primary:not(:disabled):hover {
+    background: linear-gradient(160deg, #2f92dd, #1a7fcb 62%, #1770b8);
   }
   .btn-ghost {
-    @apply btn border border-white/90 text-slate-300 hover:border-sky-200 hover:bg-white/80;
-    background: linear-gradient(145deg, rgba(255, 255, 255, 0.78), rgba(242, 249, 254, 0.52));
+    @apply btn border border-white/95 text-slate-300 hover:border-sky-200;
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.94), rgba(235, 246, 253, 0.76));
+  }
+  .btn-ghost:not(:disabled):hover {
+    background: linear-gradient(150deg, #fff, rgba(240, 249, 254, 0.9));
   }
   .btn-danger {
     @apply btn border border-rose-200 text-rose-500 hover:bg-rose-50;
-    background: rgba(255, 251, 251, 0.62);
+    background: rgba(255, 252, 252, 0.85);
   }
   .btn-xs {
-    @apply px-2 py-1 text-xs;
+    @apply px-2.5 py-1 text-xs;
   }
 
   .field {
@@ -170,13 +199,16 @@
     position: relative;
     min-height: calc(100vh - 104px);
     padding: clamp(1rem, 2vw, 1.75rem);
-    border: 1px solid rgba(255, 255, 255, 0.86);
+    border: 1px solid rgba(255, 255, 255, 0.7);
     border-radius: 28px;
-    background:
-      linear-gradient(145deg, rgba(255, 255, 255, 0.56), rgba(239, 248, 254, 0.38)),
-      rgba(228, 243, 252, 0.3);
-    box-shadow: 0 30px 65px rgba(40, 92, 132, 0.19), 0 9px 21px rgba(40, 92, 132, 0.08), inset 0 1px 0 rgba(255, 255, 255, 0.92);
-    backdrop-filter: blur(22px);
+    /* Thinner than the panels it contains, so nested glass still reads as a
+       stack rather than as one flat sheet. */
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.4), rgba(233, 245, 253, 0.24));
+    box-shadow:
+      0 34px 70px rgba(30, 78, 118, 0.2),
+      0 10px 24px rgba(30, 78, 118, 0.09),
+      inset 0 1px 0 rgba(255, 255, 255, 0.82);
+    backdrop-filter: blur(26px) saturate(1.08);
   }
   .app-content-shell::before {
     position: absolute;
@@ -186,6 +218,228 @@
     border-radius: inherit;
     background: radial-gradient(ellipse 55% 20% at 22% 0%, rgba(255, 255, 255, 0.58), transparent 80%);
     pointer-events: none;
+  }
+
+  /* ===================================================================
+     Enterprise governance surfaces.
+
+     One vocabulary shared by all seven KPI Setup tabs, so a reader who
+     learns the Company tab already knows how to read Security. Every
+     class below is presentational only.
+     =================================================================== */
+
+  /* --- floating glass navigation ------------------------------------ */
+  /* The app's top bar. Distinct from `.glass-nav` (the tab strip inside a
+     page): this one floats over scrolling content, so it carries a stronger
+     blur and a deeper shadow to stay legible over whatever passes beneath. */
+  .glass-bar {
+    border: 1px solid rgba(255, 255, 255, 0.78);
+    border-radius: 20px;
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.76), rgba(236, 247, 254, 0.58));
+    box-shadow:
+      0 20px 44px rgba(30, 78, 118, 0.2),
+      0 6px 14px rgba(30, 78, 118, 0.09),
+      inset 0 1px 0 rgba(255, 255, 255, 0.95);
+    backdrop-filter: blur(28px) saturate(1.18);
+  }
+
+  .glass-nav {
+    @apply flex gap-1 overflow-x-auto p-1.5;
+    border: 1px solid rgba(255, 255, 255, 0.85);
+    border-radius: 18px;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.62), rgba(234, 246, 253, 0.4));
+    box-shadow:
+      0 16px 34px rgba(34, 84, 126, 0.15),
+      0 4px 10px rgba(34, 84, 126, 0.07),
+      inset 0 1px 0 rgba(255, 255, 255, 0.92);
+    backdrop-filter: blur(22px) saturate(1.12);
+  }
+  .nav-pill {
+    @apply relative whitespace-nowrap rounded-[13px] px-3.5 py-2 text-sm font-medium text-slate-400;
+    transition: color 200ms ease, background 200ms ease, box-shadow 240ms ease, transform 200ms ease;
+  }
+  .nav-pill:hover {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.72);
+    transform: translateY(-1px);
+  }
+  .nav-pill-active {
+    color: var(--text-primary);
+    background: rgba(255, 255, 255, 0.97);
+    box-shadow:
+      0 8px 18px rgba(46, 97, 140, 0.15),
+      0 2px 5px rgba(46, 97, 140, 0.08),
+      inset 0 1px 0 #fff;
+  }
+  /* A violet underline marks the active tab without adding a third colour
+     to the surface itself. */
+  .nav-pill-active::after {
+    position: absolute;
+    right: 26%;
+    bottom: 4px;
+    left: 26%;
+    height: 2px;
+    content: '';
+    border-radius: 2px;
+    background: linear-gradient(90deg, var(--primary-blue), var(--accent-violet));
+  }
+
+  /* --- floating pebble card ---------------------------------------- */
+  /* Cards sit *inside* a near-white glass panel, so a white card on white
+     reads as a faint outline rather than an object. The tint below is cool
+     enough to separate from the panel and light enough to stay quiet. */
+  .surface-card {
+    @apply border border-white/95;
+    border-radius: 18px;
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.98), rgba(230, 243, 252, 0.92));
+    box-shadow:
+      0 10px 22px rgba(48, 100, 143, 0.13),
+      0 2px 6px rgba(48, 100, 143, 0.07),
+      inset 0 1px 0 #fff;
+    transition: transform 220ms ease-out, box-shadow 220ms ease-out, border-color 220ms ease-out;
+  }
+  /* Interactive cards lift; static ones stay put. Opt in explicitly so a
+     read-only tile does not imply it can be clicked. */
+  .surface-card-lift:hover {
+    transform: translateY(-3px);
+    border-color: rgba(157, 206, 233, 0.9);
+    box-shadow:
+      0 20px 40px rgba(44, 95, 138, 0.17),
+      0 6px 14px rgba(44, 95, 138, 0.08),
+      inset 0 1px 0 #fff;
+  }
+  .surface-card-lift:active {
+    transform: translateY(-1px);
+    box-shadow:
+      0 8px 18px rgba(44, 95, 138, 0.13),
+      inset 0 1px 0 rgba(255, 255, 255, 0.9);
+  }
+
+  /* --- highlighted numbers ----------------------------------------- */
+  .stat-card {
+    @apply relative overflow-hidden px-4 py-3.5;
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    border-radius: 16px;
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.99), rgba(226, 241, 252, 0.94));
+    box-shadow:
+      0 9px 22px rgba(48, 100, 143, 0.13),
+      0 2px 5px rgba(48, 100, 143, 0.06),
+      inset 0 1px 0 #fff;
+    transition: transform 220ms ease-out, box-shadow 220ms ease-out;
+  }
+  .stat-card:hover {
+    transform: translateY(-2px);
+    box-shadow:
+      0 16px 32px rgba(44, 95, 138, 0.15),
+      inset 0 1px 0 #fff;
+  }
+  /* The accent bar is the only place a stat card carries colour, which keeps
+     a row of four reading as one unit. */
+  .stat-card::before {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 3px;
+    height: 100%;
+    content: '';
+    background: linear-gradient(180deg, var(--primary-blue), var(--accent-violet));
+    opacity: 0.85;
+  }
+  .stat-value {
+    @apply text-[26px] font-semibold leading-none tabular-nums text-slate-100;
+    letter-spacing: -0.02em;
+  }
+  .stat-label {
+    @apply text-[10.5px] font-semibold uppercase tracking-[0.13em] text-slate-500;
+  }
+
+  /* --- help affordance --------------------------------------------- */
+  .help-btn {
+    @apply grid h-7 w-7 shrink-0 place-items-center text-[13px] font-semibold text-slate-500;
+    border: 1px solid rgba(255, 255, 255, 0.95);
+    border-radius: 999px;
+    background: linear-gradient(150deg, rgba(255, 255, 255, 0.94), rgba(238, 247, 253, 0.7));
+    box-shadow: var(--shadow-pebble);
+    transition: transform 200ms ease-out, box-shadow 200ms ease-out, color 200ms ease-out;
+  }
+  .help-btn:hover {
+    color: var(--accent-violet);
+    transform: translateY(-1px);
+    box-shadow: var(--shadow-pebble-hover);
+  }
+  .help-btn:active {
+    transform: translateY(0);
+    box-shadow: none;
+  }
+
+  /* --- setting -> value -> edit ------------------------------------ */
+  .setting-row {
+    @apply flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3;
+    border-bottom: 1px solid rgba(211, 229, 242, 0.85);
+    transition: background 200ms ease;
+  }
+  .setting-row:last-child {
+    border-bottom: 0;
+  }
+  .setting-row:hover {
+    background: rgba(255, 255, 255, 0.55);
+  }
+  .setting-name {
+    @apply w-48 shrink-0 text-[13px] font-medium text-slate-300;
+  }
+  .setting-value {
+    @apply min-w-0 flex-1 text-sm font-medium text-slate-100;
+  }
+
+  /* --- section heading inside a panel ------------------------------ */
+  .section-head {
+    @apply mb-3 flex items-center justify-between gap-3;
+  }
+  .section-label {
+    @apply text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500;
+  }
+
+  /* --- upload dropzone -------------------------------------------- */
+  .dropzone {
+    @apply flex flex-col items-center justify-center gap-2 px-6 py-9 text-center;
+    border: 1.5px dashed rgba(157, 206, 233, 0.9);
+    border-radius: 18px;
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.7), rgba(233, 245, 253, 0.5));
+    transition: border-color 220ms ease, background 220ms ease, transform 220ms ease;
+  }
+  .dropzone:hover {
+    border-color: var(--accent-violet-soft);
+    background: linear-gradient(155deg, rgba(255, 255, 255, 0.85), rgba(238, 243, 254, 0.6));
+    transform: translateY(-2px);
+  }
+}
+
+/* ---------------------------------------------------------------- motion */
+@layer utilities {
+  @keyframes overlay-in {
+    from { opacity: 0; }
+    to { opacity: 1; }
+  }
+  @keyframes dialog-in {
+    from { opacity: 0; transform: translateY(10px) scale(0.985); }
+    to { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  @keyframes drawer-in {
+    from { opacity: 0; transform: translateX(18px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+  @keyframes panel-in {
+    from { opacity: 0; transform: translateY(6px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .anim-overlay { animation: overlay-in 180ms ease-out both; }
+  .anim-dialog { animation: dialog-in 240ms cubic-bezier(0.16, 0.84, 0.44, 1) both; }
+  .anim-drawer { animation: drawer-in 260ms cubic-bezier(0.16, 0.84, 0.44, 1) both; }
+  /* Tab changes: the routed panel fades up rather than snapping in. */
+  .anim-panel { animation: panel-in 260ms ease-out both; }
+
+  @media (prefers-reduced-motion: reduce) {
+    .anim-overlay, .anim-dialog, .anim-drawer, .anim-panel { animation: none; }
   }
 }
 
@@ -234,16 +488,24 @@
     transition-duration: 180ms;
     transition-timing-function: ease-out;
   }
-  button:not(.btn):not(:disabled):hover,
-  a[href]:hover {
-    transform: translateY(-1px);
-  }
-  button:not(.btn):not(:disabled) {
+  /* Pebble depth is for controls that act. Navigation pills, the help dot,
+     dialog close buttons and inline disclosures carry their own treatment —
+     giving every one of them a raised shadow is what made the workspace read
+     as an admin tool rather than a product. `[data-bare]` opts a button out. */
+  button:not(.btn):not(.nav-pill):not(.help-btn):not([data-bare]):not(:disabled) {
     border-radius: 13px;
     box-shadow: var(--shadow-pebble);
   }
-  button:not(.btn):not(:disabled):hover {
+  button:not(.btn):not(.nav-pill):not(.help-btn):not([data-bare]):not(:disabled):hover {
+    transform: translateY(-1px);
     box-shadow: var(--shadow-pebble-hover);
+  }
+  button:not(.btn):not(.nav-pill):not(.help-btn):not([data-bare]):not(:disabled):active {
+    transform: translateY(0);
+    box-shadow: none;
+  }
+  a[href]:hover {
+    transform: translateY(-1px);
   }
   .panel > .grid > .cursor-pointer:hover,
   .panel .cursor-pointer.rounded-md:hover {

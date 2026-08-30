@@ -30,10 +30,10 @@ import HistoryPanel from './HistoryPanel'
 // those documents, so it follows them.
 const SUB_TABS = [
   { to: '/kpi-setup', label: 'Company', end: true },
-  { to: '/kpi-setup/sources', label: 'Data sources' },
+  { to: '/kpi-setup/sources', label: 'Data Sources' },
   { to: '/kpi-setup/kpis', label: 'KPIs' },
   { to: '/kpi-setup/documents', label: 'Documents' },
-  { to: '/kpi-setup/comparison-policy', label: 'Comparison policy' },
+  { to: '/kpi-setup/comparison-policy', label: 'Comparison Policy' },
   { to: '/kpi-setup/security', label: 'Security' },
   { to: '/kpi-setup/history', label: 'History' },
 ]
@@ -45,49 +45,50 @@ export default function KpiSetup() {
 
   return (
     <div className="space-y-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-xl font-semibold text-slate-100">KPI Setup &amp; Governance</h1>
-          <p className="mt-0.5 text-sm text-slate-500">
-            {membership?.company_name} · {membership?.role_name} · elevated session
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <h1 className="text-xl font-semibold tracking-tight text-slate-100">
+            KPI Setup &amp; Governance
+          </h1>
+          <p className="mt-0.5 truncate text-sm text-slate-500">
+            {membership?.company_name}
+            {membership?.role_name ? ` · ${membership.role_name}` : ''}
           </p>
         </div>
         <LockButton />
       </div>
 
-      <nav className="flex gap-1 overflow-x-auto rounded-2xl border border-white/80 bg-white/48 p-1.5 shadow-[var(--shadow-soft)] backdrop-blur-xl">
+      <nav className="glass-nav">
         {SUB_TABS.map((tab) => (
           <NavLink
             key={tab.to}
             to={tab.to}
             end={tab.end}
-            className={({ isActive }) =>
-              `whitespace-nowrap rounded-xl px-3 py-1.5 text-sm transition-all ${
-                isActive
-                  ? 'bg-white/90 font-medium text-slate-100 shadow-sm'
-                  : 'text-slate-400 hover:bg-white/55 hover:text-slate-200'
-              }`
-            }
+            className={({ isActive }) => `nav-pill ${isActive ? 'nav-pill-active' : ''}`}
           >
             {tab.label}
           </NavLink>
         ))}
       </nav>
 
-      <Routes>
-        <Route index element={<CompanyPanel />} />
-        <Route path="sources" element={<SourcesPanel />} />
-        {/* Drill-down into one source. Sibling of the list rather than nested, to
-            match the flat routing this workspace already uses; the Data sources
-            tab has no `end` prop, so it stays active here. */}
-        <Route path="sources/:sourceId" element={<SourceGovernance />} />
-        <Route path="documents" element={<DocumentsPanel />} />
-        <Route path="kpis" element={<KpiRegistryPanel />} />
-        <Route path="comparison-policy" element={<ComparisonPolicyPanel />} />
-        <Route path="security" element={<SecurityPanel />} />
-        <Route path="history" element={<HistoryPanel />} />
-        <Route path="*" element={<Navigate to="/kpi-setup" replace />} />
-      </Routes>
+      {/* Keyed on the pathname so switching tabs replays the entrance
+          transition instead of swapping content instantly. */}
+      <div className="anim-panel">
+        <Routes>
+          <Route index element={<CompanyPanel />} />
+          <Route path="sources" element={<SourcesPanel />} />
+          {/* Drill-down into one source. Sibling of the list rather than nested, to
+              match the flat routing this workspace already uses; the Data sources
+              tab has no `end` prop, so it stays active here. */}
+          <Route path="sources/:sourceId" element={<SourceGovernance />} />
+          <Route path="documents" element={<DocumentsPanel />} />
+          <Route path="kpis" element={<KpiRegistryPanel />} />
+          <Route path="comparison-policy" element={<ComparisonPolicyPanel />} />
+          <Route path="security" element={<SecurityPanel />} />
+          <Route path="history" element={<HistoryPanel />} />
+          <Route path="*" element={<Navigate to="/kpi-setup" replace />} />
+        </Routes>
+      </div>
     </div>
   )
 }
@@ -104,7 +105,7 @@ function LockButton() {
       className="btn-ghost btn-xs"
       title="End the elevated session and return to the dashboard"
     >
-      🔒 Lock &amp; exit
+      Exit setup
     </button>
   )
 }
@@ -124,13 +125,10 @@ function AdminUnlock() {
     <div className="mx-auto max-w-md py-10">
       <Panel>
         <div className="mb-5 text-center">
-          <span className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-lg border border-accent/40 bg-accent/10 text-lg">
-            🔒
-          </span>
+          <span className="mx-auto mb-3 block h-1 w-10 rounded-full bg-gradient-to-r from-accent to-[var(--accent-violet)]" />
           <h1 className="text-base font-semibold text-slate-100">Confirm administrator access</h1>
           <p className="mt-1 text-xs leading-relaxed text-slate-500">
-            KPI Setup changes what your KPIs mean, which data the platform may read, and who can
-            see it. Re-enter your credentials to continue.
+            Re-enter your credentials to change what your KPIs mean and who can see them.
           </p>
         </div>
 
@@ -167,7 +165,6 @@ function AdminUnlock() {
 
         <p className="mt-4 border-t border-ink-800 pt-3 text-center text-[11px] text-slate-600">
           Requires an administrator role in {membership?.company_name ?? 'this workspace'}.
-          Elevation is held in memory only and ends when you reload or lock.
         </p>
       </Panel>
     </div>
