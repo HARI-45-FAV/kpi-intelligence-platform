@@ -45,8 +45,11 @@ def test_core_roles_are_the_three_the_access_model_is_explained_with():
         "VIEWER",
     }
     # Authorisation is unchanged: the full permission catalogue is intact and
-    # ADMIN still holds all of it.
-    assert len(PERMISSION_KEYS) == 23
+    # ADMIN still holds all of it. The count is a tripwire against a permission
+    # being dropped while simplifying a screen -- it moves only when a capability
+    # is deliberately added. Detection contributed the two keys named below.
+    assert {"detection.run", "detection.configure"} <= set(PERMISSION_KEYS)
+    assert len(PERMISSION_KEYS) == 25
     admin_role = next(role for role in ROLES if role.key == "ADMIN")
     assert set(admin_role.permissions) == set(PERMISSION_KEYS)
 

@@ -2,6 +2,8 @@
 
 import { NavLink, Outlet } from 'react-router-dom'
 import { useAuth } from '../auth/AuthContext'
+import CopilotPanel from '../copilot/CopilotPanel'
+import { CopilotProvider, useCopilot } from '../copilot/CopilotProvider'
 
 const TABS = [
   { to: '/', label: 'Dashboard', end: true },
@@ -12,8 +14,21 @@ const TABS = [
 ]
 
 export default function AppShell() {
+  // The provider wraps both the header and the routed page, so the launcher in
+  // the header and the screen that publishes context share one state. Pages
+  // inside <Outlet /> can therefore tell the Copilot what they are showing
+  // without any of them owning the panel.
+  return (
+    <CopilotProvider>
+      <Shell />
+    </CopilotProvider>
+  )
+}
+
+function Shell() {
   const { user, membership, memberships, companyId, selectCompany, logout, adminUnlocked } =
     useAuth()
+  const { openPanel } = useCopilot()
 
   return (
     <div className="min-h-screen px-3 py-3 sm:px-5 sm:py-5">
@@ -64,6 +79,17 @@ export default function AppShell() {
           </nav>
 
           <div className="flex items-center gap-3">
+            {/* Company scope is not a Copilot setting: it comes from the session
+                and is re-derived from the membership row on the server. */}
+            <button
+              onClick={() => openPanel()}
+              className="flex items-center gap-1.5 whitespace-nowrap rounded-md border border-ink-600 px-2.5 py-1 text-xs text-slate-300 transition-colors hover:border-accent/50 hover:text-accent-soft"
+              title="Ask about KPI definitions, documents and data profiles"
+            >
+              <span aria-hidden>✨</span>
+              Copilot
+            </button>
+
             {memberships.length > 1 ? (
               <select
                 value={companyId ?? ''}
@@ -100,6 +126,8 @@ export default function AppShell() {
       <main className="app-content-shell mx-auto mt-5 max-w-[1600px] sm:mt-6">
         <Outlet />
       </main>
+
+      <CopilotPanel />
     </div>
   )
 }

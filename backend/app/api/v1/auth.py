@@ -10,7 +10,7 @@ from app.core.deps import CurrentUser, SessionDep, resolve_access
 from app.core.errors import AuthenticationError, Conflict, PermissionDenied
 from app.core.security import create_access_token, hash_password, verify_password
 from app.models.base import MembershipStatus
-from app.models.tenant import Company, CompanyUser, Role, User
+from app.models.tenant import Company, CompanyUser, Permission, Role, RolePermission, User
 from app.schemas import (
     AdminUnlockRequest,
     AdminUnlockResponse,
@@ -34,18 +34,28 @@ def _memberships(session, user: User) -> list[MembershipSummary]:
         .where(CompanyUser.user_id == user.id)
         .order_by(Company.company_name)
     ).all()
-    return [
-        MembershipSummary(
-            company_id=company.id,
-            company_name=company.company_name,
-            company_slug=company.slug,
-            role_key=role.role_key,
-            role_name=role.name,
-            status=membership.status,
-            is_admin_role=role.is_admin_role,
+    summaries: list[MembershipSummary] = []
+    for membership, company, role in rows:
+        permissions = session.execute(
+            select(Permission.key)
+            .join(RolePermission, RolePermission.permission_id == Permission.id)
+            .where(RolePermission.role_id == role.id)
+            .order_by(Permission.key)
+        ).scalars().all()
+        summaries.append(
+            MembershipSummary(
+                company_id=company.id,
+                company_name=company.company_name,
+                company_slug=company.slug,
+                role_key=role.role_key,
+                role_name=role.name,
+                status=membership.status,
+                is_admin_role=role.is_admin_role,
+                permissions=list(permissions),
+                row_scope=dict(membership.row_scope or {}),
+            )
         )
-        for membership, company, role in rows
-    ]
+    return summaries
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)

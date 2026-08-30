@@ -350,6 +350,18 @@ class SqlConnector(DataSourceConnector):
         rows = self._run(f"SELECT COUNT(*) AS n FROM {self.qualify(target, table)}")
         return int(rows[0]["n"]) if rows else None
 
+    def time_extent(self, schema: str, table: str, column: str) -> tuple[Any, Any] | None:
+        """MIN and MAX of one column, in a single pushed-down aggregate."""
+        target = self.resolve_schema(schema)
+        col = self.quote(column, kind="time column")
+        rows = self._run(
+            f"SELECT MIN({col}) AS lo, MAX({col}) AS hi "  # noqa: S608 - identifiers quoted
+            f"FROM {self.qualify(target, table)}"
+        )
+        if not rows:
+            return None
+        return (rows[0].get("lo"), rows[0].get("hi"))
+
     def profile_column(
         self, schema: str, table: str, column: str, *, type_family: str = "OTHER"
     ) -> ColumnStats:

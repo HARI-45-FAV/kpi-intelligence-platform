@@ -15,20 +15,25 @@ import { Alert, Field, Panel } from '../../components/ui'
 import { useAction } from '../../components/useResource'
 import CompanyPanel from './CompanyPanel'
 import SourcesPanel from './SourcesPanel'
+import SourceGovernance from './SourceGovernance'
 import DocumentsPanel from './DocumentsPanel'
 import KpiRegistryPanel from './KpiRegistryPanel'
+import ComparisonPolicyPanel from './ComparisonPolicyPanel'
 import SecurityPanel from './SecurityPanel'
 import HistoryPanel from './HistoryPanel'
 
 // The governance order, which is also the order a company is configured in:
 // who you are -> what data you connected -> the KPIs the business already
-// defined -> who may see them -> what was changed. Documents support a
-// definition, so they sit alongside the KPIs rather than ahead of them.
+// defined -> which history those KPIs are compared against -> who may see them
+// -> what was changed. Documents support a definition, so they sit alongside the
+// KPIs rather than ahead of them; the comparison policy is extracted from one of
+// those documents, so it follows them.
 const SUB_TABS = [
   { to: '/kpi-setup', label: 'Company', end: true },
   { to: '/kpi-setup/sources', label: 'Data sources' },
   { to: '/kpi-setup/kpis', label: 'KPIs' },
   { to: '/kpi-setup/documents', label: 'Documents' },
+  { to: '/kpi-setup/comparison-policy', label: 'Comparison policy' },
   { to: '/kpi-setup/security', label: 'Security' },
   { to: '/kpi-setup/history', label: 'History' },
 ]
@@ -72,8 +77,13 @@ export default function KpiSetup() {
       <Routes>
         <Route index element={<CompanyPanel />} />
         <Route path="sources" element={<SourcesPanel />} />
+        {/* Drill-down into one source. Sibling of the list rather than nested, to
+            match the flat routing this workspace already uses; the Data sources
+            tab has no `end` prop, so it stays active here. */}
+        <Route path="sources/:sourceId" element={<SourceGovernance />} />
         <Route path="documents" element={<DocumentsPanel />} />
         <Route path="kpis" element={<KpiRegistryPanel />} />
+        <Route path="comparison-policy" element={<ComparisonPolicyPanel />} />
         <Route path="security" element={<SecurityPanel />} />
         <Route path="history" element={<HistoryPanel />} />
         <Route path="*" element={<Navigate to="/kpi-setup" replace />} />

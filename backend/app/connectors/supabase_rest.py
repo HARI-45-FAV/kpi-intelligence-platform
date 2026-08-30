@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -51,6 +53,23 @@ _PK_MARKER = "<pk/>"
 _FK_RE = re.compile(r"<fk table='([^']+)' column='([^']+)'/>")
 
 SAMPLE_LIMIT = 5_000
+
+
+@dataclass(slots=True)
+class ProjectionPage:
+    """One bounded, filtered read: the rows, the true count, and how it was asked.
+
+    ``total`` is the number of rows matching the filter at the source, which is
+    exact even when ``rows`` was capped -- so a row count never has to be
+    approximated. ``truncated`` says the two disagree, which is the caller's
+    signal that any aggregate needing every value cannot be computed honestly.
+    """
+
+    rows: list[dict[str, Any]] = field(default_factory=list)
+    total: int | None = None
+    truncated: bool = False
+    #: The request path and query, free of credentials -- safe for logs and evidence.
+    descriptor: str = ""
 
 
 def normalise_supabase_url(value: str) -> str:
@@ -298,6 +317,36 @@ class SupabaseRestConnector(DataSourceConnector):
         total = (response.headers.get("content-range") or "").split("/")[-1]
         return int(total) if total.isdigit() else None
 
+    def time_extent(self, schema: str, table: str, column: str) -> tuple[Any, Any] | None:
+        """Earliest and latest value of ``column``, as two one-row reads.
+
+        PostgREST may have aggregate functions disabled, so MIN/MAX are obtained
+        the way the transport always can: order by the column and take one row
+        from each end. Two rows cross the wire, not a table.
+        """
+        validate_identifier(table, kind="table name")
+        validate_identifier(column, kind="time column")
+
+        def edge(direction: str) -> Any:
+            response = self._request(
+                f"/{table}",
+                params=[
+                    ("select", column),
+                    ("order", f"{column}.{direction}.nullslast"),
+                    ("limit", "1"),
+                ],
+            )
+            body = response.json()
+            if not isinstance(body, list) or not body:
+                return None
+            self.rows_returned += len(body)
+            return body[0].get(column)
+
+        try:
+            return (edge("asc"), edge("desc"))
+        except ConnectorError:
+            return None
+
     # -- execution -------------------------------------------------------
     def execute_query(
         self, sql: str, params: dict[str, Any] | None = None, *, limit: int | None = None
@@ -314,6 +363,105 @@ class SupabaseRestConnector(DataSourceConnector):
     ) -> list[dict[str, Any]]:
         """A bounded page of rows over PostgREST — no SQL required."""
         return self._rows(table, limit=limit)
+
+    def fetch_projection(
+        self,
+        schema: str,
+        table: str,
+        *,
+        columns: Sequence[str] = (),
+        predicates: Sequence[tuple[str, str]] = (),
+        max_rows: int | None = None,
+        page_size: int = 1000,
+    ) -> ProjectionPage:
+        """Rows for one filtered window, projecting only the columns asked for.
+
+        This is what stands in for aggregate pushdown on a project whose REST API
+        has aggregate functions disabled (PostgREST answers ``PGRST123``). The
+        substitution is only sound because of what it does *not* relax:
+
+        * **Filtering still happens at the source.** Every predicate is a
+          PostgREST operator on the URL, so the window is selected by Postgres
+          and only matching rows cross the wire. This is not a table scan in
+          Python.
+        * **The projection is minimal.** Only the columns the caller names are
+          selected, so a formula over one numeric column transfers one numeric
+          column.
+        * **The count is exact regardless of transfer.** ``Prefer: count=exact``
+          gives the true number of matching rows in the header, so a row count is
+          right even when the rows themselves were capped.
+        * **Truncation is reported, never hidden.** ``truncated`` is set when the
+          window held more rows than the cap allowed, and the caller is expected
+          to decline to compute rather than return a number derived from part of
+          the window.
+
+        ``predicates`` are ``(column, "op.value")`` pairs already in PostgREST
+        form; translating governed filter operators is the caller's job, so no
+        formula semantics live in this transport.
+        """
+
+        validate_identifier(table, kind="table name")
+        for column in columns:
+            validate_identifier(column, kind="column name")
+        for column, _expression in predicates:
+            validate_identifier(column, kind="filter column")
+
+        cap = min(max_rows or settings.connector_max_rows_returned,
+                  settings.connector_max_rows_returned)
+        page = max(1, min(page_size, cap))
+        # PostgREST requires a select list. When no column is needed -- a pure row
+        # count -- the primary key is not necessarily known here, so the narrowest
+        # honest request is one row, taken only for its Content-Range header.
+        select = ",".join(columns) if columns else "*"
+
+        base: list[tuple[str, str]] = [(column, expression) for column, expression in predicates]
+        rows: list[dict[str, Any]] = []
+        total: int | None = None
+        offset = 0
+
+        while True:
+            params = [*base, ("select", select), ("limit", str(page)), ("offset", str(offset))]
+            headers = {"Prefer": "count=exact"} if total is None else None
+            response = self._request(f"/{table}", params=params, headers=headers)
+            if total is None:
+                reported = (response.headers.get("content-range") or "").split("/")[-1]
+                total = int(reported) if reported.isdigit() else None
+
+            body = response.json()
+            if not isinstance(body, list):
+                break
+            rows.extend(body)
+            self.rows_returned += len(body)
+
+            if not columns:
+                # Only the count was wanted; one page was enough to obtain it.
+                break
+            if len(body) < page or len(rows) >= cap:
+                break
+            offset += page
+
+        truncated = bool(columns) and total is not None and total > len(rows)
+        descriptor = self._describe(table, select, base, cap)
+        return ProjectionPage(
+            rows=rows, total=total, truncated=truncated, descriptor=descriptor
+        )
+
+    @staticmethod
+    def _describe(
+        table: str, select: str, predicates: Sequence[tuple[str, str]], cap: int
+    ) -> str:
+        """The request, in a form safe to log and show.
+
+        Path and query only: the project URL, the API key and the bearer token all
+        live in client configuration and headers, none of which appear here.
+        """
+
+        query = "&".join(f"{column}={expression}" for column, expression in predicates)
+        parts = [f"select={select}"]
+        if query:
+            parts.append(query)
+        parts.append(f"limit={cap}")
+        return f"GET /{table}?" + "&".join(parts)
 
     def get_refresh_metadata(
         self, schema: str, table: str, time_column: str | None = None

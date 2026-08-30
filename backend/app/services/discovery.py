@@ -21,6 +21,7 @@ from app.connectors.base import DataSourceConnector
 from app.core.clock import utcnow
 from app.models.source import DataSource, SourceColumn, SourceTable
 from app.services.classification import classify_sensitivity, classify_structural
+from app.services.source_governance import apply_column_role, apply_table_candidates
 
 
 @dataclass(slots=True)
@@ -137,6 +138,7 @@ def _sync_columns(
     existing = {column.column_name: column for column in table.columns}
     seen: set[str] = set()
     created = updated = 0
+    live: list[SourceColumn] = []
 
     for meta in column_metas:
         seen.add(meta.column_name)
@@ -156,6 +158,7 @@ def _sync_columns(
             updated += 1
             fresh = False
 
+        live.append(column)
         column.ordinal_position = meta.ordinal_position
         column.data_type = meta.data_type
         column.is_nullable = meta.is_nullable
@@ -166,6 +169,10 @@ def _sync_columns(
         column.references_column = meta.references_column
         column.comment = meta.comment
         column.semantic_type = classify_structural(meta)
+        # A structure-only role proposal, good enough for a review screen before
+        # anything has been profiled. Rewritten with cardinality evidence on the
+        # next profile; a confirmed role is never touched.
+        apply_column_role(column)
 
         # Sensitivity is only auto-assigned on first sight. Re-discovery must
         # not overwrite an administrator's deliberate reclassification.
@@ -180,5 +187,8 @@ def _sync_columns(
         if name not in seen:
             session.delete(column)
 
+    # Candidate identifier / time / company columns, from structure alone. Passed
+    # explicitly because columns created above are not yet on the relationship.
+    apply_table_candidates(table, columns=live)
     table.column_count = len(column_metas)
     return (created, updated)

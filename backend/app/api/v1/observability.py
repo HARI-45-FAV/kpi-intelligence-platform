@@ -7,6 +7,7 @@ from sqlalchemy import func, select
 
 from app.core.clock import as_utc, utcnow
 from app.core.deps import AccessContext, SessionDep, require_permissions
+from app.llm.config import get_llm_config
 from app.models.base import KpiStatus, QualityStatus
 from app.models.catalog import CatalogVersion
 from app.models.document import CompanyDocument
@@ -133,13 +134,25 @@ def telemetry_summary(
                 "grain, relationship and join-safety detection",
                 "quality and freshness assessment",
                 "KPI validation",
+                "governed knowledge retrieval for the Copilot (lexical, no model)",
                 "security, lineage, audit and telemetry",
             ],
-            "llm": [],
+            # Driven by configuration rather than written down, so this list cannot
+            # claim model work on a deployment that has no model -- or deny it on
+            # one that does.
+            "llm": (
+                [
+                    "Copilot question understanding and governed tool selection",
+                    "explanation of retrieved KPI, validation and document evidence",
+                ]
+                if get_llm_config().is_available
+                else []
+            ),
             "note": (
-                "Sprint 1 contains no model calls by design. The LLM columns exist "
-                "so the reasoning sprints inherit instrumentation rather than "
-                "retrofitting it."
+                "Every number in this platform is produced deterministically. A model, "
+                "when one is configured, only selects governed read-only tools and "
+                "explains the evidence they return; it never calculates a value, "
+                "queries tenant data or writes to the platform."
             ),
         },
     }
@@ -315,11 +328,14 @@ def dashboard(
             "delivered": (
                 "Multi-tenant foundation, source registry, access-aware profiling, "
                 "grain/relationship/join-safety/freshness/reconciliation metadata, "
-                "versioned semantic catalog, document store and governed KPI contracts."
+                "versioned semantic catalog, document store, governed KPI contracts, "
+                "and a company-scoped Copilot that retrieves and explains all of it."
             ),
             "not_yet": (
-                "Monitoring, expected-value baselines, contribution analysis, "
-                "investigation, RAG retrieval, narratives and recommendations."
+                "Monitoring, expected-value baselines, anomaly detection, contribution "
+                "analysis, automated investigation, narratives over computed KPI "
+                "results, and recommendations. The Copilot explains governed "
+                "definitions and metadata; it does not assess or forecast values."
             ),
         },
     }

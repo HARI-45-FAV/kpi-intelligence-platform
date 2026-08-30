@@ -18,8 +18,8 @@ from app.connectors.sql import SqlConnector
 from app.core.deps import AccessContext, SessionDep, load_scoped, require_permissions
 from app.core.errors import Conflict, NotFound, ValidationFailure
 from app.core.telemetry import usage_of
-from app.models.base import KPI_TRANSITIONS, KpiStatus, ValidationStatus
-from app.models.kpi import KpiDefinition, KpiValidationRun, KpiVersion
+from app.models.base import KPI_TRANSITIONS, KpiStatus
+from app.models.kpi import KpiDefinition, KpiVersion
 from app.models.source import DataSource, SourceTable
 from app.schemas import (
     CompanyDefinitionImport,
@@ -51,6 +51,9 @@ from app.services.kpi_source_definitions import (
     read_company_definitions,
 )
 from app.services.kpi_sql import execute_kpi
+from app.services.kpi_validation import (
+    latest_validation_summary as _latest_validation,
+)
 from app.services.kpi_validation import validate_kpi_version
 
 router = APIRouter(tags=["kpis"])
@@ -130,43 +133,6 @@ def _definition_out(definition: KpiDefinition) -> KpiDefinitionOut:
 
 def _load_version(session: Session, version_id: str, access: AccessContext) -> KpiVersion:
     return load_scoped(session, KpiVersion, version_id, access)
-
-
-def _latest_validation(session: Session, version: KpiVersion) -> dict | None:
-    run = session.scalar(
-        select(KpiValidationRun)
-        .where(KpiValidationRun.kpi_version_id == version.id)
-        .order_by(KpiValidationRun.started_at.desc())
-        .limit(1)
-    )
-    if run is None:
-        return None
-    return {
-        "run_id": run.id,
-        "overall_status": run.overall_status,
-        "ready_for_approval": run.overall_status
-        in {ValidationStatus.PASS, ValidationStatus.WARN},
-        "summary": run.summary,
-        "duration_ms": run.duration_ms,
-        "started_at": run.started_at,
-        "passed": run.passed_count,
-        "failed": run.failed_count,
-        "warned": run.warned_count,
-        "checks": [
-            {
-                "test_type": check.test_type,
-                "label": check.label,
-                "status": check.status,
-                "expected": check.expected,
-                "actual": check.actual,
-                "message": check.message,
-                "is_blocking": check.is_blocking,
-                "runtime_ms": check.runtime_ms,
-                "evidence": check.evidence,
-            }
-            for check in sorted(run.checks, key=lambda c: c.created_at)
-        ],
-    }
 
 
 # ---------------------------------------------------------------------------

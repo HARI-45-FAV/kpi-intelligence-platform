@@ -7,7 +7,10 @@ from app.api.v1 import (
     auth,
     catalog,
     companies,
+    copilot,
+    detection,
     documents,
+    investigation,
     kpis,
     observability,
     sources,
@@ -22,4 +25,7 @@ api_router.include_router(analysis.router)
 api_router.include_router(documents.router)
 api_router.include_router(catalog.router)
 api_router.include_router(kpis.router)
+api_router.include_router(detection.router)
+api_router.include_router(investigation.router)
 api_router.include_router(observability.router)
+api_router.include_router(copilot.router)

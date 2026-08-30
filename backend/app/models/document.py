@@ -14,7 +14,6 @@ from sqlalchemy import (
     JSON,
     Boolean,
     Date,
-    DateTime,
     ForeignKey,
     Integer,
     String,
@@ -30,6 +29,7 @@ from app.models.base import (
     DocumentType,
     Timestamped,
     UUIDPrimaryKey,
+    UtcDateTime,
 )
 
 
@@ -102,6 +102,6 @@ class CompanyDocumentVersion(Base, UUIDPrimaryKey, Timestamped):
     uploaded_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL")
     )
-    uploaded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    uploaded_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 
     document: Mapped[CompanyDocument] = relationship(back_populates="versions")

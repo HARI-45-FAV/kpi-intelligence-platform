@@ -7,7 +7,6 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -20,21 +19,33 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.core.database import Base
 from app.models.base import (
     Classification,
+    ColumnRole,
     ConnectionStatus,
     DataSourceType,
     FreshnessStatus,
+    MetadataStatus,
     RefreshFrequency,
     SemanticType,
+    SourceHealthStatus,
     Timestamped,
     UUIDPrimaryKey,
+    UtcDateTime,
 )
 
 
 class DataSource(Base, UUIDPrimaryKey, Timestamped):
-    """A registered tenant database.
+    """A registered tenant data source.
 
     Credentials live in ``encrypted_credentials`` and are decrypted only inside
-    a connector. No API schema ever exposes that column.
+    a connector. No API schema ever exposes that column. Source types the
+    platform cannot query live (API, CSV, FILE) hold only a
+    ``connection_reference`` — a path, endpoint or export name — so a governed
+    source can be described honestly without inventing a driver for it.
+
+    The governance rollup at the bottom (grain, coverage, completeness, quality,
+    health) is *derived*, written only by an explicit profile or health check and
+    never inferred at read time. It exists so the source list can answer "is this
+    trustworthy today" without re-running the measurements.
     """
 
     __tablename__ = "data_sources"
@@ -53,13 +64,16 @@ class DataSource(Base, UUIDPrimaryKey, Timestamped):
     schema_name: Mapped[str | None] = mapped_column(String(160), default="public")
     username: Mapped[str | None] = mapped_column(String(160))
     encrypted_credentials: Mapped[str | None] = mapped_column(Text)
+    # Where a non-queryable source lives: an export path, a bucket key, an API
+    # endpoint. Never a credential — those still go through encryption.
+    connection_reference: Mapped[str | None] = mapped_column(String(500))
     # Non-secret extras: sslmode, warehouse, project id, ...
     options: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
 
     connection_status: Mapped[str] = mapped_column(
         String(20), default=ConnectionStatus.UNTESTED, nullable=False
     )
-    last_tested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_tested_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     last_test_error: Mapped[str | None] = mapped_column(Text)
 
     refresh_frequency: Mapped[str] = mapped_column(
@@ -67,8 +81,30 @@ class DataSource(Base, UUIDPrimaryKey, Timestamped):
     )
     timezone: Mapped[str] = mapped_column(String(64), default="UTC", nullable=False)
     known_limitations: Mapped[str | None] = mapped_column(Text)
+    # Which governed calendar this source's periods are read against. Sources can
+    # legitimately disagree — a warehouse on fiscal months beside an operational
+    # database on Gregorian ones — and that difference must survive rather than be
+    # averaged away.
+    business_calendar_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("company_calendars.id", ondelete="SET NULL")
+    )
 
-    last_discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_discovered_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+    # -- derived governance rollup (written by profiling / health checks) ----
+    # Coarsest grain observed across this source's selected tables, in words.
+    grain: Mapped[str | None] = mapped_column(String(300))
+    last_refresh_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    coverage_start: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    coverage_end: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    completeness_pct: Mapped[float | None] = mapped_column(Float)
+    quality_score: Mapped[float | None] = mapped_column(Float)
+    health_status: Mapped[str] = mapped_column(
+        String(20), default=SourceHealthStatus.UNKNOWN, nullable=False
+    )
+    health_checked_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    # Why the status is what it is, so a screen never has to guess.
+    health_reason: Mapped[str | None] = mapped_column(Text)
 
     tables: Mapped[list["SourceTable"]] = relationship(
         back_populates="data_source", cascade="all, delete-orphan"
@@ -98,7 +134,29 @@ class SourceTable(Base, UUIDPrimaryKey, Timestamped):
     approx_row_count: Mapped[int | None] = mapped_column(Integer)
     column_count: Mapped[int | None] = mapped_column(Integer)
     comment: Mapped[str | None] = mapped_column(Text)
-    discovered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    discovered_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+    # -- governed, human-owned metadata -----------------------------------
+    # What the business calls this table. Never written by discovery.
+    display_name: Mapped[str | None] = mapped_column(String(200))
+    # What it holds, in the company's own words.
+    description: Mapped[str | None] = mapped_column(Text)
+
+    # -- candidates: deterministic proposals, not decisions ----------------
+    # Columns that *could* identify a row, mark its time axis, or scope it to a
+    # company. Lists rather than single values on purpose — proposing one answer
+    # would hide the ambiguity a reviewer needs to see.
+    primary_identifier_candidates: Mapped[list] = mapped_column(
+        JSON, default=list, nullable=False
+    )
+    time_field_candidates: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    company_field_candidates: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    candidates_status: Mapped[str] = mapped_column(
+        String(20), default=MetadataStatus.PROPOSED, nullable=False
+    )
+    # When this table was last profiled. Denormalised from TableProfile so a
+    # table list can show it without a per-row join.
+    profiled_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 
     data_source: Mapped[DataSource] = relationship(back_populates="tables")
     columns: Mapped[list["SourceColumn"]] = relationship(
@@ -138,6 +196,20 @@ class SourceColumn(Base, UUIDPrimaryKey, Timestamped):
     semantic_type: Mapped[str] = mapped_column(
         String(30), default=SemanticType.UNKNOWN, nullable=False
     )
+    # The business reading of this column, kept separate from semantic_type so a
+    # review can disagree with the profiler without changing what the KPI, grain
+    # and detection engines compute. candidate_role is the machine's proposal and
+    # is rewritten on every profile; confirmed_role is a human decision and is
+    # never overwritten by any automated pass.
+    candidate_role: Mapped[str] = mapped_column(
+        String(30), default=ColumnRole.UNKNOWN, nullable=False
+    )
+    confirmed_role: Mapped[str | None] = mapped_column(String(30))
+    role_status: Mapped[str] = mapped_column(
+        String(20), default=MetadataStatus.PROPOSED, nullable=False
+    )
+    # What this column means, in the company's own words.
+    description: Mapped[str | None] = mapped_column(Text)
     # Sprint 1 builds the data model for sensitivity; it does not attempt
     # AI-based PII discovery.
     classification: Mapped[str] = mapped_column(
@@ -149,6 +221,11 @@ class SourceColumn(Base, UUIDPrimaryKey, Timestamped):
     comment: Mapped[str | None] = mapped_column(Text)
 
     table: Mapped[SourceTable] = relationship(back_populates="columns")
+
+    @property
+    def effective_role(self) -> str:
+        """The role to act on: a confirmed decision, else the proposal."""
+        return self.confirmed_role or self.candidate_role
 
 
 class SelectedTable(Base, UUIDPrimaryKey, Timestamped):
@@ -201,11 +278,11 @@ class SourceHealth(Base, UUIDPrimaryKey, Timestamped):
     source_table_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("source_tables.id", ondelete="CASCADE"), index=True
     )
-    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    checked_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     time_column: Mapped[str | None] = mapped_column(String(200))
-    coverage_start: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    coverage_end: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    coverage_start: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    coverage_end: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    last_refresh_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     freshness_lag_seconds: Mapped[int | None] = mapped_column(Integer)
     expected_interval_seconds: Mapped[int | None] = mapped_column(Integer)
     freshness_status: Mapped[str] = mapped_column(

@@ -15,11 +15,23 @@ from app.connectors.registry import (
     descriptor_for,
 )
 from app.core.clock import utcnow
-from app.core.deps import AccessContext, SessionDep, load_scoped, require_permissions
+from app.core.deps import (
+    AccessContext,
+    SessionDep,
+    load_scoped,
+    load_selected_table,
+    require_permissions,
+)
 from app.core.errors import Conflict, NotFound, ValidationFailure
 from app.core.security import encrypt_secret
 from app.core.telemetry import usage_of
-from app.models.base import ConnectionStatus, DataSourceType
+from app.models.base import (
+    ConnectionStatus,
+    DataSourceType,
+    GrainStatus,
+    MetadataStatus,
+    SourceHealthStatus,
+)
 from app.models.profiling import TableGrain, TableProfile
 from app.models.source import (
     DataSource,
@@ -28,17 +40,28 @@ from app.models.source import (
     SourceHealth,
     SourceTable,
 )
+from app.models.tenant import CompanyCalendar
 from app.schemas import (
     ColumnClassificationUpdate,
+    ColumnGovernanceUpdate,
     DataScopeUpdate,
     DataSourceCreate,
     DataSourceOut,
     DataSourceUpdate,
     SourceColumnOut,
+    SourceHealthOut,
+    SourceTableDetailOut,
     SourceTableOut,
+    TableGovernanceUpdate,
 )
 from app.services import audit
 from app.services.discovery import discover_source
+from app.services.freshness import check_freshness
+from app.services.profiling import profile_table
+from app.services.source_governance import (
+    assess_source_health,
+    persist_source_health,
+)
 
 router = APIRouter(tags=["data-sources"])
 
@@ -104,18 +127,34 @@ def _source_out(session, source: DataSource) -> DataSourceOut:
         username=source.username,
         # The credential itself is never serialised — only whether one is held.
         has_credentials=bool(source.encrypted_credentials),
+        connection_reference=source.connection_reference,
         connection_status=source.connection_status,
         last_tested_at=source.last_tested_at,
         last_test_error=source.last_test_error,
         refresh_frequency=source.refresh_frequency,
         timezone=source.timezone,
         known_limitations=source.known_limitations,
+        business_calendar_id=source.business_calendar_id,
         last_discovered_at=source.last_discovered_at,
         discovered_table_count=int(discovered or 0),
         selected_table_count=int(selected or 0),
+        # Last measured values, replayed as stored. A read never re-measures, so
+        # health_checked_at is what tells the reader how much this is still worth.
+        grain=source.grain,
+        last_refresh_at=source.last_refresh_at,
+        coverage_start=source.coverage_start,
+        coverage_end=source.coverage_end,
+        completeness_pct=source.completeness_pct,
+        quality_score=source.quality_score,
+        health_status=source.health_status,
+        health_checked_at=source.health_checked_at,
+        health_reason=source.health_reason,
         created_at=source.created_at,
         updated_at=source.updated_at,
     )
+
+
+_METADATA_ONLY_TYPES = (DataSourceType.API, DataSourceType.CSV, DataSourceType.FILE)
 
 
 def _resolve_connection(payload: DataSourceCreate) -> dict:
@@ -136,6 +175,21 @@ def _resolve_connection(payload: DataSourceCreate) -> dict:
         "password": payload.password,
         "options": {},
     }
+
+    if source_type in _METADATA_ONLY_TYPES:
+        # No driver exists for these, so there are no coordinates to resolve. The
+        # source is registered for governance: what it contains, at what grain, how
+        # often it lands, and what is known to be wrong with it. A reference is
+        # required because a source nobody can locate cannot be governed either.
+        if not payload.connection_reference:
+            raise ValidationFailure(
+                "A location reference is required so the source can be identified "
+                "(an endpoint, bucket path or file share). Credentials must not be "
+                "included — this field is stored unencrypted."
+            )
+        resolved.update(host=None, port=None, username=None, password=None)
+        resolved["options"] = {"transport": "none", "governed_metadata_only": True}
+        return resolved
 
     if source_type == DataSourceType.SQLITE:
         path = payload.path or payload.database_name
@@ -217,6 +271,36 @@ def list_sources(
     return [_source_out(session, row) for row in rows]
 
 
+def _validated_calendar_id(
+    session, calendar_id: str | None, access: AccessContext
+) -> str | None:
+    """Resolve a business calendar reference, refusing one owned by another company.
+
+    The id arrives from the client, so it is checked against the caller's company
+    rather than trusted: without this a source could be pinned to a calendar it is
+    not entitled to read, and every later freshness window would be judged against
+    another tenant's working days.
+    """
+    if calendar_id is None:
+        return None
+    trimmed = calendar_id.strip()
+    if not trimmed:
+        # An explicit blank clears the reference; it is not a lookup miss.
+        return None
+    calendar = session.scalar(
+        select(CompanyCalendar).where(
+            CompanyCalendar.id == trimmed,
+            CompanyCalendar.company_id == access.company.id,
+        )
+    )
+    if calendar is None:
+        raise ValidationFailure(
+            "Unknown business calendar for this company.",
+            details={"business_calendar_id": trimmed},
+        )
+    return calendar.id
+
+
 @router.post(
     "/companies/{company_id}/data-sources",
     response_model=DataSourceOut,
@@ -247,6 +331,8 @@ def create_source(
         # returned by any endpoint.
         options["has_service_role_key"] = True
 
+    calendar_id = _validated_calendar_id(session, payload.business_calendar_id, access)
+
     source = DataSource(
         company_id=access.company.id,
         name=payload.name.strip(),
@@ -260,11 +346,13 @@ def create_source(
         encrypted_credentials=(
             encrypt_secret(resolved["password"]) if resolved["password"] else None
         ),
+        connection_reference=payload.connection_reference,
         options=options,
         connection_status=ConnectionStatus.UNTESTED,
         refresh_frequency=payload.refresh_frequency,
         timezone=payload.timezone,
         known_limitations=payload.known_limitations,
+        business_calendar_id=calendar_id,
     )
     if payload.service_role_key:
         source.options["service_role_key_encrypted"] = encrypt_secret(payload.service_role_key)
@@ -298,6 +386,24 @@ def create_source(
     return _source_out(session, source)
 
 
+@router.get(
+    "/companies/{company_id}/data-sources/{source_id}", response_model=DataSourceOut
+)
+def get_source(
+    source_id: str,
+    session: SessionDep,
+    access: AccessContext = Depends(require_permissions("source.read")),
+) -> DataSourceOut:
+    """One source's registry record and its last measured governance rollup.
+
+    A pure read: it opens no connection, profiles nothing and re-measures nothing.
+    ``health_checked_at`` says when the rollup was taken; running a fresh check is
+    an explicit POST.
+    """
+    source: DataSource = load_scoped(session, DataSource, source_id, access)
+    return _source_out(session, source)
+
+
 @router.patch(
     "/companies/{company_id}/data-sources/{source_id}", response_model=DataSourceOut
 )
@@ -311,11 +417,36 @@ def update_source(
     source: DataSource = load_scoped(session, DataSource, source_id, access)
     changes: dict[str, object] = {}
 
-    for field in ("name", "description", "refresh_frequency", "timezone", "known_limitations", "schema_name"):
+    for field in (
+        "name",
+        "description",
+        "refresh_frequency",
+        "timezone",
+        "known_limitations",
+        "schema_name",
+        "connection_reference",
+    ):
         value = getattr(payload, field)
         if value is not None and getattr(source, field) != value:
             changes[field] = value
             setattr(source, field, value)
+
+    if payload.business_calendar_id is not None:
+        calendar_id = _validated_calendar_id(session, payload.business_calendar_id, access)
+        if calendar_id != source.business_calendar_id:
+            changes["business_calendar_id"] = calendar_id
+            source.business_calendar_id = calendar_id
+
+    if payload.refresh_frequency is not None and "refresh_frequency" in changes:
+        # Freshness is judged against the declared cadence, so changing it makes
+        # the stored verdict answer a question nobody asked. Cleared rather than
+        # recomputed: recomputing here would be a write hidden inside an edit.
+        source.health_status = SourceHealthStatus.UNKNOWN
+        source.health_reason = (
+            "Refresh cadence changed; the previous health verdict was measured "
+            "against the old cadence. Run a health check."
+        )
+        source.health_checked_at = None
 
     if payload.password:
         source.encrypted_credentials = encrypt_secret(payload.password)
@@ -380,6 +511,182 @@ def delete_source(
         request=request,
     )
     session.delete(source)
+
+
+# ---------------------------------------------------------------------------
+# Source health and source-level profiling
+# ---------------------------------------------------------------------------
+def _selected_tables_of(session, source: DataSource) -> list[SourceTable]:
+    """The source's tables that are inside the company's approved analytical scope."""
+    return list(
+        session.scalars(
+            select(SourceTable)
+            .join(SelectedTable, SelectedTable.source_table_id == SourceTable.id)
+            .where(
+                SourceTable.data_source_id == source.id,
+                SourceTable.company_id == source.company_id,
+                SelectedTable.enabled.is_(True),
+            )
+            .order_by(SourceTable.schema_name, SourceTable.table_name)
+        )
+    )
+
+
+@router.get(
+    "/companies/{company_id}/data-sources/{source_id}/health",
+    response_model=SourceHealthOut,
+)
+def get_source_health(
+    source_id: str,
+    session: SessionDep,
+    access: AccessContext = Depends(require_permissions("source.read")),
+) -> SourceHealthOut:
+    """The deterministic health verdict, projected from stored measurements.
+
+    Reads only: no connector is opened and no measurement is taken or written.
+    The rollup arithmetic is replayed over the freshness observations and profiles
+    already on record, so ``measured_at`` — not ``checked_at`` — is what says how
+    old the underlying evidence is. To take fresh measurements, POST to this path.
+    """
+    source: DataSource = load_scoped(session, DataSource, source_id, access)
+    verdict = assess_source_health(session, source, _selected_tables_of(session, source))
+    return SourceHealthOut(**verdict.as_dict())
+
+
+@router.post(
+    "/companies/{company_id}/data-sources/{source_id}/health",
+    response_model=SourceHealthOut,
+)
+def run_source_health_check(
+    source_id: str,
+    session: SessionDep,
+    request: Request,
+    access: AccessContext = Depends(require_permissions("profiling.run")),
+) -> SourceHealthOut:
+    """Measure freshness across the source's tables, then roll it up. No LLM.
+
+    The inputs are the declared cadence, the measured lag of each table's time
+    column, and the completeness and quality already computed by profiling. There
+    is no model in this path and there must not be one: a source's trustworthiness
+    is the foundation the confidence engine later stands on, and a generated
+    verdict would make that foundation unverifiable.
+    """
+    source: DataSource = load_scoped(session, DataSource, source_id, access)
+    tables = _selected_tables_of(session, source)
+
+    if tables:
+        connector = build_connector(source)
+        try:
+            check_freshness(session, source, tables, connector)
+        finally:
+            usage_of(request).absorb(connector)
+            connector.close()
+        session.flush()
+
+    verdict = assess_source_health(session, source, tables)
+    persist_source_health(source, verdict)
+
+    audit.record(
+        session,
+        access=access,
+        action=audit.AuditAction.FRESHNESS_CHECKED,
+        resource_type="data_source",
+        resource_id=source.id,
+        resource_label=source.name,
+        summary=f"Health check: {verdict.status}. {verdict.reason}",
+        details={
+            "status": verdict.status,
+            "reason": verdict.reason,
+            "fresh_tables": verdict.fresh_tables,
+            "stale_tables": verdict.stale_tables,
+            "unknown_tables": verdict.unknown_tables,
+            "quality_score": verdict.quality_score,
+            "completeness_pct": verdict.completeness_pct,
+        },
+        request=request,
+    )
+    return SourceHealthOut(**verdict.as_dict())
+
+
+@router.post("/companies/{company_id}/data-sources/{source_id}/profile")
+def profile_source(
+    source_id: str,
+    session: SessionDep,
+    request: Request,
+    access: AccessContext = Depends(require_permissions("profiling.run")),
+) -> dict:
+    """Profile every in-scope table of this source, then refresh its health.
+
+    Explicit by design: nothing here runs on a read. Profiling issues aggregate
+    queries against the live source, and doing that implicitly would put a real
+    cost on somebody's dashboard load.
+
+    Runs under the caller's own entitlement, so a column this user may not read
+    is never queried — the profile records it as withheld instead of quietly
+    presenting a partial picture as complete.
+    """
+    source: DataSource = load_scoped(session, DataSource, source_id, access)
+    tables = _selected_tables_of(session, source)
+    if not tables:
+        raise ValidationFailure(
+            f"No table of '{source.name}' is in this company's approved data scope. "
+            "Select tables under Data Scope before profiling.",
+            details={"source_id": source.id},
+        )
+
+    profiled: list[dict] = []
+    connector = build_connector(source)
+    try:
+        for table in tables:
+            outcome = profile_table(session, table, connector, access)
+            profiled.append(outcome.as_dict())
+        session.flush()
+        check_freshness(session, source, tables, connector)
+    finally:
+        usage_of(request).absorb(connector)
+        connector.close()
+    session.flush()
+
+    verdict = assess_source_health(session, source, tables)
+    persist_source_health(source, verdict)
+
+    withheld = sum(int(item.get("withheld_columns") or 0) for item in profiled)
+    audit.record(
+        session,
+        access=access,
+        action=audit.AuditAction.PROFILE_RUN,
+        resource_type="data_source",
+        resource_id=source.id,
+        resource_label=source.name,
+        summary=(
+            f"Profiled {len(profiled)} table(s) of '{source.name}'; "
+            f"{withheld} column(s) withheld by access policy. Health: {verdict.status}."
+        ),
+        details={
+            "tables": [item.get("table") for item in profiled],
+            "withheld_columns": withheld,
+            "health_status": verdict.status,
+        },
+        request=request,
+    )
+    audit.event(
+        session,
+        company_id=access.company.id,
+        category="SOURCE",
+        title="Source profiled",
+        message=f"{source.name}: {len(profiled)} table(s), health {verdict.status}.",
+    )
+    return {
+        "source_id": source.id,
+        "profiled_table_count": len(profiled),
+        "withheld_column_count": withheld,
+        "tables": profiled,
+        "health": verdict.as_dict(),
+        "note": (
+            "Column roles and table candidates were re-proposed from the measured "
+            "statistics. Anything a reviewer had confirmed was left untouched."
+        ),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -505,6 +812,76 @@ def list_schemas(
 # ---------------------------------------------------------------------------
 # Discovered tables and columns
 # ---------------------------------------------------------------------------
+def _table_out(
+    table: SourceTable,
+    *,
+    profile: TableProfile | None,
+    grain: TableGrain | None,
+    observation: SourceHealth | None,
+) -> SourceTableOut:
+    """One table's registry row, with proposed and confirmed metadata kept apart."""
+    selection = table.selection
+    return SourceTableOut(
+        id=table.id,
+        data_source_id=table.data_source_id,
+        schema_name=table.schema_name,
+        table_name=table.table_name,
+        qualified_name=table.qualified_name,
+        table_type=table.table_type,
+        approx_row_count=table.approx_row_count,
+        column_count=table.column_count,
+        discovered_at=table.discovered_at,
+        selected=bool(selection and selection.enabled),
+        business_alias=selection.business_alias if selection else None,
+        declared_grain=selection.declared_grain if selection else None,
+        primary_time_column=selection.primary_time_column if selection else None,
+        inferred_grain=grain.inferred_grain if grain else None,
+        quality_status=profile.quality_status if profile else None,
+        freshness_status=observation.freshness_status if observation else None,
+        profiled_at=table.profiled_at or (profile.profiled_at if profile else None),
+        display_name=table.display_name,
+        description=table.description,
+        primary_identifier_candidates=list(table.primary_identifier_candidates or []),
+        time_field_candidates=list(table.time_field_candidates or []),
+        company_field_candidates=list(table.company_field_candidates or []),
+        candidates_status=table.candidates_status,
+        confirmed_grain=grain.confirmed_grain if grain else None,
+        effective_grain=grain.effective_grain if grain else None,
+        grain_status=grain.grain_status if grain else GrainStatus.PROPOSED,
+    )
+
+
+def _column_out(
+    column: SourceColumn, table: SourceTable | None, access: AccessContext
+) -> SourceColumnOut:
+    readable = access.can_read_column(
+        column, table_name=table.table_name if table else None
+    )
+    return SourceColumnOut(
+        id=column.id,
+        column_name=column.column_name,
+        ordinal_position=column.ordinal_position,
+        data_type=column.data_type,
+        is_nullable=column.is_nullable,
+        is_primary_key=column.is_primary_key,
+        is_foreign_key=column.is_foreign_key,
+        references_table=column.references_table,
+        references_column=column.references_column,
+        semantic_type=column.semantic_type,
+        candidate_role=column.candidate_role,
+        confirmed_role=column.confirmed_role,
+        effective_role=column.effective_role,
+        role_status=column.role_status,
+        description=column.description,
+        classification=column.classification,
+        is_pii=column.is_pii,
+        is_sensitive=column.is_sensitive,
+        is_restricted=column.is_restricted,
+        readable=readable,
+        withheld_reason=None if readable else access.withheld_reason(column),
+    )
+
+
 @router.get("/companies/{company_id}/tables", response_model=list[SourceTableOut])
 def list_tables(
     session: SessionDep,
@@ -524,35 +901,204 @@ def list_tables(
 
     results: list[SourceTableOut] = []
     for table in tables:
-        selection = table.selection
-        is_selected = bool(selection and selection.enabled)
-        if selected_only and not is_selected:
+        if selected_only and not (table.selection and table.selection.enabled):
             continue
-        profile = profiles.get(table.id)
-        grain = grains.get(table.id)
-        observation = health.get(table.id)
         results.append(
-            SourceTableOut(
-                id=table.id,
-                data_source_id=table.data_source_id,
-                schema_name=table.schema_name,
-                table_name=table.table_name,
-                qualified_name=table.qualified_name,
-                table_type=table.table_type,
-                approx_row_count=table.approx_row_count,
-                column_count=table.column_count,
-                discovered_at=table.discovered_at,
-                selected=is_selected,
-                business_alias=selection.business_alias if selection else None,
-                declared_grain=selection.declared_grain if selection else None,
-                primary_time_column=selection.primary_time_column if selection else None,
-                inferred_grain=grain.inferred_grain if grain else None,
-                quality_status=profile.quality_status if profile else None,
-                freshness_status=observation.freshness_status if observation else None,
-                profiled_at=profile.profiled_at if profile else None,
+            _table_out(
+                table,
+                profile=profiles.get(table.id),
+                grain=grains.get(table.id),
+                observation=health.get(table.id),
             )
         )
     return results
+
+
+@router.get(
+    "/companies/{company_id}/tables/{table_id}", response_model=SourceTableDetailOut
+)
+def get_table(
+    table_id: str,
+    session: SessionDep,
+    access: AccessContext = Depends(require_permissions("source.read")),
+) -> SourceTableDetailOut:
+    """One table with its columns, its grain evidence and its last profile.
+
+    A pure read. Every governed field arrives with the status that says who put it
+    there — ``candidates_status``, ``grain_status``, ``role_status`` — so a screen
+    can show a proposal as a proposal instead of dressing inference up as fact.
+    """
+    table: SourceTable = load_scoped(session, SourceTable, table_id, access)
+    profile = session.scalar(
+        select(TableProfile).where(TableProfile.source_table_id == table.id)
+    )
+    grain = session.scalar(select(TableGrain).where(TableGrain.source_table_id == table.id))
+    observation = _latest_health(session, [table.id]).get(table.id)
+    selection = table.selection
+
+    base = _table_out(table, profile=profile, grain=grain, observation=observation)
+    return SourceTableDetailOut(
+        **base.model_dump(),
+        database_name=table.database_name,
+        comment=table.comment,
+        notes=selection.notes if selection else None,
+        grain_columns=list(grain.grain_columns or []) if grain else [],
+        grain_confidence=grain.confidence if grain else None,
+        grain_method=grain.method if grain else None,
+        grain_evidence=dict(grain.evidence or {}) if grain else {},
+        grain_confirmed_by=grain.confirmed_by if grain else None,
+        grain_confirmed_at=grain.confirmed_at if grain else None,
+        time_grain=grain.time_grain if grain else None,
+        row_count=profile.row_count if profile else None,
+        completeness_pct=profile.completeness_pct if profile else None,
+        quality_score=profile.quality_score if profile else None,
+        withheld_column_count=profile.withheld_column_count if profile else 0,
+        quality_warnings=list(profile.warnings or []) if profile else [],
+        columns=[
+            _column_out(column, table, access)
+            for column in sorted(table.columns, key=lambda c: c.ordinal_position)
+        ],
+    )
+
+
+@router.patch(
+    "/companies/{company_id}/tables/{table_id}", response_model=SourceTableDetailOut
+)
+def review_table_metadata(
+    table_id: str,
+    payload: TableGovernanceUpdate,
+    session: SessionDep,
+    request: Request,
+    access: AccessContext = Depends(require_permissions("source.manage")),
+) -> SourceTableDetailOut:
+    """Record a reviewer's decision about this table's governed metadata.
+
+    This is the only path to CONFIRMED. Profiling and discovery may write
+    proposals and may rewrite their own proposals, but they stop at a confirmed
+    value — so a confirmation survives every later automated pass, which is what
+    makes it worth making.
+    """
+    table: SourceTable = load_scoped(session, SourceTable, table_id, access)
+    changes: dict[str, object] = {}
+
+    for field in ("display_name", "description"):
+        value = getattr(payload, field)
+        if value is not None and getattr(table, field) != value:
+            changes[field] = value
+            setattr(table, field, value)
+
+    for field in (
+        "primary_identifier_candidates",
+        "time_field_candidates",
+        "company_field_candidates",
+    ):
+        value = getattr(payload, field)
+        if value is None:
+            continue
+        cleaned = _validated_column_names(table, value, field)
+        if list(getattr(table, field) or []) != cleaned:
+            changes[field] = cleaned
+            setattr(table, field, cleaned)
+
+    if payload.confirm_candidates is not None:
+        target = (
+            MetadataStatus.CONFIRMED if payload.confirm_candidates else MetadataStatus.PROPOSED
+        )
+        if table.candidates_status != target:
+            changes["candidates_status"] = target
+            table.candidates_status = target
+
+    grain_changed = _apply_grain_review(session, table, payload, access, changes)
+
+    if changes:
+        audit.record(
+            session,
+            access=access,
+            action=audit.AuditAction.SCOPE_UPDATED,
+            resource_type="source_table",
+            resource_id=table.id,
+            resource_label=table.qualified_name,
+            summary=f"Reviewed governed metadata: {', '.join(sorted(changes))}.",
+            details={"changes": changes, "grain_reviewed": grain_changed},
+            request=request,
+        )
+    session.flush()
+    return get_table(table.id, session, access)
+
+
+def _apply_grain_review(
+    session,
+    table: SourceTable,
+    payload: TableGovernanceUpdate,
+    access: AccessContext,
+    changes: dict[str, object],
+) -> bool:
+    """Confirm or withdraw the grain, recording who decided and when."""
+    if payload.confirmed_grain is None and payload.confirm_grain is None:
+        return False
+
+    grain = session.scalar(select(TableGrain).where(TableGrain.source_table_id == table.id))
+    if grain is None:
+        raise ValidationFailure(
+            f"{table.qualified_name} has no detected grain to review. "
+            "Run grain detection first.",
+            details={"source_table_id": table.id},
+        )
+
+    if payload.confirmed_grain is not None:
+        grain.confirmed_grain = payload.confirmed_grain
+        changes["confirmed_grain"] = payload.confirmed_grain
+
+    if payload.confirm_grain is False:
+        # Withdrawing a confirmation returns the field to whatever authority the
+        # underlying evidence carries on its own — never silently to CONFIRMED.
+        grain.confirmed_grain = None
+        grain.confirmed_by = None
+        grain.confirmed_at = None
+        grain.grain_status = (
+            GrainStatus.DECLARED if grain.declared_grain else GrainStatus.PROPOSED
+        )
+        changes["grain_status"] = grain.grain_status
+        return True
+
+    if payload.confirm_grain or payload.confirmed_grain is not None:
+        if not (grain.confirmed_grain or grain.declared_grain or grain.inferred_grain):
+            raise ValidationFailure(
+                "There is nothing to confirm: no grain has been declared or inferred "
+                "for this table.",
+                details={"source_table_id": table.id},
+            )
+        grain.confirmed_grain = (
+            grain.confirmed_grain or grain.declared_grain or grain.inferred_grain
+        )
+        grain.grain_status = GrainStatus.CONFIRMED
+        grain.confirmed_by = access.user.id
+        grain.confirmed_at = utcnow()
+        changes["grain_status"] = GrainStatus.CONFIRMED
+    return True
+
+
+def _validated_column_names(
+    table: SourceTable, names: list[str], field: str
+) -> list[str]:
+    """Candidates must name columns that actually exist on the table.
+
+    A governed identifier pointing at a column that was renamed away is worse than
+    an empty list: the next engine to read it fails somewhere far from here.
+    """
+    known = {column.column_name for column in table.columns}
+    cleaned: list[str] = []
+    for name in names:
+        stripped = (name or "").strip()
+        if not stripped or stripped in cleaned:
+            continue
+        if stripped not in known:
+            raise ValidationFailure(
+                f"{table.qualified_name} has no column '{stripped}'.",
+                details={"field": field, "known_columns": sorted(known)},
+            )
+        cleaned.append(stripped)
+    return cleaned
 
 
 @router.get(
@@ -564,30 +1110,10 @@ def list_columns(
     access: AccessContext = Depends(require_permissions("source.read")),
 ) -> list[SourceColumnOut]:
     table: SourceTable = load_scoped(session, SourceTable, table_id, access)
-    results: list[SourceColumnOut] = []
-    for column in sorted(table.columns, key=lambda c: c.ordinal_position):
-        readable = access.can_read_column(column, table_name=table.table_name)
-        results.append(
-            SourceColumnOut(
-                id=column.id,
-                column_name=column.column_name,
-                ordinal_position=column.ordinal_position,
-                data_type=column.data_type,
-                is_nullable=column.is_nullable,
-                is_primary_key=column.is_primary_key,
-                is_foreign_key=column.is_foreign_key,
-                references_table=column.references_table,
-                references_column=column.references_column,
-                semantic_type=column.semantic_type,
-                classification=column.classification,
-                is_pii=column.is_pii,
-                is_sensitive=column.is_sensitive,
-                is_restricted=column.is_restricted,
-                readable=readable,
-                withheld_reason=None if readable else access.withheld_reason(column),
-            )
-        )
-    return results
+    return [
+        _column_out(column, table, access)
+        for column in sorted(table.columns, key=lambda c: c.ordinal_position)
+    ]
 
 
 @router.patch("/companies/{company_id}/columns/{column_id}", response_model=SourceColumnOut)
@@ -624,25 +1150,66 @@ def reclassify_column(
             request=request,
         )
 
-    readable = access.can_read_column(column, table_name=table.table_name if table else None)
-    return SourceColumnOut(
-        id=column.id,
-        column_name=column.column_name,
-        ordinal_position=column.ordinal_position,
-        data_type=column.data_type,
-        is_nullable=column.is_nullable,
-        is_primary_key=column.is_primary_key,
-        is_foreign_key=column.is_foreign_key,
-        references_table=column.references_table,
-        references_column=column.references_column,
-        semantic_type=column.semantic_type,
-        classification=column.classification,
-        is_pii=column.is_pii,
-        is_sensitive=column.is_sensitive,
-        is_restricted=column.is_restricted,
-        readable=readable,
-        withheld_reason=None if readable else access.withheld_reason(column),
-    )
+    return _column_out(column, table, access)
+
+
+@router.patch(
+    "/companies/{company_id}/columns/{column_id}/role", response_model=SourceColumnOut
+)
+def review_column_role(
+    column_id: str,
+    payload: ColumnGovernanceUpdate,
+    session: SessionDep,
+    request: Request,
+    access: AccessContext = Depends(require_permissions("source.manage")),
+) -> SourceColumnOut:
+    """Confirm what a column means in business terms.
+
+    Deliberately a different endpoint from reclassification: sensitivity decides
+    *who may read* a column and role decides *what it means*. Sharing one payload
+    would let a meaning correction quietly widen access.
+
+    A confirmed role outranks the profiler's proposal and survives every later
+    profiling pass. Clearing it hands the column back to the proposer.
+    """
+    column: SourceColumn = load_scoped(session, SourceColumn, column_id, access)
+    table = session.get(SourceTable, column.source_table_id)
+    changes: dict[str, object] = {}
+
+    if payload.clear_confirmed_role:
+        if column.confirmed_role is not None:
+            changes["confirmed_role"] = None
+            column.confirmed_role = None
+        # Back to whatever the last automated pass proposed. Left as PROPOSED even
+        # when no proposal exists — the alternative would assert a role nobody set.
+        if column.role_status != MetadataStatus.PROPOSED:
+            changes["role_status"] = MetadataStatus.PROPOSED
+            column.role_status = MetadataStatus.PROPOSED
+    elif payload.confirmed_role is not None:
+        if column.confirmed_role != payload.confirmed_role:
+            changes["confirmed_role"] = payload.confirmed_role
+            column.confirmed_role = payload.confirmed_role
+        if column.role_status != MetadataStatus.CONFIRMED:
+            changes["role_status"] = MetadataStatus.CONFIRMED
+            column.role_status = MetadataStatus.CONFIRMED
+
+    if payload.description is not None and column.description != payload.description:
+        changes["description"] = payload.description
+        column.description = payload.description
+
+    if changes:
+        audit.record(
+            session,
+            access=access,
+            action=audit.AuditAction.COLUMN_CLASSIFIED,
+            resource_type="source_column",
+            resource_id=column.id,
+            resource_label=f"{table.table_name if table else '?'}.{column.column_name}",
+            summary=f"Reviewed column role: {', '.join(sorted(changes))}.",
+            details={"changes": changes, "review": "role"},
+            request=request,
+        )
+    return _column_out(column, table, access)
 
 
 # ---------------------------------------------------------------------------

@@ -225,7 +225,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const can = useCallback(
     (permission: string) => {
       if (adminPermissions.length) return adminPermissions.includes(permission)
-      return membership?.permissions.includes(permission) ?? false
+      return (membership?.permissions ?? []).includes(permission)
     },
     [adminPermissions, membership],
   )

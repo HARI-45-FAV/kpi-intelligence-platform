@@ -13,7 +13,6 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -25,12 +24,14 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
 from app.models.base import (
+    GrainStatus,
     JoinSafetyLevel,
     QualityStatus,
     ReconciliationStatus,
     RelationshipType,
     Timestamped,
     UUIDPrimaryKey,
+    UtcDateTime,
 )
 
 
@@ -44,7 +45,7 @@ class TableProfile(Base, UUIDPrimaryKey, Timestamped):
     source_table_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("source_tables.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    profiled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    profiled_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     row_count: Mapped[int | None] = mapped_column(Integer)
     profiled_column_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Columns the profiling user was not entitled to read. Recorded rather than
@@ -75,7 +76,7 @@ class ColumnProfile(Base, UUIDPrimaryKey, Timestamped):
     source_column_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("source_columns.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    profiled_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    profiled_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
 
     row_count: Mapped[int | None] = mapped_column(Integer)
     null_count: Mapped[int | None] = mapped_column(Integer)
@@ -108,6 +109,12 @@ class TableGrain(Base, UUIDPrimaryKey, Timestamped):
 
     ``inferred_grain`` comes from uniqueness scans over candidate column sets —
     the data decides, not a hardcoded assumption such as "sales = order".
+
+    Inference is not always right, and a KPI built on a wrong grain
+    double-counts. ``grain_status`` records how much authority the recorded grain
+    actually carries: DECLARED if an administrator stated it, PROPOSED if only
+    detection has spoken, CONFIRMED once a human reviewed the inference. Nothing
+    automated may write CONFIRMED.
     """
 
     __tablename__ = "table_grains"
@@ -130,6 +137,20 @@ class TableGrain(Base, UUIDPrimaryKey, Timestamped):
     time_column: Mapped[str | None] = mapped_column(String(200))
     time_grain: Mapped[str | None] = mapped_column(String(20))
     evidence: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
+
+    grain_status: Mapped[str] = mapped_column(
+        String(20), default=GrainStatus.PROPOSED, nullable=False
+    )
+    confirmed_grain: Mapped[str | None] = mapped_column(String(300))
+    confirmed_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL")
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+    @property
+    def effective_grain(self) -> str | None:
+        """The grain to act on: a confirmed or declared statement beats inference."""
+        return self.confirmed_grain or self.declared_grain or self.inferred_grain
 
 
 class TableRelationship(Base, UUIDPrimaryKey, Timestamped):

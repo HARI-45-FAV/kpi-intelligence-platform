@@ -12,7 +12,7 @@ import bcrypt
 import jwt
 from cryptography.fernet import Fernet, InvalidToken
 
-from app.core.config import settings
+from app.core.config import DEV_DEFAULT_SECRET_KEY, settings
 
 _BCRYPT_ROUNDS = 12
 
@@ -86,9 +86,39 @@ def decode_access_token(token: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Data-source credential encryption
 # ---------------------------------------------------------------------------
+# Sealing tenant credentials is deliberately *not* done with ``secret_key``
+# unless nothing else is configured. See the note on
+# ``Settings.credential_encryption_key``: the signing key is meant to be
+# rotatable and this one is not, so coupling them made every data source in the
+# platform a hostage of token rotation.
+def _derive_fernet(material: str) -> Fernet:
+    return Fernet(base64.urlsafe_b64encode(hashlib.sha256(material.encode("utf-8")).digest()))
+
+
+def _credential_key() -> str:
+    """The key credentials are sealed with now."""
+    return settings.credential_encryption_key or settings.secret_key
+
+
+def _superseded_keys() -> tuple[str, ...]:
+    """Keys a stored credential may still be sealed under, newest intent first.
+
+    Only keys this deployment has actually been configured with, plus the
+    published development default. It never guesses.
+    """
+    current = _credential_key()
+    candidates = (settings.secret_key, DEV_DEFAULT_SECRET_KEY)
+    seen: set[str] = {current}
+    ordered: list[str] = []
+    for candidate in candidates:
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ordered.append(candidate)
+    return tuple(ordered)
+
+
 def _fernet() -> Fernet:
-    key = base64.urlsafe_b64encode(hashlib.sha256(settings.secret_key.encode("utf-8")).digest())
-    return Fernet(key)
+    return _derive_fernet(_credential_key())
 
 
 def encrypt_secret(plaintext: str) -> str:
@@ -103,23 +133,24 @@ def decrypt_secret(ciphertext: str) -> str:
 
 
 def migrate_legacy_secret(ciphertext: str) -> str | None:
-    """Re-encrypt a credential created with the original development key.
+    """Re-seal a credential encrypted under a key this deployment has replaced.
 
-    Early local workspaces used the documented default before a project-specific
-    ``SECRET_KEY`` was configured.  This helper permits a one-time, explicit
-    migration of those recoverable records; it never guesses arbitrary keys.
+    Two cases reach here, and they are the same operation. A workspace that ran
+    on the documented development default before a real ``SECRET_KEY`` was set,
+    and a deployment that has just split ``CREDENTIAL_ENCRYPTION_KEY`` out of a
+    ``SECRET_KEY`` that used to do both jobs. Either way the record is
+    recoverable with a key we hold, so it is re-sealed with the current one.
+
+    Returns ``None`` when the credential is already current or is not readable
+    with any configured key -- never a guess, and never a partial write.
     """
-    legacy_key = "dev-only-secret-change-me-in-production-0123456789abcdef"
-    if settings.secret_key == legacy_key:
-        return None
-    legacy_fernet = Fernet(
-        base64.urlsafe_b64encode(hashlib.sha256(legacy_key.encode("utf-8")).digest())
-    )
-    try:
-        plaintext = legacy_fernet.decrypt(ciphertext.encode("utf-8")).decode("utf-8")
-    except InvalidToken:
-        return None
-    return encrypt_secret(plaintext)
+    for material in _superseded_keys():
+        try:
+            plaintext = _derive_fernet(material).decrypt(ciphertext.encode("utf-8")).decode("utf-8")
+        except InvalidToken:
+            continue
+        return encrypt_secret(plaintext)
+    return None
 
 
 def redact(value: str | None, keep: int = 2) -> str:

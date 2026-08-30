@@ -11,7 +11,6 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     ForeignKey,
     Integer,
     String,
@@ -26,6 +25,7 @@ from app.models.base import (
     MembershipStatus,
     Timestamped,
     UUIDPrimaryKey,
+    UtcDateTime,
 )
 
 
@@ -39,7 +39,7 @@ class User(Base, UUIDPrimaryKey, Timestamped):
     full_name: Mapped[str] = mapped_column(String(200), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_login_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
 
     memberships: Mapped[list["CompanyUser"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -138,6 +138,15 @@ class CompanyUser(Base, UUIDPrimaryKey, Timestamped):
     # Column-level denials, e.g. ["customers.email"]. Applied on top of the
     # column classification rules.
     denied_columns: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # Business domains this membership may see, e.g. ["SALES", "MARKETING"].
+    # Free-form strings rather than an enum: a company's domain vocabulary is
+    # its own, and hardcoding one here would bake a customer into the platform.
+    # Empty == unrestricted, which is what an administrator holds.
+    allowed_domains: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
+    # Document scopes this membership may retrieve, e.g. ["FINANCE_POLICY"].
+    # Empty == unrestricted. Read by later retrieval so that "which documents may
+    # answer this question" is decided from the membership, never from the query.
+    allowed_document_scopes: Mapped[list] = mapped_column(JSON, default=list, nullable=False)
 
     user: Mapped[User] = relationship(back_populates="memberships")
     company: Mapped[Company] = relationship(back_populates="memberships")

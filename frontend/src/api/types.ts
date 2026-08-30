@@ -118,9 +118,165 @@ export interface DataSource {
   refresh_frequency: string
   timezone: string
   last_discovered_at?: string | null
-  table_count: number
+  /** Named to match the API exactly — it counts what discovery found, not what is in scope. */
+  discovered_table_count: number
   selected_table_count: number
   created_at: string
+  /** Where a source with no driver lives — a path, endpoint or export name. */
+  connection_reference?: string | null
+  business_calendar_id?: string | null
+  known_limitations?: string | null
+  /**
+   * Derived governance rollup. Written only by an explicit profile or health
+   * check, so `health_checked_at` is what says how much of it is still true.
+   * All null means never measured, which is a real answer, not a missing one.
+   */
+  grain?: string | null
+  last_refresh_at?: string | null
+  coverage_start?: string | null
+  coverage_end?: string | null
+  completeness_pct?: number | null
+  quality_score?: number | null
+  health_status: string
+  health_checked_at?: string | null
+  health_reason?: string | null
+}
+
+/** One table's contribution to its source's health verdict. */
+export interface SourceHealthTable {
+  source_table_id: string
+  table: string
+  time_column?: string | null
+  freshness_status: string
+  lag_seconds?: number | null
+  coverage_start?: string | null
+  coverage_end?: string | null
+  row_count?: number | null
+  completeness_pct?: number | null
+  quality_score?: number | null
+  grain?: string | null
+  grain_status?: string | null
+  profiled_at?: string | null
+  checked_at?: string | null
+  note?: string | null
+}
+
+/**
+ * A deterministic health verdict and the measurements behind it.
+ *
+ * `checked_at` is when the arithmetic ran; `measured_at` is when the newest
+ * underlying measurement was taken. A GET projects stored observations rather
+ * than re-measuring, so the gap between the two is how stale the verdict is.
+ */
+export interface SourceHealthReport {
+  source_id: string
+  status: string
+  reason: string
+  checked_at: string
+  measured_at?: string | null
+  refresh_frequency: string
+  last_refresh_at?: string | null
+  coverage_start?: string | null
+  coverage_end?: string | null
+  completeness_pct?: number | null
+  quality_score?: number | null
+  grain?: string | null
+  fresh_tables: number
+  stale_tables: number
+  unknown_tables: number
+  unprofiled_tables: number
+  selected_table_count: number
+  known_limitations?: string | null
+  tables: SourceHealthTable[]
+}
+
+/**
+ * A registered table as the governance screens see it.
+ *
+ * Candidate lists and `*_status` fields travel together on purpose: a proposal
+ * has to be displayable as a proposal, never as settled fact.
+ */
+export interface GovernedTable {
+  id: string
+  data_source_id: string
+  schema_name: string
+  table_name: string
+  qualified_name: string
+  table_type: string
+  approx_row_count?: number | null
+  column_count?: number | null
+  discovered_at?: string | null
+  selected: boolean
+  business_alias?: string | null
+  declared_grain?: string | null
+  primary_time_column?: string | null
+  inferred_grain?: string | null
+  quality_status?: string | null
+  freshness_status?: string | null
+  profiled_at?: string | null
+  display_name?: string | null
+  description?: string | null
+  primary_identifier_candidates: string[]
+  time_field_candidates: string[]
+  company_field_candidates: string[]
+  candidates_status: string
+  confirmed_grain?: string | null
+  effective_grain?: string | null
+  grain_status: string
+}
+
+/** A registered column with its proposed and confirmed business role. */
+export interface GovernedColumn {
+  id: string
+  column_name: string
+  ordinal_position: number
+  data_type: string
+  is_nullable: boolean
+  is_primary_key: boolean
+  is_foreign_key: boolean
+  references_table?: string | null
+  references_column?: string | null
+  semantic_type: string
+  candidate_role: string
+  confirmed_role?: string | null
+  effective_role: string
+  role_status: string
+  description?: string | null
+  classification: string
+  is_pii: boolean
+  is_sensitive: boolean
+  is_restricted: boolean
+  readable: boolean
+  withheld_reason?: string | null
+}
+
+export interface GovernedTableDetail extends GovernedTable {
+  database_name?: string | null
+  comment?: string | null
+  notes?: string | null
+  grain_columns: string[]
+  grain_confidence?: number | null
+  grain_method?: string | null
+  grain_evidence: Record<string, unknown>
+  grain_confirmed_by?: string | null
+  grain_confirmed_at?: string | null
+  time_grain?: string | null
+  row_count?: number | null
+  completeness_pct?: number | null
+  quality_score?: number | null
+  withheld_column_count: number
+  quality_warnings: string[]
+  columns: GovernedColumn[]
+}
+
+export interface SourceProfileResult {
+  source_id: string
+  profiled_table_count: number
+  withheld_column_count: number
+  /** One entry per profiled table, shaped by the profiler's own outcome record. */
+  tables: Record<string, unknown>[]
+  health: SourceHealthReport
+  note: string
 }
 
 export interface ConnectionCheck {
@@ -602,6 +758,112 @@ export interface Dashboard {
   sprint_scope: { delivered: string; not_yet: string }
 }
 
+/* ------------------------------------------------------------------- copilot */
+
+/**
+ * What the user is looking at when they ask a question.
+ *
+ * Every field is a *hint*. The server re-resolves each one inside the caller's
+ * own company, so a stale or foreign `kpi_id` resolves to nothing rather than to
+ * someone else's KPI. Note what is absent: no company, no SQL, no filter, no
+ * tool choice, and no way to hand the model a KPI value or definition to trust.
+ * The company comes from the session; the meaning of a KPI comes from the
+ * governed registry.
+ */
+/**
+ * What the user is looking at. Coordinates only — no measurement.
+ *
+ * There is deliberately no field for an actual, an expected value, a deviation or
+ * a status, even though every panel that opens the Copilot has them on screen. The
+ * server re-reads those from the run it stored, because a client that could state
+ * the actual could state a false one and have it explained as fact.
+ */
+export interface CopilotRequestContext {
+  /**
+   * Which panel asked: `stage_performance`, `detection_detail`, `historical_run`,
+   * `investigation`, `future_action`. Decides which verified result the answer is
+   * anchored to. Unrecognised values are ignored server-side.
+   */
+  panel?: string | null
+  kpi_id?: string | null
+  kpi_version?: number | null
+  selected_date?: string | null
+  /** Approved dimension being viewed. Checked against the KPI's own registry. */
+  dimension?: string | null
+  /** Value selected within that dimension. Checked against the caller's row scope. */
+  selected_entity?: string | null
+  /** Run whose stored results are on screen, so a past answer stays reproducible. */
+  agent_run_id?: string | null
+  /** Router path the question came from. Audit trail only. */
+  page?: string | null
+}
+
+export interface CopilotChatRequest {
+  message: string
+  context?: CopilotRequestContext
+}
+
+/** One governed item the answer was built from, citable as `[E1]`. */
+export interface CopilotEvidence {
+  evidence_id: string
+  source_type: string
+  source_id?: string | null
+  title: string
+  content: string
+  /** True for material derived from dashboard placeholders, never a measurement. */
+  is_placeholder: boolean
+  metadata: Record<string, unknown>
+}
+
+export interface CopilotToolCall {
+  tool: string
+  arguments: Record<string, unknown>
+  ok: boolean
+  error?: string | null
+  caveats: string[]
+}
+
+export interface CopilotChatResponse {
+  answer: string
+  evidence: CopilotEvidence[]
+  /** The context the *server* resolved — not the hints that were sent. */
+  context: {
+    company_id: string
+    company_name: string
+    role: string
+    kpi_definition_id?: string | null
+    kpi_key?: string | null
+    kpi_name?: string | null
+    kpi_version_id?: string | null
+    kpi_version?: number | null
+    selected_date?: string | null
+    agent_run_id?: string | null
+    notes: string[]
+  }
+  llm_available: boolean
+  model?: string | null
+  tool_calls: CopilotToolCall[]
+  caveats: string[]
+  iterations: number
+  usage: Record<string, number>
+  /** Set when no model is configured. A supported state, not an error. */
+  unavailable_reason?: string | null
+  truncated: boolean
+}
+
+export interface CopilotStatus {
+  enabled: boolean
+  available: boolean
+  provider: string
+  model?: string | null
+  /** Host only — never the full endpoint URL, and never the API key. */
+  endpoint_host?: string | null
+  unavailable_reason?: string | null
+  tools_available: string[]
+  knowledge_sources: string[]
+  planned_capabilities: string[]
+}
+
 export interface CatalogVersionInfo {
   id: string
   version: number
@@ -616,3 +878,373 @@ export interface CatalogVersionInfo {
   active_kpi_count: number
   checksum_sha256?: string | null
 }
+
+/* ----------------------------------------------------------------- detection */
+
+/**
+ * A detection verdict as the business reads it.
+ *
+ * This mirrors the server's `business_view()` exactly, and the omissions are the
+ * point: there is no median, no MAD, no modified z-score, no dispersion basis, no
+ * bucket slot name, no reference dates and no SQL. The server does return that
+ * evidence to callers holding `kpi.read`, but the business surface has no type for
+ * it, so the statistics cannot leak into this screen by accident.
+ *
+ * `comparison` is the only trace of the calendar logic, and it is already prose
+ * the server wrote for a reader ("Comparable Fridays"), not a bucket identifier.
+ */
+export interface DetectionResult {
+  kpi: string
+  kpi_key: string
+  target_date: string
+  actual: number | null
+  expected: number | null
+  deviation_pct: number | null
+  deviation_absolute: number | null
+  status: 'NORMAL' | 'ABNORMAL' | 'LOW_CONFIDENCE'
+  comparison: string | null
+  headline: string | null
+  unit?: string | null
+  currency?: string | null
+}
+
+export interface DetectionRunResponse {
+  result: DetectionResult
+  run_id?: string | null
+  agent_run_id?: string | null
+  persisted: boolean
+}
+
+export interface DetectionBatchResponse {
+  target_date: string
+  agent_run_id: string
+  agent_run: AgentRunSummary
+  results: DetectionRunResponse[]
+  skipped: Array<{ kpi_id: string; reason: string }>
+  counts: { evaluated: number; skipped: number }
+}
+
+export interface AgentRunSummary {
+  id: string
+  company_id: string
+  target_date: string
+  status: string
+  kpi_count: number
+  processed_count: number
+  normal_count: number
+  abnormal_count: number
+  low_confidence_count: number
+  error_count: number
+  errors: Array<{ kpi_id?: string; reason?: string }>
+  duration_ms?: number | null
+  executed_by_user_id?: string | null
+  started_at: string
+  completed_at?: string | null
+}
+
+/** The last stored verdict for a KPI, as listed by the overview. */
+export interface DetectionRunSummary {
+  id: string
+  kpi_key: string
+  kpi_name: string
+  kpi_version: number
+  target_date: string
+  actual_value: number | null
+  expected_value: number | null
+  deviation_absolute: number | null
+  deviation_pct: number | null
+  status: string
+  comparison_label?: string | null
+  headline?: string | null
+  unit?: string | null
+  currency?: string | null
+  executed_at: string
+}
+
+/* ------------------------------------------------------------- investigation */
+
+/**
+ * One dimension a KPI may be broken down by, as its registration approved it.
+ *
+ * The list comes from the server, never from the client: a dimension absent here
+ * is not one the screen may hide, it is one the platform will refuse to query.
+ * `hierarchy` is where a drill-down may go next, already filtered to dimensions
+ * that are themselves approved.
+ */
+export interface InvestigationDimension {
+  name: string
+  is_default: boolean
+  hierarchy: string[]
+  approx_cardinality?: number | null
+  notes?: string | null
+}
+
+export interface InvestigationDimensionsResponse {
+  kpi_key: string
+  kpi_name: string
+  kpi_version: number
+  dimensions: InvestigationDimension[]
+}
+
+/** One step already taken in a drill-down: an approved dimension and a value. */
+export interface EntityStep {
+  dimension: string
+  value: string
+}
+
+/**
+ * One part of the business and what it did.
+ *
+ * Deliberately no status field. A contributor has a movement and a share of the
+ * KPI's movement; it does not have a verdict, and the largest share is not an
+ * anomaly. `share_pct` is `null` when the KPI is a ratio, an average or a
+ * distinct count, because no share of such a movement is arithmetic.
+ */
+export interface Contributor {
+  entity: string | null
+  label: string
+  actual: number | null
+  expected: number | null
+  change: number | null
+  share_pct: number | null
+  absolute_share_pct: number | null
+  reference_count: number
+  matched_rows: number | null
+  note?: string | null
+}
+
+/** A measured KPI movement, split across one approved dimension. */
+export interface ContributionResult {
+  kpi: string
+  kpi_key: string
+  target_date: string
+  dimension: string
+  path: EntityStep[]
+  actual: number | null
+  expected: number | null
+  movement: number | null
+  status: string | null
+  comparison: string | null
+  unit?: string | null
+  currency?: string | null
+  contributors: Contributor[]
+  top_k: number
+  ranked_count: number
+  explained_pct: number | null
+  unexplained_pct: number | null
+  /** The leader alone accounts for most of the movement — a reason to stop. */
+  leader_is_sufficient: boolean
+  sufficiency_pct: number
+  shares_available: boolean
+  next_dimensions: string[]
+  notes: string[]
+}
+
+/** How the breakdown was produced. Technical details area only. */
+export interface ContributionEvidence {
+  kpi_version: number
+  kpi_version_id: string
+  detection_run_id?: string | null
+  /** The stored investigation this response was written to, for audit follow-up. */
+  contribution_run_id?: string | null
+  dimension: string
+  additive: boolean
+  reference_dates: string[]
+  withheld_by_scope: number
+  queries: string[]
+}
+
+export interface ContributionResponse {
+  result: ContributionResult
+  evidence?: ContributionEvidence
+}
+
+/** One entity's own history, produced on demand for the entity asked about. */
+export interface EntityProfileResult {
+  kpi: string
+  kpi_key: string
+  dimension: string
+  entity: string
+  unit?: string | null
+  currency?: string | null
+  points: Array<{
+    date: string
+    value: number | null
+    matched_rows: number | null
+    note?: string | null
+  }>
+  latest: number | null
+  typical: number | null
+  change_vs_typical: number | null
+  change_pct_vs_typical: number | null
+  observed_days: number
+  notes: string[]
+}
+
+/**
+ * The manual entry point returns one of two shapes, tagged by `mode`.
+ *
+ * No entity named → a ranked breakdown, the same one the automatic flow produces.
+ * An entity named → that entity's history alone. Nothing on this platform
+ * analyses every entity, so asking about one never triggers work on the rest.
+ */
+export type ManualAnalysisResponse =
+  | ({ mode: 'contribution' } & ContributionResponse)
+  | {
+      mode: 'entity'
+      result: EntityProfileResult
+      evidence?: { kpi_version: number; queries: string[] }
+    }
+
+/**
+ * One KPI on the monitoring screen.
+ *
+ * `blocked_reason` carries the governance obstacle — unapproved, no time field,
+ * no source binding, the wrong grain — because that is something the reader can
+ * act on, where a silently missing row is not.
+ */
+export interface DetectableKpi {
+  kpi_id: string
+  kpi_key: string
+  name: string
+  detectable: boolean
+  blocked_reason?: string | null
+  unit?: string | null
+  currency?: string | null
+  kpi_version?: number | null
+  latest_run?: DetectionRunSummary | null
+}
+
+export interface DetectionOverview {
+  kpis: DetectableKpi[]
+  counts: { total: number; detectable: number }
+  configuration: {
+    /** Named only; the slot values behind it stay off the business screen. */
+    company_default?: { config_key: string; name: string; version: number } | null
+    kpi_overrides: Array<{ config_key: string; name: string; kpi_key?: string | null }>
+    note?: string | null
+  }
+}
+
+/* -------------------------------------------------- comparison configuration */
+
+/**
+ * The five comparison slots the detection engine knows how to fill.
+ *
+ * The slot *names* are fixed — they are part of the algorithm — and everything
+ * inside them is the company's own. Nothing in this file names a weekday, a week,
+ * a month or an event: those arrive from the server, extracted from that
+ * company's documentation or typed by an administrator, so this type describes
+ * the shape of a policy and never one company's policy.
+ *
+ * This lives on the governance surface only. The business detection screen shows
+ * KPI, actual, expected, deviation and status — never a slot.
+ */
+export interface BucketSlots {
+  same_day_of_week?: { enabled: boolean; days?: number[] }
+  same_week_of_month?: { enabled: boolean; weeks?: number[] }
+  same_month_or_season?: { enabled: boolean; months?: number[] }
+  business_event?: {
+    enabled: boolean
+    events?: Array<{ name: string; dates?: string[] }>
+  }
+  yoy_period?: { enabled: boolean; tolerance_days?: number }
+  lookback_days?: number
+  min_reference_points?: number
+  max_reference_points?: number
+}
+
+/**
+ * `NEEDS_REVIEW` is the honest landing place for an extraction that produced
+ * something but not something usable. It is deliberately not `PROPOSED` — that
+ * would invite an approval click on a policy that cannot select a single
+ * comparable date — and deliberately not an error, because the partial result and
+ * its reasons are what a reviewer needs to finish the job by hand.
+ */
+export type BucketConfigStatus =
+  | 'DRAFT'
+  | 'NEEDS_REVIEW'
+  | 'PROPOSED'
+  | 'APPROVED'
+  | 'ARCHIVED'
+
+export interface BucketConfigSummary {
+  id: string
+  config_key: string
+  name: string
+  description?: string | null
+  kpi_key?: string | null
+  scope: 'company' | 'kpi'
+  status: BucketConfigStatus
+  version: number
+  buckets: BucketSlots
+  enabled_slots: string[]
+  lookback_days?: number | null
+  min_reference_points?: number | null
+  max_reference_points?: number | null
+  source: 'MANUAL' | 'LLM_EXTRACTION'
+  source_document_id?: string | null
+  extraction_model?: string | null
+  extraction_notes?: string | null
+  approved_by_user_id?: string | null
+  approved_at?: string | null
+  approval_reason?: string | null
+  allowed_transitions: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface BucketConfigList {
+  configurations: BucketConfigSummary[]
+  company_default_in_force?: string | null
+  note?: string | null
+}
+
+/** How much of the document reached the model, and by what strategy. */
+export interface ExtractionRetrieval {
+  strategy: string
+  passages_in_document: number
+  passages_selected: number
+  document_characters: number
+  selected_characters: number
+}
+
+export interface BucketExtractionResponse extends BucketConfigSummary {
+  extraction: {
+    model?: string | null
+    notes: string[]
+    raw_keys: string[]
+    rejected_keys: string[]
+    needs_review: boolean
+    review_reasons: string[]
+    retrieval?: ExtractionRetrieval | null
+  }
+  needs_review: boolean
+  review_reasons: string[]
+  warnings: string[]
+  note?: string | null
+}
+
+/** The calendar consequence of a policy, computed without touching the source. */
+export interface BucketConfigPreview {
+  config_id: string
+  status: BucketConfigStatus
+  target_date: string
+  comparison: {
+    label: string
+    bucket_applied: string
+    buckets_applied: string[]
+    decisions: Array<{
+      bucket: string
+      role: string
+      reference_count: number
+      note: string
+    }>
+  }
+  comparable_dates: string[]
+  comparable_date_count: number
+  warnings: string[]
+  note?: string | null
+}
+
+

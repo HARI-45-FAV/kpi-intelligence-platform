@@ -241,6 +241,21 @@ class DataSourceConnector(ABC):
             f"{self.source_type} cannot read rows from {schema}.{table}."
         )
 
+    def time_extent(
+        self, schema: str, table: str, column: str
+    ) -> tuple[Any, Any] | None:
+        """Earliest and latest value of ``column`` — the source's data coverage.
+
+        Two aggregates over one column, pushed down. It exists because "this date
+        produced no rows" and "this date lies outside the data this source holds"
+        are different facts that a per-day read cannot tell apart, and treating
+        the second as a zero would fabricate history.
+
+        ``None`` means *coverage unknown* — the connector could not answer — and
+        callers must not read it as *no coverage*.
+        """
+        return None
+
     # -- profiling primitives (pushed down) -----------------------------
     @abstractmethod
     def count_rows(self, schema: str, table: str) -> int | None: ...

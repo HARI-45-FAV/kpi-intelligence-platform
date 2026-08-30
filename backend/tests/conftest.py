@@ -22,6 +22,23 @@ os.environ.setdefault("DOCUMENT_STORAGE_DIR", str(_TMP / "documents"))
 os.environ.setdefault("SECRET_KEY", "test-secret-key-not-for-production-0123456789")
 os.environ.setdefault("ENVIRONMENT", "test")
 
+# The Copilot suite's premise is a deployment with no model configured, and the
+# tests that need one enable it per-test by patching ``settings`` directly (see
+# the ``scripted`` fixture). Pinned rather than defaulted: a developer's local
+# .env pointing at a real endpoint (Ollama, vLLM) would otherwise make the
+# suite assert against whatever model happens to be running, and an
+# LLM_ENABLED=true there silently inverts the "no model configured" tests.
+# Environment variables outrank the dotenv file in pydantic-settings, so this
+# wins over .env while still leaving CI free to set it before pytest starts.
+os.environ["LLM_ENABLED"] = "false"
+
+# Tool calling is pinned on for the same reason, in the other direction. It is a
+# capability of the governed tool layer rather than of any one model, so the
+# suite asserts the layer's behaviour -- which tools a role is offered, which
+# ones refuse -- independently of whether a developer has turned tool calling off
+# locally to save round-trips against a small local model.
+os.environ["LLM_TOOL_CALLING_ENABLED"] = "true"
+
 from fastapi.testclient import TestClient  # noqa: E402
 
 from app.core.config import settings  # noqa: E402

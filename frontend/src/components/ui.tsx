@@ -1,6 +1,7 @@
 /** Small presentational primitives shared across the app. */
 
 import type { ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 export function Panel({
   title,
@@ -38,6 +39,7 @@ const STATUS_TONES: Record<string, string> = {
   SAFE: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
   DIRECTLY_COMPATIBLE: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
   APPROVED: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
+  NORMAL: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
   // Needs attention
   WARNING: 'border-amber-200 bg-amber-50/80 text-amber-700',
   WARN: 'border-amber-200 bg-amber-50/80 text-amber-700',
@@ -46,6 +48,9 @@ const STATUS_TONES: Record<string, string> = {
   REQUIRES_AGGREGATION: 'border-amber-200 bg-amber-50/80 text-amber-700',
   REQUIRES_DIMENSION_MAPPING: 'border-amber-200 bg-amber-50/80 text-amber-700',
   UNDER_REVIEW: 'border-amber-200 bg-amber-50/80 text-amber-700',
+  // An extraction that produced something, but not something usable. Amber, not
+  // neutral: it is waiting on a person, and a grey chip would read as "fine".
+  NEEDS_REVIEW: 'border-amber-200 bg-amber-50/80 text-amber-700',
   PROPOSED: 'border-sky-200 bg-sky-50/90 text-sky-700',
   // Problems
   POOR: 'border-rose-200 bg-rose-50/85 text-rose-700',
@@ -54,12 +59,16 @@ const STATUS_TONES: Record<string, string> = {
   RISKY: 'border-rose-200 bg-rose-50/85 text-rose-700',
   UNSAFE: 'border-rose-200 bg-rose-50/85 text-rose-700',
   REJECTED: 'border-rose-200 bg-rose-50/85 text-rose-700',
+  ABNORMAL: 'border-rose-200 bg-rose-50/85 text-rose-700',
   // Neutral
   DRAFT: 'border-slate-200 bg-white/70 text-slate-500',
   UNTESTED: 'border-slate-200 bg-white/70 text-slate-500',
   UNKNOWN: 'border-slate-200 bg-white/70 text-slate-500',
   DEPRECATED: 'border-slate-200 bg-white/60 text-slate-500',
   SKIPPED: 'border-slate-200 bg-white/60 text-slate-500',
+  // A verdict the platform declines to assert: neutral on purpose, so that
+  // "not enough comparable history" never reads as a clean bill of health.
+  LOW_CONFIDENCE: 'border-slate-200 bg-white/70 text-slate-500',
 }
 
 export function StatusBadge({ status, label }: { status?: string | null; label?: string }) {
@@ -183,6 +192,30 @@ export function EmptyState({
   )
 }
 
+/**
+ * Every full-screen overlay renders into `document.body`, never in place.
+ *
+ * `position: fixed` is only relative to the viewport while no ancestor has
+ * created a containing block for it — and `backdrop-filter`, `transform`, `filter`
+ * and `perspective` all do. The app shell frosts its content area
+ * (`.app-content-shell` carries `backdrop-filter: blur(22px)`), so an overlay left
+ * inside the page tree resolves `inset: 0` against that element instead of the
+ * screen. The shell is taller than the viewport on every populated page, so
+ * `items-center` then parks the dialog several hundred pixels below the fold: it
+ * mounts, it is in the DOM, it holds the right data, and the user sees nothing.
+ *
+ * A portal makes the overlay a child of `<body>`, which restores the viewport as
+ * its containing block. React keeps the event and context tree intact, so
+ * handlers and providers behave exactly as they did in place.
+ *
+ * This cannot be caught by the test suite: jsdom performs no layout, so a
+ * mispositioned dialog and a correctly positioned one are the same document.
+ * `dashboard-kpi-popup.test.tsx` therefore asserts the portal itself.
+ */
+export function Overlay({ children }: { children: ReactNode }) {  if (typeof document === 'undefined') return <>{children}</>
+  return createPortal(children, document.body)
+}
+
 export function Drawer({
   open,
   onClose,
@@ -202,32 +235,34 @@ export function Drawer({
 }) {
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-40 flex">
-      <div className="flex-1 bg-sky-950/20 backdrop-blur-sm" onClick={onClose} />
-      <aside
-        className={`flex w-full ${width} flex-col border-l border-white/80 bg-white/85 shadow-[var(--shadow-floating)] backdrop-blur-2xl`}
-      >
-        <header className="flex items-start justify-between gap-4 border-b border-ink-700/70 px-5 py-4">
-          <div className="min-w-0">
-            <h2 className="truncate text-base font-semibold text-slate-100">{title}</h2>
-            {subtitle && <div className="mt-1 text-xs text-slate-500">{subtitle}</div>}
-          </div>
-          <button
-            onClick={onClose}
-            className="rounded-lg p-1 text-slate-500 hover:bg-white hover:text-slate-300"
-            aria-label="Close"
-          >
-            ✕
-          </button>
-        </header>
-        <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
-        {footer && (
-          <footer className="flex items-center justify-end gap-2 border-t border-ink-700/70 px-5 py-3">
-            {footer}
-          </footer>
-        )}
-      </aside>
-    </div>
+    <Overlay>
+      <div className="fixed inset-0 z-40 flex">
+        <div className="flex-1 bg-sky-950/20 backdrop-blur-sm" onClick={onClose} />
+        <aside
+          className={`flex w-full ${width} flex-col border-l border-white/80 bg-white/85 shadow-[var(--shadow-floating)] backdrop-blur-2xl`}
+        >
+          <header className="flex items-start justify-between gap-4 border-b border-ink-700/70 px-5 py-4">
+            <div className="min-w-0">
+              <h2 className="truncate text-base font-semibold text-slate-100">{title}</h2>
+              {subtitle && <div className="mt-1 text-xs text-slate-500">{subtitle}</div>}
+            </div>
+            <button
+              onClick={onClose}
+              className="rounded-lg p-1 text-slate-500 hover:bg-white hover:text-slate-300"
+              aria-label="Close"
+            >
+              ✕
+            </button>
+          </header>
+          <div className="flex-1 overflow-y-auto px-5 py-4">{children}</div>
+          {footer && (
+            <footer className="flex items-center justify-end gap-2 border-t border-ink-700/70 px-5 py-3">
+              {footer}
+            </footer>
+          )}
+        </aside>
+      </div>
+    </Overlay>
   )
 }
 
@@ -246,26 +281,28 @@ export function Modal({
 }) {
   if (!open) return null
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-sky-950/20 backdrop-blur-sm" onClick={onClose} />
-      {/* Capped height with a scrolling body so tall content stays reachable on
-          short viewports and small screens. */}
-      <div className={`relative flex max-h-[90vh] w-full ${width} panel flex-col shadow-2xl`}>
-        <header className="panel-head shrink-0">
-          <h2 className="text-sm font-semibold text-slate-100">{title}</h2>
-          {onClose && (
-            <button
-              onClick={onClose}
-              className="rounded-lg p-1 text-slate-500 hover:bg-white hover:text-slate-300"
-              aria-label="Close"
-            >
-              ✕
-            </button>
-          )}
-        </header>
-        <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
+    <Overlay>
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+        <div className="absolute inset-0 bg-sky-950/20 backdrop-blur-sm" onClick={onClose} />
+        {/* Capped height with a scrolling body so tall content stays reachable on
+            short viewports and small screens. */}
+        <div className={`relative flex max-h-[90vh] w-full ${width} panel flex-col shadow-2xl`}>
+          <header className="panel-head shrink-0">
+            <h2 className="text-sm font-semibold text-slate-100">{title}</h2>
+            {onClose && (
+              <button
+                onClick={onClose}
+                className="rounded-lg p-1 text-slate-500 hover:bg-white hover:text-slate-300"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            )}
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto p-5">{children}</div>
+        </div>
       </div>
-    </div>
+    </Overlay>
   )
 }
 

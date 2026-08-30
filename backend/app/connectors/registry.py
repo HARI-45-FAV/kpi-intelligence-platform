@@ -154,6 +154,73 @@ CONNECTOR_CATALOG: tuple[ConnectorDescriptor, ...] = (
         ),
         notes="Interface defined; driver implementation deferred beyond Sprint 1.",
     ),
+    # --- Registry-and-metadata only -----------------------------------------
+    # These have no driver and are not meant to get one at this stage. They exist
+    # so a landscape can be described honestly: a CSV extract that feeds a KPI is
+    # a governed source whether or not the platform can query it live. Registering
+    # one records its grain, cadence, coverage and limitations; profiling it is
+    # refused rather than faked.
+    ConnectorDescriptor(
+        source_type=DataSourceType.API,
+        label="HTTP API (metadata only)",
+        implemented=False,
+        supports_profiling=False,
+        fields=(
+            ConnectorField(
+                name="connection_reference",
+                label="Endpoint reference",
+                placeholder="https://api.example.com/v1/orders",
+                help_text=(
+                    "A reference, not a credential. Secrets must not be embedded "
+                    "in this field; it is stored unencrypted and returned by the API."
+                ),
+            ),
+            ConnectorField(name="description", label="What this feed contains", required=False),
+        ),
+        notes=(
+            "Governed metadata only: no driver, so discovery, profiling and freshness "
+            "measurement are unavailable. Grain, refresh cadence, coverage, "
+            "completeness and quality must be declared by an administrator."
+        ),
+    ),
+    ConnectorDescriptor(
+        source_type=DataSourceType.CSV,
+        label="CSV extract (metadata only)",
+        implemented=False,
+        supports_profiling=False,
+        fields=(
+            ConnectorField(
+                name="connection_reference",
+                label="File or location reference",
+                placeholder="s3://exports/finance/gl_extract_daily.csv",
+                help_text="Where the extract lands. A reference only — no credentials.",
+            ),
+            ConnectorField(name="description", label="What this extract contains", required=False),
+        ),
+        notes=(
+            "Governed metadata only: no driver. Register it so KPIs built on the "
+            "extract carry its declared grain, cadence and known limitations."
+        ),
+    ),
+    ConnectorDescriptor(
+        source_type=DataSourceType.FILE,
+        label="File drop (metadata only)",
+        implemented=False,
+        supports_profiling=False,
+        fields=(
+            ConnectorField(
+                name="connection_reference",
+                label="Location reference",
+                placeholder="//fileshare/finance/monthly/",
+                help_text="Where the files arrive. A reference only — no credentials.",
+            ),
+            ConnectorField(name="description", label="What arrives here", required=False),
+        ),
+        notes=(
+            "Governed metadata only: no driver. Freshness cannot be measured, so "
+            "health stays UNKNOWN until an administrator records a refresh."
+        ),
+    ),
 )
 
 DESCRIPTORS_BY_TYPE = {d.source_type: d for d in CONNECTOR_CATALOG}
@@ -228,6 +295,17 @@ _FACTORIES: dict[str, Callable[[DataSource], DataSourceConnector]] = {
 def build_connector(source: DataSource) -> DataSourceConnector:
     factory = _FACTORIES.get(source.source_type)
     if factory is None:
+        descriptor = DESCRIPTORS_BY_TYPE.get(source.source_type)
+        if descriptor is not None and not descriptor.implemented:
+            # A known, deliberately driverless type. Saying so is more useful than
+            # "unsupported", and it stops a caller from reading an empty profile as
+            # evidence about the data.
+            raise ConnectorError(
+                f"{descriptor.label} sources are governed metadata only: there is no "
+                "driver to connect with, so discovery, profiling and freshness "
+                "measurement are unavailable. Record grain, cadence, coverage and "
+                "known limitations on the source instead."
+            )
         raise ConnectorError(f"Unsupported data source type: {source.source_type}")
     return factory(source)
 

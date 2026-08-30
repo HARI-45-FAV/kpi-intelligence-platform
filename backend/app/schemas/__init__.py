@@ -16,9 +16,11 @@ from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models.base import (
     Classification,
+    ColumnRole,
     DataSourceType,
     DocumentType,
     DriverType,
+    GrainStatus,
     MembershipStatus,
     RefreshFrequency,
     TimeGrain,
@@ -81,6 +83,8 @@ class MembershipSummary(ApiModel):
     role_name: str
     status: str
     is_admin_role: bool
+    permissions: list[str] = Field(default_factory=list)
+    row_scope: dict[str, Any] = Field(default_factory=dict)
 
 
 class TokenResponse(ApiModel):
@@ -195,6 +199,9 @@ class MemberInvite(ApiModel):
     role_key: str = Field(min_length=1, max_length=40)
     row_scope: dict[str, Any] = Field(default_factory=dict)
     denied_columns: list[str] = Field(default_factory=list)
+    # Empty means unrestricted in both cases — the administrator's own scope.
+    allowed_domains: list[str] = Field(default_factory=list)
+    allowed_document_scopes: list[str] = Field(default_factory=list)
 
 
 class MemberUpdate(ApiModel):
@@ -202,6 +209,8 @@ class MemberUpdate(ApiModel):
     status: MembershipStatus | None = None
     row_scope: dict[str, Any] | None = None
     denied_columns: list[str] | None = None
+    allowed_domains: list[str] | None = None
+    allowed_document_scopes: list[str] | None = None
 
 
 class MemberOut(ApiModel):
@@ -215,7 +224,29 @@ class MemberOut(ApiModel):
     status: str
     row_scope: dict[str, Any]
     denied_columns: list[str]
+    allowed_domains: list[str] = Field(default_factory=list)
+    allowed_document_scopes: list[str] = Field(default_factory=list)
     created_at: datetime
+
+
+class AccessScopeOut(ApiModel):
+    """The resolved access scope for the calling user inside one company.
+
+    One place the frontend — and any later retrieval layer — can read
+    "who am I here, and what may I reach", instead of inferring it from a role
+    label. Produced by ``AccessContext.as_scope``, so it can never disagree with
+    what the backend actually enforces.
+    """
+
+    company_id: str
+    user_id: str
+    roles: list[str]
+    permissions: list[str]
+    allowed_domains: list[str]
+    allowed_data_scopes: dict[str, Any]
+    allowed_document_scopes: list[str]
+    denied_columns: list[str]
+    is_admin: bool
 
 
 class RoleOut(ApiModel):
@@ -235,6 +266,28 @@ class RoleOut(ApiModel):
 # ---------------------------------------------------------------------------
 # Data sources
 # ---------------------------------------------------------------------------
+# Substrings that mean a supposedly non-secret reference is carrying a credential.
+_EMBEDDED_SECRET_HINTS = ("password=", "secret=", "apikey=", "api_key=", "token=", "pwd=")
+
+
+def _reject_embedded_secret(value: str | None) -> str | None:
+    """A connection reference is metadata, so it must not hold a credential.
+
+    Refused rather than scrubbed: quietly stripping the secret would leave the
+    caller believing a working reference was saved, and storing it would put a
+    credential in a column that is never encrypted and is returned by the API.
+    """
+    if value is None:
+        return value
+    lowered = value.lower()
+    if any(hint in lowered for hint in _EMBEDDED_SECRET_HINTS):
+        raise ValueError(
+            "Connection reference must not contain credentials. Supply secrets "
+            "through the password or secret key fields, which are stored encrypted."
+        )
+    return value
+
+
 class DataSourceCreate(ApiModel):
     """Registration accepts either a pasted connection string or explicit fields.
 
@@ -270,6 +323,17 @@ class DataSourceCreate(ApiModel):
     service_role_key: str | None = Field(default=None, max_length=2000)
     # SQLite file path (local / test sources)
     path: str | None = Field(default=None, max_length=600)
+    # Where a source the platform cannot query live actually lives: an export
+    # path, a bucket key, an endpoint. Never a credential — those go through
+    # encryption, and this field is rejected if it looks like one.
+    connection_reference: str | None = Field(default=None, max_length=500)
+    # Which governed calendar this source's periods are read against.
+    business_calendar_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("connection_reference")
+    @classmethod
+    def _no_secret_in_reference(cls, value: str | None) -> str | None:
+        return _reject_embedded_secret(value)
 
 
 class DataSourceUpdate(ApiModel):
@@ -281,6 +345,13 @@ class DataSourceUpdate(ApiModel):
     schema_name: str | None = Field(default=None, max_length=160)
     password: str | None = Field(default=None, max_length=500)
     service_role_key: str | None = Field(default=None, max_length=2000)
+    connection_reference: str | None = Field(default=None, max_length=500)
+    business_calendar_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("connection_reference")
+    @classmethod
+    def _no_secret_in_reference(cls, value: str | None) -> str | None:
+        return _reject_embedded_secret(value)
 
 
 class DataSourceOut(ApiModel):
@@ -296,15 +367,31 @@ class DataSourceOut(ApiModel):
     schema_name: str | None
     username: str | None
     has_credentials: bool
+    connection_reference: str | None = None
     connection_status: str
     last_tested_at: datetime | None
     last_test_error: str | None
     refresh_frequency: str
     timezone: str
     known_limitations: str | None
+    business_calendar_id: str | None = None
     last_discovered_at: datetime | None
     discovered_table_count: int = 0
     selected_table_count: int = 0
+
+    # Governance rollup. Derived, written only by an explicit profile or health
+    # check — a read of this record never recomputes it, so ``health_checked_at``
+    # is what tells the reader how much the verdict is still worth.
+    grain: str | None = None
+    last_refresh_at: datetime | None = None
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+    completeness_pct: float | None = None
+    quality_score: float | None = None
+    health_status: str = "UNKNOWN"
+    health_checked_at: datetime | None = None
+    health_reason: str | None = None
+
     created_at: datetime
     updated_at: datetime
 
@@ -320,6 +407,14 @@ class SourceColumnOut(ApiModel):
     references_table: str | None
     references_column: str | None
     semantic_type: str
+    # The business reading of the column. ``candidate_role`` is the profiler's
+    # proposal and ``confirmed_role`` a reviewer's decision; the UI must show
+    # which it is looking at rather than presenting a guess as governed truth.
+    candidate_role: str = ColumnRole.UNKNOWN
+    confirmed_role: str | None = None
+    effective_role: str = ColumnRole.UNKNOWN
+    role_status: str = "PROPOSED"
+    description: str | None = None
     classification: str
     is_pii: bool
     is_sensitive: bool
@@ -346,6 +441,127 @@ class SourceTableOut(ApiModel):
     quality_status: str | None = None
     freshness_status: str | None = None
     profiled_at: datetime | None = None
+
+    # -- governed metadata, proposed vs confirmed -------------------------
+    display_name: str | None = None
+    description: str | None = None
+    primary_identifier_candidates: list[str] = Field(default_factory=list)
+    time_field_candidates: list[str] = Field(default_factory=list)
+    company_field_candidates: list[str] = Field(default_factory=list)
+    candidates_status: str = "PROPOSED"
+    confirmed_grain: str | None = None
+    effective_grain: str | None = None
+    grain_status: str = GrainStatus.PROPOSED
+
+
+class SourceTableDetailOut(SourceTableOut):
+    """One table with its columns and its grain evidence.
+
+    Extends the list shape rather than redeclaring it, so a detail screen and a
+    list row can never drift apart in what they call the same field.
+    """
+
+    database_name: str | None = None
+    comment: str | None = None
+    notes: str | None = None
+    grain_columns: list[str] = Field(default_factory=list)
+    grain_confidence: float | None = None
+    grain_method: str | None = None
+    grain_evidence: dict[str, Any] = Field(default_factory=dict)
+    grain_confirmed_by: str | None = None
+    grain_confirmed_at: datetime | None = None
+    time_grain: str | None = None
+    row_count: int | None = None
+    completeness_pct: float | None = None
+    quality_score: float | None = None
+    withheld_column_count: int = 0
+    quality_warnings: list[str] = Field(default_factory=list)
+    columns: list[SourceColumnOut] = Field(default_factory=list)
+
+
+class SourceHealthTableOut(ApiModel):
+    """One table's contribution to its source's health verdict."""
+
+    source_table_id: str
+    table: str
+    time_column: str | None = None
+    freshness_status: str
+    lag_seconds: int | None = None
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+    row_count: int | None = None
+    completeness_pct: float | None = None
+    quality_score: float | None = None
+    grain: str | None = None
+    grain_status: str | None = None
+    profiled_at: datetime | None = None
+    checked_at: datetime | None = None
+    note: str | None = None
+
+
+class SourceHealthOut(ApiModel):
+    """A deterministic health verdict plus the measurements behind it.
+
+    ``reason`` is not decoration: a status without its evidence is a number
+    somebody has to trust blindly, and the whole point of computing this without
+    a model is that the arithmetic can be checked.
+
+    ``checked_at`` is when the rollup was computed; ``measured_at`` is when the
+    newest underlying measurement was taken. A read projects stored observations
+    and never re-measures, so on a read the two differ — and that gap is exactly
+    how stale a verdict the caller is looking at.
+    """
+
+    source_id: str
+    status: str
+    reason: str
+    checked_at: datetime
+    measured_at: datetime | None = None
+    refresh_frequency: str
+    last_refresh_at: datetime | None = None
+    coverage_start: datetime | None = None
+    coverage_end: datetime | None = None
+    completeness_pct: float | None = None
+    quality_score: float | None = None
+    grain: str | None = None
+    fresh_tables: int = 0
+    stale_tables: int = 0
+    unknown_tables: int = 0
+    unprofiled_tables: int = 0
+    selected_table_count: int = 0
+    known_limitations: str | None = None
+    tables: list[SourceHealthTableOut] = Field(default_factory=list)
+
+
+class TableGovernanceUpdate(ApiModel):
+    """A reviewer's decision about one table's governed metadata.
+
+    ``confirm_candidates`` and ``confirm_grain`` are the only way anything reaches
+    CONFIRMED. Setting either to false returns the field to PROPOSED, so a
+    confirmation can be withdrawn when the business changes its mind.
+    """
+
+    display_name: str | None = Field(default=None, max_length=200)
+    description: str | None = None
+    primary_identifier_candidates: list[str] | None = None
+    time_field_candidates: list[str] | None = None
+    company_field_candidates: list[str] | None = None
+    confirm_candidates: bool | None = None
+    confirmed_grain: str | None = Field(default=None, max_length=300)
+    confirm_grain: bool | None = None
+
+
+class ColumnGovernanceUpdate(ApiModel):
+    """A reviewer's decision about one column's business role.
+
+    Separate from ``ColumnClassificationUpdate``: sensitivity governs who may
+    read the column, role governs what it means. Conflating them would let a
+    meaning change quietly widen access.
+    """
+
+    confirmed_role: ColumnRole | None = None
+    description: str | None = None
+    clear_confirmed_role: bool = False
 
 
 class ColumnClassificationUpdate(ApiModel):
@@ -384,6 +600,14 @@ class DocumentCreate(ApiModel):
     effective_to: date | None = None
     change_note: str | None = None
     inline_content: str | None = Field(default=None, max_length=200_000)
+
+    @field_validator("document_type", mode="before")
+    @classmethod
+    def _normalise_document_type(cls, value: object) -> object:
+        """Accept the UI label while persisting the canonical enum value."""
+        if isinstance(value, str) and value.strip().casefold() == "kpi handbook":
+            return DocumentType.KPI_HANDBOOK
+        return value
 
 
 class DocumentVersionOut(ApiModel):
@@ -572,6 +796,159 @@ class KpiPreviewRequest(ApiModel):
     end: date | None = None
     group_by: list[str] = Field(default_factory=list, max_length=3)
     limit: int = Field(default=20, ge=1, le=200)
+
+
+# ---------------------------------------------------------------------------
+# Detection
+# ---------------------------------------------------------------------------
+class BucketConfigRequest(ApiModel):
+    """Create or replace a company's comparison policy.
+
+    ``buckets`` is intentionally an open object rather than a nested Pydantic
+    tree: it is validated by :func:`app.services.bucket_config.validate_bucket_config`,
+    which is the same code the detection engine trusts and the same code an LLM
+    draft has to pass. Declaring the shape twice would let the two drift, and the
+    one that matters is the one the engine reads.
+    """
+
+    config_key: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9_\-]*$")
+    name: str = Field(min_length=1, max_length=200)
+    description: str | None = Field(default=None, max_length=4000)
+    #: NULL applies the policy to every KPI; a key overrides it for one KPI.
+    kpi_key: str | None = Field(default=None, max_length=80)
+    buckets: dict[str, Any] = Field(default_factory=dict)
+
+
+class BucketConfigApproveRequest(ApiModel):
+    reason: str = Field(min_length=3, max_length=2000)
+
+
+class BucketConfigExtractRequest(ApiModel):
+    """Draft a configuration from company documentation using the model.
+
+    Exactly one of ``document_id`` or ``text`` is supplied. The result is always
+    a PROPOSED configuration -- the endpoint cannot approve its own output.
+    """
+
+    config_key: str = Field(min_length=1, max_length=80, pattern=r"^[a-z0-9][a-z0-9_\-]*$")
+    name: str = Field(min_length=1, max_length=200)
+    kpi_key: str | None = Field(default=None, max_length=80)
+    document_id: str | None = Field(default=None, max_length=36)
+    text: str | None = Field(default=None, max_length=200_000)
+
+
+class RunDetectionRequest(ApiModel):
+    """Evaluate one KPI on one date.
+
+    ``company_id`` is accepted so the flat ``POST /run-detection`` form works as
+    specified; the company-scoped route takes it from the path instead.
+    """
+
+    company_id: str | None = Field(default=None, max_length=36)
+    kpi_id: str = Field(min_length=1, max_length=80, description="KPI key, definition id or version id")
+    target_date: date
+    persist: bool = True
+
+
+class BatchDetectionRequest(ApiModel):
+    """Evaluate several KPIs on one date, for a dashboard load."""
+
+    company_id: str | None = Field(default=None, max_length=36)
+    kpi_ids: list[str] = Field(default_factory=list, max_length=25)
+    target_date: date
+    persist: bool = True
+
+
+class AgentRunOut(ApiModel):
+    id: str
+    company_id: str
+    target_date: date
+    status: str
+    kpi_count: int
+    processed_count: int
+    normal_count: int
+    abnormal_count: int
+    low_confidence_count: int
+    error_count: int
+    errors: list[Any] = Field(default_factory=list)
+    duration_ms: int | None
+    executed_by_user_id: str | None
+    started_at: datetime
+    completed_at: datetime | None
+
+
+class DetectionRunOut(ApiModel):
+    id: str
+    agent_run_id: str | None = None
+    kpi_key: str
+    kpi_name: str
+    kpi_version: int
+    target_date: date
+    actual_value: float | None
+    expected_value: float | None
+    deviation_absolute: float | None
+    deviation_pct: float | None
+    status: str
+    comparison_label: str | None
+    headline: str | None
+    unit: str | None
+    currency: str | None
+    executed_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Investigation: contribution analysis and manual dimensional analysis
+# ---------------------------------------------------------------------------
+class EntityStep(ApiModel):
+    """One narrowing already chosen in a drill-down: a dimension and a value.
+
+    Both are re-resolved server-side. ``dimension`` must be an approved dimension
+    of the KPI version in question, and ``value`` must sit inside the caller's own
+    row scope -- a value typed by hand is checked exactly as one arrived at by
+    clicking is.
+    """
+
+    dimension: str = Field(min_length=1, max_length=120)
+    value: str = Field(min_length=1, max_length=200)
+
+
+class ContributionRequest(ApiModel):
+    """Break one KPI's measured movement down across one approved dimension.
+
+    There is deliberately no field for an actual, an expected value or a movement.
+    The figures come from the stored detection run for this KPI and date, so a
+    caller cannot state a movement and have the platform apportion it.
+    """
+
+    kpi_id: str = Field(min_length=1, max_length=80, description="KPI key, definition id or version id")
+    target_date: date
+    dimension: str | None = Field(
+        default=None,
+        max_length=120,
+        description="An approved dimension of this KPI. Omitted means its default breakdown.",
+    )
+    path: list[EntityStep] = Field(
+        default_factory=list,
+        max_length=4,
+        description="Ancestors already selected, outermost first.",
+    )
+    top_k: int | None = Field(default=None, ge=1, le=50)
+
+
+class ManualAnalysisRequest(ApiModel):
+    """The manual entry point: KPI, dimension, optional entity, date and lookback.
+
+    With no ``entity`` this ranks the top contributing values of the dimension.
+    With one, it profiles that single entity over the window and analyses nothing
+    else -- entity-level analysis is on demand, never a sweep over every value.
+    """
+
+    kpi_id: str = Field(min_length=1, max_length=80)
+    dimension: str | None = Field(default=None, max_length=120)
+    entity: str | None = Field(default=None, max_length=200)
+    target_date: date
+    lookback_days: int = Field(default=30, ge=2, le=365)
+    top_k: int | None = Field(default=None, ge=1, le=50)
 
 
 # ---------------------------------------------------------------------------

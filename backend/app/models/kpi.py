@@ -19,7 +19,6 @@ from datetime import datetime
 from sqlalchemy import (
     JSON,
     Boolean,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -38,6 +37,7 @@ from app.models.base import (
     TimeGrain,
     Timestamped,
     UUIDPrimaryKey,
+    UtcDateTime,
     ValidationStatus,
 )
 
@@ -152,24 +152,24 @@ class KpiVersion(Base, UUIDPrimaryKey, Timestamped):
     created_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL")
     )
-    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     reviewed_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL")
     )
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reviewed_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     approved_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL")
     )
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    approved_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     approval_reason: Mapped[str | None] = mapped_column(Text)
     rejection_reason: Mapped[str | None] = mapped_column(Text)
-    activated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deprecated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    activated_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+    deprecated_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     supersedes_version: Mapped[int | None] = mapped_column(Integer)
 
     # ---- Validation state ---------------------------------------------
     last_validation_status: Mapped[str | None] = mapped_column(String(20))
-    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_validated_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     last_validation_run_id: Mapped[str | None] = mapped_column(String(36))
 
     definition: Mapped[KpiDefinition] = relationship(
@@ -354,8 +354,8 @@ class KpiValidationRun(Base, UUIDPrimaryKey, Timestamped):
     kpi_version_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("kpi_versions.id", ondelete="CASCADE"), nullable=False, index=True
     )
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     overall_status: Mapped[str] = mapped_column(
         String(20), default=ValidationStatus.SKIPPED, nullable=False

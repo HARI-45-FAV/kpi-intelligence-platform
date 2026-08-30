@@ -11,7 +11,6 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
-    DateTime,
     Float,
     ForeignKey,
     Integer,
@@ -21,7 +20,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
-from app.models.base import Timestamped, UUIDPrimaryKey
+from app.models.base import Timestamped, UUIDPrimaryKey, UtcDateTime
 
 
 class AuditLog(Base, UUIDPrimaryKey):
@@ -51,7 +50,7 @@ class AuditLog(Base, UUIDPrimaryKey):
     request_id: Mapped[str | None] = mapped_column(String(36), index=True)
     ip_address: Mapped[str | None] = mapped_column(String(64))
     occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        UtcDateTime(), nullable=False, index=True
     )
 
 
@@ -69,7 +68,7 @@ class ExecutionLog(Base, UUIDPrimaryKey):
     http_method: Mapped[str | None] = mapped_column(String(10))
     http_path: Mapped[str | None] = mapped_column(String(300))
     http_status: Mapped[int | None] = mapped_column(Integer)
-    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    started_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False, index=True)
     duration_ms: Mapped[int | None] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(20), default="OK", nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
@@ -82,7 +81,10 @@ class ExecutionLog(Base, UUIDPrimaryKey):
     query_duration_ms: Mapped[int | None] = mapped_column(Integer)
     rows_returned: Mapped[int | None] = mapped_column(Integer)
 
-    # Reserved for the reasoning sprints; unused in Sprint 1.
+    # Model accounting for the optional Copilot layer. NULL -- not zero -- on
+    # every request that contacted no model, so "no model ran" and "a model ran
+    # and reported nothing" stay distinguishable. Never holds a prompt, an
+    # answer or a credential.
     llm_model: Mapped[str | None] = mapped_column(String(80))
     llm_calls: Mapped[int | None] = mapped_column(Integer)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer)
@@ -105,6 +107,6 @@ class SystemEvent(Base, UUIDPrimaryKey, Timestamped):
     title: Mapped[str] = mapped_column(String(300), nullable=False)
     message: Mapped[str | None] = mapped_column(Text)
     occurred_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, index=True
+        UtcDateTime(), nullable=False, index=True
     )
     details: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)

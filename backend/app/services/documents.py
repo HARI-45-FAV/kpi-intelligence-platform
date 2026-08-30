@@ -67,6 +67,25 @@ def classify_document(document_type: str) -> str:
     )
 
 
+#: What a document is retrieved *for*. A handbook or a policy explains what a
+#: measure means and how the business defines it; an incident, campaign or
+#: management note records what happened, on dates. Those answer different
+#: questions, and quoting a definition as though it were evidence that something
+#: occurred is wrong in a way that reads convincingly -- so the purpose is stated
+#: on every retrieved passage rather than inferred downstream from its prose.
+DEFINITION_PURPOSE = "business_definition"
+EVIDENCE_PURPOSE = "business_evidence"
+
+
+def retrieval_purpose(document_class: str) -> str:
+    """The purpose a document of this class serves when retrieved."""
+    return (
+        DEFINITION_PURPOSE
+        if document_class == DocumentClass.REFERENCE
+        else EVIDENCE_PURPOSE
+    )
+
+
 def create_document(
     session: Session, access: AccessContext, payload: DocumentWritePayload
 ) -> CompanyDocument:
@@ -203,6 +222,58 @@ def assert_readable(document: CompanyDocument, access: AccessContext) -> None:
             f"'{document.title}' is restricted to: {', '.join(document.access_scope)}.",
             details={"required_roles": document.access_scope, "your_role": access.role.role_key},
         )
+
+
+def permits_document_scope(document: CompanyDocument, access: AccessContext) -> bool:
+    """Does the membership's own document-scope list admit this document?
+
+    An empty list is unrestricted. A non-empty one names the kinds of document
+    this membership may read, matched against either label the document carries,
+    so an operator who wrote the class and one who wrote the type both get what
+    they meant.
+    """
+    if not access.allowed_document_scopes:
+        return True
+    return access.allows_document_scope(document.document_type) or access.allows_document_scope(
+        document.document_class
+    )
+
+
+def permits_row_scope(document: CompanyDocument, access: AccessContext) -> bool:
+    """Does the membership's row scope permit this document's business coordinates?
+
+    ``tags`` is where a document records which part of the business it belongs
+    to: region, sector, channel, event id. A membership restricted to one region
+    must not reach another region's incident note through retrieval any more than
+    through a query -- an answer assembled from material the caller could not
+    have opened is the same disclosure by a longer route.
+
+    The per-coordinate decision is ``AccessContext.permits_scope_value``, the same
+    predicate a grouped read uses, so a document and a query row are judged by one
+    rule. A coordinate the document does not state cannot conflict with a scope,
+    so an untagged document stays visible -- the rule ``allows_domain`` already
+    applies to an unlabelled item.
+    """
+    return all(
+        access.permits_scope_value(coordinate, value)
+        for coordinate, value in (document.tags or {}).items()
+    )
+
+
+def is_retrievable(document: CompanyDocument, access: AccessContext) -> bool:
+    """The full entitlement gate every retrieval path shares.
+
+    Retrieval assembles material the caller never asked for by name, so it has to
+    be at least as strict as opening a document deliberately: the document's own
+    role scope, then the two membership axes. Returned as a boolean rather than
+    raised, because a retrieval path skips what it may not read -- naming a
+    restricted document is itself a disclosure.
+    """
+    try:
+        assert_readable(document, access)
+    except PermissionDenied:
+        return False
+    return permits_document_scope(document, access) and permits_row_scope(document, access)
 
 
 def resolve_version(

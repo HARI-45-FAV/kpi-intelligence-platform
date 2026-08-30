@@ -46,6 +46,19 @@ class KpiValue:
     denominator: float | None
     group: dict[str, Any] = field(default_factory=dict)
     note: str | None = None
+    #: How many source rows matched the window and filters. ``None`` when the
+    #: execution path could not report it. Zero is the fact that separates "the
+    #: window is genuinely empty" from "the aggregate over existing rows is null",
+    #: which a value alone cannot express once ``TREAT_AS_ZERO`` has applied.
+    matched_rows: int | None = None
+
+    @property
+    def observed(self) -> bool | None:
+        """Whether the source held any row in this window. ``None`` if unreported."""
+
+        if self.matched_rows is None:
+            return None
+        return self.matched_rows > 0
 
     def as_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -53,6 +66,8 @@ class KpiValue:
             "numerator": self.numerator,
             "denominator": self.denominator,
         }
+        if self.matched_rows is not None:
+            payload["matched_rows"] = self.matched_rows
         if self.group:
             payload["group"] = self.group
         if self.note:
@@ -104,6 +119,10 @@ def build_kpi_query(
     projections = [f"{_render_measure(connector, spec.numerator)} AS numerator"]
     if spec.denominator is not None:
         projections.append(f"{_render_measure(connector, spec.denominator)} AS denominator")
+    # Always projected: without it, a window that matched no rows and a window whose
+    # aggregate is null are indistinguishable once null_handling has been applied.
+    # COUNT(*) rides along on the same scan, so it costs nothing extra.
+    projections.append("COUNT(*) AS matched_rows")
 
     grouped_quoted: list[str] = []
     for index, column in enumerate(group_columns):
@@ -159,7 +178,9 @@ def execute_kpi(
     for row in rows:
         numerator = _as_float(row.get("numerator"))
         denominator = _as_float(row.get("denominator")) if query.is_ratio else None
-        value, note = _combine(spec, numerator, denominator)
+        matched = row.get("matched_rows")
+        matched_rows = int(matched) if matched is not None else None
+        value, note = _combine(spec, numerator, denominator, matched_rows=matched_rows)
         group = {
             column: row.get(f"grp_{index}")
             for index, column in enumerate(query.group_by)
@@ -171,6 +192,7 @@ def execute_kpi(
                 denominator=denominator,
                 group=group,
                 note=note,
+                matched_rows=matched_rows,
             )
         )
 
@@ -253,18 +275,34 @@ def _build_where(
 # Value combination
 # ---------------------------------------------------------------------------
 def _combine(
-    spec: FormulaSpec, numerator: float | None, denominator: float | None
+    spec: FormulaSpec,
+    numerator: float | None,
+    denominator: float | None,
+    *,
+    matched_rows: int | None = None,
 ) -> tuple[float | None, str | None]:
+    # "No rows matched at all" and "rows matched but the aggregate is null" are
+    # different facts, and the note has to say which — TREAT_AS_ZERO turns both
+    # into the same 0.0, and a reader of that zero deserves to know why.
+    empty_window = matched_rows == 0
+    empty_note = (
+        "no rows matched this window"
+        if empty_window
+        else "no matching rows"
+    )
+
     if spec.denominator is None:
         if numerator is None:
             # SUM over an empty set is NULL, not 0. Which of those the business
             # means is a governed choice, not an implementation detail.
             if spec.null_handling == "TREAT_AS_ZERO":
-                return (0.0, "no matching rows; null treated as zero per KPI contract")
-            return (None, "no matching rows")
+                return (0.0, f"{empty_note}; null treated as zero per KPI contract")
+            return (None, empty_note)
         return (numerator, None)
 
     if denominator in (None, 0):
+        if empty_window:
+            return (None, "no rows matched this window; the ratio is undefined")
         return (None, "denominator is zero or empty; ratio is undefined")
     if numerator is None:
         return (0.0 if spec.null_handling == "TREAT_AS_ZERO" else None, "numerator is null")

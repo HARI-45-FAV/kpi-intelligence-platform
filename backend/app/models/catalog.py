@@ -15,7 +15,6 @@ from datetime import datetime
 
 from sqlalchemy import (
     JSON,
-    DateTime,
     ForeignKey,
     Integer,
     String,
@@ -25,7 +24,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
-from app.models.base import Timestamped, UUIDPrimaryKey
+from app.models.base import Timestamped, UUIDPrimaryKey, UtcDateTime
 
 
 class CatalogVersion(Base, UUIDPrimaryKey, Timestamped):
@@ -36,7 +35,7 @@ class CatalogVersion(Base, UUIDPrimaryKey, Timestamped):
         String(36), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True
     )
     version: Mapped[int] = mapped_column(Integer, nullable=False)
-    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    published_at: Mapped[datetime] = mapped_column(UtcDateTime(), nullable=False)
     published_by: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("users.id", ondelete="SET NULL")
     )

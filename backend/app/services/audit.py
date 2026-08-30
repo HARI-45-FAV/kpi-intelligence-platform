@@ -27,6 +27,11 @@ class AuditAction:
     USER_LOGGED_IN = "user.logged_in"
     MEMBER_ADDED = "member.added"
     MEMBER_UPDATED = "member.updated"
+    # Split out of MEMBER_UPDATED so the history screen can answer "who changed
+    # what someone may reach" without reading every membership edit. Same writer,
+    # same table — only the action key differs.
+    MEMBER_ROLE_CHANGED = "member.role_changed"
+    MEMBER_SCOPE_UPDATED = "member.scope_updated"
     MEMBER_REMOVED = "member.removed"
 
     SOURCE_CREATED = "source.created"
@@ -62,6 +67,20 @@ class AuditAction:
     KPI_REJECTED = "kpi.rejected"
     KPI_DEPRECATED = "kpi.deprecated"
     KPI_VERSION_CREATED = "kpi.version_created"
+
+    BUCKET_CONFIG_CREATED = "detection.bucket_config_created"
+    BUCKET_CONFIG_UPDATED = "detection.bucket_config_updated"
+    BUCKET_CONFIG_EXTRACTED = "detection.bucket_config_extracted"
+    BUCKET_CONFIG_APPROVED = "detection.bucket_config_approved"
+    BUCKET_CONFIG_ARCHIVED = "detection.bucket_config_archived"
+    DETECTION_RUN = "detection.executed"
+    AGENT_RUN = "AGENT_RUN"
+
+    # Investigation is a read, but a read of the company's own business data
+    # broken down by an entity someone chose -- so who looked at which part of the
+    # business, and when, is exactly what an audit trail is for.
+    CONTRIBUTION_ANALYSED = "investigation.contribution_analysed"
+    ENTITY_ANALYSED = "investigation.entity_analysed"
 
 
 def record(

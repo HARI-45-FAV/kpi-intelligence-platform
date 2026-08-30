@@ -42,6 +42,7 @@ import {
   StatusBadge,
 } from '../../components/ui'
 import { useAction, useResource } from '../../components/useResource'
+import { useCopilot, useCopilotScreen } from '../../copilot/CopilotProvider'
 
 const KPI_SELECTION_KEY = 'bi.ai.dashboard-kpis'
 
@@ -958,6 +959,18 @@ function KpiDrawer({
   const validationChecks = validation?.checks ?? []
   const versions = detail.data?.definition.versions ?? []
 
+  // The Copilot inherits the exact version on screen, so "explain this" means
+  // this contract rather than whichever version happens to be live. It explains;
+  // it cannot validate, approve, deprecate or edit — those are the buttons below,
+  // and they stay human.
+  const { openPanel } = useCopilot()
+  useCopilotScreen({
+    panel: 'kpi_setup',
+    kpiId,
+    kpiVersion: contract?.version ?? null,
+    label: detail.data?.definition.name ?? null,
+  })
+
   const refresh = async () => {
     await detail.reload()
     await onChanged()
@@ -1061,7 +1074,21 @@ function KpiDrawer({
           )}
 
           <section>
-            <h3 className="panel-title mb-2">Contract</h3>
+            <div className="mb-2 flex items-center justify-between gap-3">
+              <h3 className="panel-title">Contract</h3>
+              <button
+                className="btn-ghost btn-xs"
+                onClick={() =>
+                  openPanel(
+                    `Explain the ${detail.data?.definition.name ?? 'KPI'} contract at version ` +
+                      `${contract.version}: what it measures, how it is calculated, its lineage, ` +
+                      `and what its validation found.`,
+                  )
+                }
+              >
+                ✨ Explain with Copilot
+              </button>
+            </div>
             <dl>
               <DefinitionRow term="Business definition">
                 {contract.business_definition}

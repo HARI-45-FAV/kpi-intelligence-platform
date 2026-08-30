@@ -251,6 +251,52 @@ def validate_kpi_version(
     return (run, report)
 
 
+def latest_validation_summary(session: Session, version: KpiVersion) -> dict | None:
+    """The most recent stored validation result for one KPI version.
+
+    A read of persisted check results -- it runs nothing and recomputes nothing.
+    The KPI detail API and the Copilot's ``get_kpi_validation_summary`` tool both
+    read it, so an explanation of "why is this KPI blocked" quotes the same run,
+    the same check statuses and the same expected/actual pairs the approval
+    screen shows. ``None`` means the version has never been validated, which is
+    a fact the caller must state rather than fill in.
+    """
+    run = session.scalar(
+        select(KpiValidationRun)
+        .where(KpiValidationRun.kpi_version_id == version.id)
+        .order_by(KpiValidationRun.started_at.desc())
+        .limit(1)
+    )
+    if run is None:
+        return None
+    return {
+        "run_id": run.id,
+        "overall_status": run.overall_status,
+        "ready_for_approval": run.overall_status
+        in {ValidationStatus.PASS, ValidationStatus.WARN},
+        "summary": run.summary,
+        "duration_ms": run.duration_ms,
+        "started_at": run.started_at,
+        "passed": run.passed_count,
+        "failed": run.failed_count,
+        "warned": run.warned_count,
+        "checks": [
+            {
+                "test_type": check.test_type,
+                "label": check.label,
+                "status": check.status,
+                "expected": check.expected,
+                "actual": check.actual,
+                "message": check.message,
+                "is_blocking": check.is_blocking,
+                "runtime_ms": check.runtime_ms,
+                "evidence": check.evidence,
+            }
+            for check in sorted(run.checks, key=lambda c: c.created_at)
+        ],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Shared context
 # ---------------------------------------------------------------------------

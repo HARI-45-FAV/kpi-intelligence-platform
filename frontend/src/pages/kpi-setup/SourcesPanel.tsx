@@ -7,6 +7,7 @@
  */
 
 import { useMemo, useState, type ReactNode } from 'react'
+import { Link } from 'react-router-dom'
 import { api } from '../../api/client'
 import type {
   ConnectorDescriptor,
@@ -278,6 +279,7 @@ function SourceRow({
             <span className="font-medium text-slate-200">{source.name}</span>
             <span className="chip">{titleCase(source.source_type)}</span>
             <StatusBadge status={source.connection_status} />
+            <StatusBadge status={source.health_status} />
             {source.has_credentials && (
               <span className="chip" title="Credentials stored encrypted; never returned">
                 🔑 stored
@@ -285,15 +287,29 @@ function SourceRow({
             )}
           </div>
           <div className="mt-1 text-[11px] text-slate-600">
-            {[source.host, source.database_name, source.schema_name].filter(Boolean).join(' · ') ||
-              'local'}
+            {[source.host, source.database_name, source.schema_name, source.connection_reference]
+              .filter(Boolean)
+              .join(' · ') || 'local'}
             {' · '}
-            {titleCase(source.refresh_frequency)} refresh · {source.table_count} tables discovered,{' '}
-            {source.selected_table_count} in scope
+            {titleCase(source.refresh_frequency)} refresh · {source.discovered_table_count} tables
+            discovered, {source.selected_table_count} in scope
+          </div>
+          {/* The last measured verdict, replayed. Never recomputed by this list. */}
+          <div className="mt-1 text-[11px] text-slate-600">
+            {source.health_checked_at
+              ? `Health measured ${formatRelative(source.health_checked_at)}`
+              : 'Health never measured'}
+            {source.grain ? ` · ${source.grain}` : ''}
+            {source.quality_score !== null && source.quality_score !== undefined
+              ? ` · quality ${source.quality_score}`
+              : ''}
           </div>
         </div>
 
         <div className="flex shrink-0 gap-2">
+          <Link className="btn-ghost btn-xs" to={`/kpi-setup/sources/${source.id}`}>
+            Governance
+          </Link>
           <button
             className="btn-ghost btn-xs"
             disabled={testAction.pending}

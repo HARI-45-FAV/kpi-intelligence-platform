@@ -22,6 +22,9 @@ from __future__ import annotations
 
 import pytest
 
+from app.core.database import SessionLocal
+from app.models.kpi import KpiVersion
+from app.services.detection import resolve_binding
 from tests.conftest import API, ApiActor, login, register
 
 # The analytical scope for this test. kpi_contracts is deliberately *not* in it:
@@ -240,6 +243,38 @@ def test_imported_definition_validates_and_can_be_approved(workspace):
     actions = [entry["action"] for entry in entries]
     assert "kpi.imported_from_source" in actions
     assert "kpi.approved" in actions
+
+def test_legacy_kpi_versions_can_recover_binding_from_source_definition(workspace):
+    admin, base = workspace
+    imported = admin.post(
+        f"{base}/kpi-source-definitions/import", json={"kpi_keys": ["revenue"]}
+    )
+    assert imported.status_code == 201, imported.text
+
+    kpi = admin.get(f"{base}/kpis").json()[0]
+    version_id = kpi["versions"][0]["id"]
+
+    session = SessionLocal()
+    try:
+        version = session.get(KpiVersion, version_id)
+        assert version is not None
+        version.status = "APPROVED"
+        version.primary_source_table_id = None
+        version.primary_data_source_id = None
+        version.source_definition = {
+            "data_source": "NovaMart Warehouse",
+            "data_source_type": "SQLITE",
+            "schema": "main",
+            "table": "orders",
+            "qualified_name": "main.orders",
+        }
+        session.commit()
+
+        binding = resolve_binding(session, version)
+        assert binding.table.table_name == "orders"
+        assert binding.table.schema_name == "main"
+    finally:
+        session.close()
 
 
 def test_unknown_definition_key_is_rejected(workspace):

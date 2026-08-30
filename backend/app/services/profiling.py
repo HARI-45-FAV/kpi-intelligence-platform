@@ -29,6 +29,7 @@ from app.models.base import QualityStatus, SemanticType
 from app.models.profiling import ColumnProfile, TableProfile
 from app.models.source import SourceColumn, SourceTable
 from app.services.classification import refine_semantic_type
+from app.services.source_governance import apply_column_role, apply_table_candidates
 from app.connectors.sql import classify_type_family
 
 # Thresholds for turning raw statistics into a quality verdict.
@@ -80,12 +81,15 @@ def profile_table(
     completeness_values: list[float] = []
     penalty = 0.0
     table_warnings: list[str] = []
+    # Keyed by column id, including withheld columns, so the candidate proposals
+    # below can tell "not unique" from "not readable".
+    profiles_by_column: dict[str, ColumnProfile] = {}
 
     for column in sorted(table.columns, key=lambda c: c.ordinal_position):
         if not access.can_read_column(column, table_name=table.table_name):
             reason = access.withheld_reason(column)
             outcome.withheld.append({"column": column.column_name, "reason": reason})
-            _record_withheld(session, table, column, now, reason)
+            profiles_by_column[column.id] = _record_withheld(session, table, column, now, reason)
             continue
 
         stats = connector.profile_column(
@@ -98,6 +102,7 @@ def profile_table(
             session, table, column, stats, now
         )
         outcome.column_profiles.append(column_profile)
+        profiles_by_column[column.id] = column_profile
 
         if stats.null_pct is not None:
             completeness_values.append(100.0 - stats.null_pct)
@@ -134,6 +139,11 @@ def profile_table(
         )
 
     profile.warnings = table_warnings
+    # Denormalised so a table list can show when it was last profiled without a
+    # per-row join, and re-propose the governed candidates now that uniqueness is
+    # measured. A confirmed candidate set is left untouched.
+    table.profiled_at = now
+    apply_table_candidates(table, profiles_by_column)
     outcome.duration_ms = int((time.perf_counter() - started) * 1000)
     profile.duration_ms = outcome.duration_ms
     return outcome
@@ -232,6 +242,9 @@ def _persist_column_profile(
         is_foreign_key=column.is_foreign_key,
         stats=stats,
     )
+    # The business reading of the column follows the refined semantic type, so it
+    # is proposed last. Only ever a proposal — a confirmed role is left alone.
+    apply_column_role(column, profile)
     return profile, warnings, status
 
 

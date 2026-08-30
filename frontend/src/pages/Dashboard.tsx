@@ -1,109 +1,71 @@
 /**
- * Overall Dashboard: date + Agent Run → dynamic KPI result cards, and a Stage
- * Performance Summary over a selectable period. Both open reusable floating
- * panels.
+ * Overall Dashboard: date + Agent Run → KPI result cards, and a Stage Performance
+ * Summary over a selectable period. Both open reusable floating panels.
  *
  * KPI identity always comes from the database (`/kpi-contracts`), never from a
  * hardcoded list and never from KPI Setup's component state — which is what
  * proves persistence actually works. The number of cards is `contracts.length`.
  *
- * Analytical values here are PLACEHOLDERS. They are shaped exactly like the real
- * output (actual / expected / deviation / status, and runs / normal / abnormal)
- * so the monitoring engine can replace the generator without touching this UI.
- * They are derived deterministically from the KPI key and date, so the same
- * inputs always render the same numbers instead of reshuffling on every click.
+ * Every analytical value on this screen is measured, not generated. Agent Run
+ * calls `POST /run-detection/batch`, which reads each KPI's registered source with
+ * its approved formula and returns actual, expected, deviation and status; the
+ * Stage Performance Summary counts the detection runs the platform actually
+ * stored in the selected window. There is no arithmetic in this file beyond
+ * choosing a colour and tallying stored verdicts — detection happens in one
+ * deterministic place on the server, and this screen displays what it decided.
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api } from '../api/client'
-import type { KpiContract } from '../api/types'
+import { api, describeError } from '../api/client'
+import type {
+  CopilotChatResponse,
+  DetectionBatchResponse,
+  DetectionResult,
+  DetectionRunSummary,
+  KpiContract,
+} from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { formatCompact, formatCurrency, formatDate, formatNumber } from '../components/format'
 import { Alert, EmptyState, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
-import { useResource } from '../components/useResource'
-
-/* ------------------------------------------------------- placeholder engine */
-
-/** Stable 32-bit hash so mock values are reproducible per KPI and date. */
-function seedOf(...parts: string[]): number {
-  let hash = 2166136261
-  for (const part of parts.join('|')) {
-    hash ^= part.charCodeAt(0)
-    hash = Math.imul(hash, 16777619)
-  }
-  return Math.abs(hash)
-}
-
-function pseudo(seed: number, index: number): number {
-  const x = Math.sin(seed * 12.9898 + index * 78.233) * 43758.5453
-  return x - Math.floor(x)
-}
-
-interface KpiResult {
-  actual: number
-  expected: number
-  deviationPct: number
-  status: 'Normal' | 'Abnormal'
-}
-
-/** Placeholder only. Replaced wholesale by the Sprint 2 monitoring engine. */
-function mockResult(contract: KpiContract, date: string): KpiResult {
-  const seed = seedOf(contract.kpi_id, date)
-  const isRatio = contract.kind === 'RATIO'
-  const base = isRatio ? 1_200 + pseudo(seed, 1) * 900 : 2_000_000 + pseudo(seed, 1) * 8_000_000
-  const expected = Math.round(base)
-  // Most days sit inside a normal band; a minority deviate materially.
-  const abnormal = pseudo(seed, 2) < 0.3
-  const swing = abnormal
-    ? (pseudo(seed, 3) < 0.5 ? -1 : 1) * (0.12 + pseudo(seed, 4) * 0.22)
-    : (pseudo(seed, 3) < 0.5 ? -1 : 1) * pseudo(seed, 5) * 0.045
-  const actual = Math.round(expected * (1 + swing))
-  return {
-    actual,
-    expected,
-    deviationPct: expected === 0 ? 0 : ((actual - expected) / expected) * 100,
-    status: abnormal ? 'Abnormal' : 'Normal',
-  }
-}
-
-interface StageStats {
-  totalRuns: number
-  normal: number
-  abnormal: number
-  normalPct: number
-}
-
-function mockStage(contract: KpiContract, days: number, anchor: string): StageStats {
-  const seed = seedOf(contract.kpi_id, String(days), anchor)
-  // Roughly one run per weekday in the window.
-  const totalRuns = Math.max(1, Math.round(days * 0.78))
-  const abnormal = Math.round(pseudo(seed, 7) * Math.max(1, totalRuns * 0.14))
-  const normal = totalRuns - abnormal
-  return {
-    totalRuns,
-    normal,
-    abnormal,
-    normalPct: totalRuns === 0 ? 0 : (normal / totalRuns) * 100,
-  }
-}
+import { useAction, useResource } from '../components/useResource'
+import { useCopilot, useCopilotScreen } from '../copilot/CopilotProvider'
+import KPIDetailDashboard from './KPIDetailDashboard'
 
 /* ---------------------------------------------------------------- formatting */
 
-function kpiValue(contract: KpiContract, value: number): string {
+function kpiValue(contract: KpiContract, value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
   if (contract.unit === 'currency' || contract.currency) {
     return formatCurrency(value, contract.currency ?? 'INR', true)
   }
   return formatCompact(value)
 }
 
-function signed(pct: number): string {
+function signed(pct: number | null | undefined): string {
+  if (pct === null || pct === undefined || Number.isNaN(pct)) return '—'
   return `${pct >= 0 ? '+' : ''}${pct.toFixed(1)}%`
 }
 
-function deviationTone(pct: number): string {
-  if (Math.abs(pct) < 5) return 'text-slate-300'
-  return pct < 0 ? 'text-rose-300' : 'text-emerald-300'
+/**
+ * Deviation is coloured by the verdict, never by its sign.
+ *
+ * A rising number is not automatically good news — refunds, cost per order and
+ * churn all get worse as they grow — and the engine has already weighed the
+ * movement against this KPI's own tolerance and direction. Colouring by sign
+ * would quietly contradict that judgement in green.
+ */
+function deviationTone(status: string): string {
+  if (status === 'ABNORMAL') return 'text-rose-300'
+  return 'text-slate-300'
+}
+
+/** How a verdict reads, in the words a business owner would use. */
+const STATUS_MEANING: Record<string, string> = {
+  NORMAL: 'In line with comparable history.',
+  ABNORMAL: 'Outside comparable history by more than this KPI tolerates.',
+  LOW_CONFIDENCE:
+    'Not enough comparable history to judge yet. The measurement stands; the verdict does not.',
 }
 
 const PERIODS = [
@@ -113,6 +75,12 @@ const PERIODS = [
 ] as const
 
 const KPI_SELECTION_KEY = 'bi.ai.dashboard-kpis'
+
+/** The server evaluates at most this many KPIs per batch request. */
+const BATCH_LIMIT = 25
+
+/** How many stored runs the period summary reads. */
+const RUN_HISTORY_LIMIT = 200
 
 function readSelectedKpis(): string[] {
   if (typeof window === 'undefined') return []
@@ -134,6 +102,50 @@ function shiftDays(iso: string, days: number): string {
   const date = new Date(`${iso}T00:00:00Z`)
   date.setUTCDate(date.getUTCDate() + days)
   return date.toISOString().slice(0, 10)
+}
+
+/* --------------------------------------------------- stored-run summarisation */
+
+interface StageStats {
+  totalRuns: number
+  normal: number
+  abnormal: number
+  lowConfidence: number
+  normalPct: number
+}
+
+const EMPTY_STAGE: StageStats = {
+  totalRuns: 0,
+  normal: 0,
+  abnormal: 0,
+  lowConfidence: 0,
+  normalPct: 0,
+}
+
+/**
+ * Verdicts the platform actually reached in the window, tallied per KPI.
+ *
+ * Nothing is inferred: a KPI that was never evaluated in the period reports zero
+ * runs, which is the truth and is more useful than a plausible-looking rate.
+ */
+function tallyRuns(
+  runs: DetectionRunSummary[],
+  window: { start: string; end: string },
+): Map<string, StageStats> {
+  const byKpi = new Map<string, StageStats>()
+  for (const run of runs) {
+    if (run.target_date < window.start || run.target_date > window.end) continue
+    const current = byKpi.get(run.kpi_key) ?? { ...EMPTY_STAGE }
+    current.totalRuns += 1
+    if (run.status === 'NORMAL') current.normal += 1
+    else if (run.status === 'ABNORMAL') current.abnormal += 1
+    else current.lowConfidence += 1
+    byKpi.set(run.kpi_key, current)
+  }
+  for (const stats of byKpi.values()) {
+    stats.normalPct = stats.totalRuns === 0 ? 0 : (stats.normal / stats.totalRuns) * 100
+  }
+  return byKpi
 }
 
 /* ------------------------------------------------------- registry consumption */
@@ -174,7 +186,8 @@ function awaitingActivation(contracts: KpiContract[]): number {
 /* ------------------------------------------------------------------ dashboard */
 
 export default function Dashboard() {
-  const { companyId, membership } = useAuth()
+  const { companyId, membership, can } = useAuth()
+  const mayRun = can('detection.run')
 
   // Every version, not just ACTIVE ones. A KPI is "confirmed" here once it is in
   // the registry and not rejected or deprecated — requiring full activation would
@@ -185,10 +198,19 @@ export default function Dashboard() {
     [companyId],
   )
 
+  // The verdicts already on record. They populate the period summary, and they
+  // are what the screen can honestly show before anybody presses Agent Run.
+  const history = useResource<DetectionRunSummary[]>(
+    () =>
+      api.get(`/companies/${companyId}/detection-runs`, { query: { limit: RUN_HISTORY_LIMIT } }),
+    [companyId],
+    { enabled: Boolean(companyId) },
+  )
+
   const [date, setDate] = useState(isoToday)
-  const [runDate, setRunDate] = useState<string | null>(null)
-  const [running, setRunning] = useState(false)
+  const [batch, setBatch] = useState<DetectionBatchResponse | null>(null)
   const [openKpi, setOpenKpi] = useState<KpiContract | null>(null)
+  const run = useAction()
 
   const [periodDays, setPeriodDays] = useState<number>(30)
   const [custom, setCustom] = useState<{ start: string; end: string } | null>(null)
@@ -236,15 +258,39 @@ export default function Dashboard() {
     [contracts, matchesSelection, selectionUsable],
   )
 
-  const agentRun = useCallback(() => {
-    setRunning(true)
-    // A short delay so the UI reads as an evaluation rather than an instant
-    // toggle. No calculation happens here — this is placeholder data.
-    window.setTimeout(() => {
-      setRunDate(date)
-      setRunning(false)
-    }, 550)
-  }, [date])
+  // The server evaluates at most BATCH_LIMIT KPIs per request. Asking for the whole
+  // list and letting the tail be dropped silently would leave cards blank with no
+  // explanation, so the cut is made here and said out loud.
+  const evaluating = useMemo(() => visibleContracts.slice(0, BATCH_LIMIT), [visibleContracts])
+  const beyondBatch = visibleContracts.length - evaluating.length
+
+  /** Fresh detection results from this run, by KPI business key. */
+  const results = useMemo(() => {
+    const byKey = new Map<string, DetectionResult>()
+    for (const item of batch?.results ?? []) byKey.set(item.result.kpi_key, item.result)
+    return byKey
+  }, [batch])
+
+  const skipped = useMemo(() => {
+    const byKey = new Map<string, string>()
+    for (const item of batch?.skipped ?? []) byKey.set(item.kpi_id, item.reason)
+    return byKey
+  }, [batch])
+
+  const agentRun = useCallback(async () => {
+    if (!companyId) return
+    const response = await run.run(() =>
+      api.post<DetectionBatchResponse>(`/companies/${companyId}/run-detection/batch`, {
+        target_date: date,
+        kpi_ids: evaluating.map((contract) => contract.kpi_id),
+      }),
+    )
+    if (response) {
+      setBatch(response)
+      // The period summary counts stored runs, and this run just added some.
+      void history.reload()
+    }
+  }, [companyId, date, evaluating, history, run])
 
   const window_ = useMemo(() => {
     if (custom) return { start: custom.start, end: custom.end }
@@ -258,6 +304,36 @@ export default function Dashboard() {
       new Date(`${window_.start}T00:00:00Z`).getTime()
     return Math.max(1, Math.round(ms / 86_400_000))
   }, [window_])
+
+  const stageStats = useMemo(
+    () => tallyRuns(history.data ?? [], window_),
+    [history.data, window_],
+  )
+
+  // What the Copilot inherits from this screen. The open KPI detail wins over
+  // the grid, because that is what the user is reading.
+  //
+  // `pinnedKpi` keeps that inheritance alive after the detail modal closes:
+  // asking from the modal has to dismiss it (the modal sits above the drawer),
+  // and without the pin the KPI would be withdrawn a tick before the question is
+  // sent. It clears when the Copilot closes.
+  const { openPanel, open: copilotOpen } = useCopilot()
+  const [pinnedKpi, setPinnedKpi] = useState<KpiContract | null>(null)
+  useEffect(() => {
+    if (!copilotOpen) setPinnedKpi(null)
+  }, [copilotOpen])
+  const focusKpi = openKpi ?? pinnedKpi
+
+  // Which panel is asking, too: one KPI in focus means the detail view is the
+  // subject, and otherwise the question came from the summary of every KPI on the
+  // date, where reading one row's deviation against another's is the easy mistake.
+  useCopilotScreen({
+    panel: focusKpi ? 'detection_detail' : 'stage_performance',
+    kpiId: focusKpi?.kpi_id ?? null,
+    kpiVersion: focusKpi?.version ?? null,
+    selectedDate: batch?.target_date ?? date,
+    label: focusKpi?.name ?? null,
+  })
 
   if (kpis.loading && !kpis.data) return <Spinner label="Loading confirmed KPIs…" />
   if (kpis.error)
@@ -312,15 +388,22 @@ export default function Dashboard() {
             </label>
             <button
               className="btn-primary btn-xs"
-              onClick={agentRun}
-              disabled={running || contracts.length === 0}
+              onClick={() => void agentRun()}
+              disabled={run.pending || visibleContracts.length === 0 || !mayRun}
+              title={mayRun ? undefined : 'Requires the detection.run permission.'}
             >
-              {running ? 'Running…' : 'Agent Run'}
+              {run.pending ? 'Running…' : 'Agent Run'}
             </button>
           </div>
         }
         bodyClassName=""
       >
+        {run.error && (
+          <div className="px-4 pt-3">
+            <Alert onDismiss={run.reset}>{run.error}</Alert>
+          </div>
+        )}
+
         {visibleContracts.length === 0 ? (
           <EmptyState
             title={
@@ -339,7 +422,7 @@ export default function Dashboard() {
               </Link>
             }
           />
-        ) : !runDate ? (
+        ) : !batch ? (
           <EmptyState
             title="Select a date and run the agent"
             description={`Ready to evaluate ${visibleContracts.length} confirmed KPI${
@@ -350,8 +433,18 @@ export default function Dashboard() {
           <>
             <div className="flex flex-wrap items-center gap-2 border-b border-ink-800 px-4 py-2.5">
               <span className="text-xs text-slate-500">Evaluated for</span>
-              <span className="text-sm font-medium text-slate-100">{formatDate(runDate)}</span>
-              <span className="chip">placeholder values</span>
+              <span className="text-sm font-medium text-slate-100">
+                {formatDate(batch.target_date)}
+              </span>
+              <span className="text-[11px] text-slate-500">
+                · {batch.counts.evaluated} evaluated
+                {batch.counts.skipped > 0 && `, ${batch.counts.skipped} could not be`}
+              </span>
+              {beyondBatch > 0 && (
+                <span className="text-[11px] text-slate-500">
+                  · one run covers {BATCH_LIMIT} KPIs; {beyondBatch} more were not included
+                </span>
+              )}
             </div>
             {/* One reusable card, mapped over the registry. */}
             <div className="grid gap-3 p-3 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
@@ -359,8 +452,9 @@ export default function Dashboard() {
                 <KpiResultCard
                   key={contract.kpi_version_id}
                   contract={contract}
-                  result={mockResult(contract, runDate)}
-                  onClick={() => setOpenKpi(contract)}
+                  result={results.get(contract.kpi_id) ?? null}
+                  skippedReason={skipped.get(contract.kpi_id)}
+                  onClick={() => results.get(contract.kpi_id) && setOpenKpi(contract)}
                 />
               ))}
             </div>
@@ -440,6 +534,12 @@ export default function Dashboard() {
           <span className="ml-2 text-[11px] text-slate-600">({windowDays} days)</span>
         </div>
 
+        {history.error && (
+          <div className="px-4 pt-3">
+            <Alert>Unable to load stored detection runs. ({history.error})</Alert>
+          </div>
+        )}
+
         {visibleContracts.length === 0 ? (
           <EmptyState title="No confirmed KPIs to summarise" />
         ) : (
@@ -448,7 +548,7 @@ export default function Dashboard() {
               <StageCard
                 key={contract.kpi_version_id}
                 contract={contract}
-                stats={mockStage(contract, windowDays, window_.start)}
+                stats={stageStats.get(contract.kpi_id) ?? EMPTY_STAGE}
                 onClick={() => setOpenStage(contract)}
               />
             ))}
@@ -458,25 +558,30 @@ export default function Dashboard() {
 
       <p className="text-[11px] leading-relaxed text-slate-600">
         KPI names and the number of cards come from the confirmed registry, so both panels change
-        automatically when a KPI is added, edited or deprecated. The analytical values are
-        placeholders shaped like the real output — the monitoring engine replaces the generator
-        without changing this screen.
+        automatically when a KPI is added, edited or deprecated. Agent Run evaluates each KPI at its
+        registered source with its approved formula; the period summary counts the detection runs
+        stored in the selected window.
       </p>
 
-      {openKpi && runDate && (
-        <KpiDetailPanel
+      {openKpi && batch && results.get(openKpi.kpi_id) && (
+        <KpiEvaluationPopup
           contract={openKpi}
-          date={runDate}
-          result={mockResult(openKpi, runDate)}
+          result={results.get(openKpi.kpi_id)!}
+          companyId={companyId}
           onClose={() => setOpenKpi(null)}
+          onOpenCopilot={(contract, question) => {
+            setPinnedKpi(contract)
+            setOpenKpi(null)
+            openPanel(question)
+          }}
         />
       )}
 
       {openStage && (
-        <StageDetailPanel
+        <KPIDetailDashboard
           contract={openStage}
+          runs={history.data ?? []}
           window={window_}
-          stats={mockStage(openStage, windowDays, window_.start)}
           onClose={() => setOpenStage(null)}
         />
       )}
@@ -489,12 +594,28 @@ export default function Dashboard() {
 function KpiResultCard({
   contract,
   result,
+  skippedReason,
   onClick,
 }: {
   contract: KpiContract
-  result: KpiResult
+  result: DetectionResult | null
+  skippedReason?: string
   onClick: () => void
 }) {
+  // A KPI the engine could not evaluate says why, in the server's own words. The
+  // alternative — a card with numbers in it — would be the one thing this screen
+  // must never do.
+  if (!result) {
+    return (
+      <div className="rounded-[22px] border border-white/95 bg-white/50 p-4 text-left shadow-[0_11px_22px_rgba(50,103,145,0.08)] backdrop-blur-md">
+        <div className="text-sm font-medium text-slate-300">{contract.name}</div>
+        <p className="mt-3 text-xs leading-relaxed text-slate-500">
+          {skippedReason ?? 'Not evaluated in this run.'}
+        </p>
+      </div>
+    )
+  }
+
   return (
     <button
       onClick={onClick}
@@ -502,7 +623,7 @@ function KpiResultCard({
     >
       <div className="flex items-start justify-between gap-2">
         <span className="text-sm font-medium text-slate-100">{contract.name}</span>
-        <StatusBadge status={result.status === 'Normal' ? 'GOOD' : 'WARNING'} label={result.status} />
+        <StatusBadge status={result.status} />
       </div>
 
       <div className="mt-3 text-2xl font-semibold tabular-nums text-slate-100">
@@ -517,11 +638,16 @@ function KpiResultCard({
         </div>
         <div className="flex justify-between">
           <dt className="text-slate-500">Deviation</dt>
-          <dd className={`tabular-nums font-medium ${deviationTone(result.deviationPct)}`}>
-            {signed(result.deviationPct)}
+          <dd className={`tabular-nums font-medium ${deviationTone(result.status)}`}>
+            {signed(result.deviation_pct)}
           </dd>
         </div>
       </dl>
+
+      {/* The one concession to method, and only in the words the server chose. */}
+      {result.comparison && (
+        <p className="mt-2.5 text-[11px] text-slate-500">Comparison: {result.comparison}</p>
+      )}
     </button>
   )
 }
@@ -543,162 +669,162 @@ function StageCard({
     >
       <div className="text-sm font-medium text-slate-100">{contract.name}</div>
 
-      <div className="mt-3 flex items-baseline gap-2">
-        <span
-          className={`text-2xl font-semibold tabular-nums ${
-            healthy ? 'text-emerald-300' : 'text-amber-300'
-          }`}
-        >
-          {stats.normalPct.toFixed(1)}%
-        </span>
-        <span className="text-xs text-slate-500">normal</span>
-      </div>
-      <div className="mt-0.5 text-[11px] text-slate-500">
-        {formatNumber(stats.totalRuns)} runs
-      </div>
+      {stats.totalRuns === 0 ? (
+        <p className="mt-3 text-xs leading-relaxed text-slate-500">
+          No detection run stored in this period yet.
+        </p>
+      ) : (
+        <>
+          <div className="mt-3 flex items-baseline gap-2">
+            <span
+              className={`text-2xl font-semibold tabular-nums ${
+                healthy ? 'text-emerald-300' : 'text-amber-300'
+              }`}
+            >
+              {stats.normalPct.toFixed(1)}%
+            </span>
+            <span className="text-xs text-slate-500">normal</span>
+          </div>
+          <div className="mt-0.5 text-[11px] text-slate-500">
+            {formatNumber(stats.totalRuns)} run{stats.totalRuns === 1 ? '' : 's'}
+          </div>
 
-      {/* Proportion bar: normal versus abnormal share of the window. */}
-      <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-ink-800">
-        <div
-          className="bg-emerald-600"
-          style={{ width: `${stats.normalPct}%` }}
-          aria-hidden
-        />
-        <div className="flex-1 bg-amber-600" aria-hidden />
-      </div>
+          {/* Proportion bar: normal versus everything else in the window. */}
+          <div className="mt-3 flex h-1.5 overflow-hidden rounded-full bg-ink-800">
+            <div
+              className="bg-emerald-600"
+              style={{ width: `${stats.normalPct}%` }}
+              aria-hidden
+            />
+            <div className="flex-1 bg-amber-600" aria-hidden />
+          </div>
 
-      <div className="mt-2 flex justify-between border-t border-ink-800 pt-2 text-xs">
-        <span className="text-emerald-300 tabular-nums">{stats.normal} Normal</span>
-        <span className="text-amber-300 tabular-nums">{stats.abnormal} Abnormal</span>
-      </div>
+          <div className="mt-2 flex justify-between border-t border-ink-800 pt-2 text-xs">
+            <span className="text-emerald-300 tabular-nums">{stats.normal} Normal</span>
+            <span className="text-amber-300 tabular-nums">{stats.abnormal} Abnormal</span>
+          </div>
+        </>
+      )}
     </button>
   )
 }
 
 /* ------------------------------------------------------------ floating panels */
 
-function FuturePlaceholder({ items }: { items: string[] }) {
-  return (
-    <section className="rounded-md border border-dashed border-ink-600 bg-ink-850 p-3">
-      <div className="panel-title mb-2">Coming in later sprints</div>
-      <ul className="space-y-1">
-        {items.map((item) => (
-          <li key={item} className="flex gap-2 text-xs text-slate-600">
-            <span className="mt-1.5 h-1 w-1 shrink-0 rounded-full bg-ink-600" />
-            {item}
-          </li>
-        ))}
-      </ul>
-    </section>
-  )
-}
-
-function Row({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="flex items-baseline justify-between border-b border-ink-800 py-2 last:border-0">
-      <span className="text-xs uppercase tracking-wider text-slate-500">{label}</span>
-      <span className="text-sm tabular-nums text-slate-100">{value}</span>
-    </div>
-  )
-}
-
-function KpiDetailPanel({
+function KpiEvaluationPopup({
   contract,
-  date,
   result,
+  companyId,
   onClose,
+  onOpenCopilot,
 }: {
   contract: KpiContract
-  date: string
-  result: KpiResult
+  result: DetectionResult
+  companyId: string | null
   onClose: () => void
+  onOpenCopilot: (contract: KpiContract, question: string) => void
 }) {
+  const [response, setResponse] = useState<CopilotChatResponse | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const date = result.target_date
+  const question = `Give a short plain-language explanation of ${contract.name}: what it measures, how it is calculated, and its latest governed validation state.`
+
+  useEffect(() => {
+    let cancelled = false
+    if (!companyId) {
+      setLoading(false)
+      setError('Select a company before requesting a KPI explanation.')
+      return () => {
+        cancelled = true
+      }
+    }
+    setLoading(true)
+    setError(null)
+    setResponse(null)
+    void api
+      .post<CopilotChatResponse>(`/companies/${companyId}/copilot/chat`, {
+        message: question,
+        context: {
+          kpi_id: contract.kpi_id,
+          kpi_version: contract.version,
+          selected_date: date,
+          page: 'dashboard',
+        },
+      })
+      .then((answer) => {
+        if (!cancelled) setResponse(answer)
+      })
+      .catch((reason) => {
+        if (!cancelled) setError(describeError(reason))
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [companyId, contract.kpi_id, contract.version, date, question])
+
   return (
-    <Modal open onClose={onClose} title={contract.name} width="max-w-lg">
-      <div className="space-y-4">
+    <Modal open onClose={onClose} title="Performance explained" width="max-w-md">
+      <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold text-slate-100">{contract.name}</span>
           <span className="chip">Date: {formatDate(date)}</span>
-          <StatusBadge
-            status={result.status === 'Normal' ? 'GOOD' : 'WARNING'}
-            label={result.status}
-          />
+          <StatusBadge status={result.status} />
         </div>
 
-        <div>
-          <Row label="Actual" value={kpiValue(contract, result.actual)} />
-          <Row label="Expected" value={kpiValue(contract, result.expected)} />
-          <Row
-            label="Deviation"
-            value={
-              <span className={deviationTone(result.deviationPct)}>
-                {signed(result.deviationPct)}
-              </span>
-            }
-          />
-          <Row label="Status" value={result.status} />
-        </div>
+        <section className="rounded-xl border border-sky-200 bg-sky-50/75 p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-sky-700">
+            KPI evaluation
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+            <span className="text-slate-500">Actual</span>
+            <span className="text-right font-medium text-slate-100">{kpiValue(contract, result.actual)}</span>
+            <span className="text-slate-500">Expected</span>
+            <span className="text-right font-medium text-slate-100">{kpiValue(contract, result.expected)}</span>
+            <span className="text-slate-500">Deviation</span>
+            <span className={`text-right font-medium ${deviationTone(result.status)}`}>
+              {signed(result.deviation_pct)}
+            </span>
+          </div>
+          {result.comparison && (
+            <p className="mt-2 text-[11px] text-sky-800">
+              <span className="font-medium">Comparison:</span> {result.comparison}
+            </p>
+          )}
+        </section>
 
-        {/* Plain-language definition the business owner already confirmed during
-            registration. No formula or internals — this screen stays business-facing. */}
-        <div className="rounded-md border border-ink-700 bg-ink-850 p-3 text-[11px] leading-relaxed text-slate-500">
-          <span className="font-medium text-slate-400">What this measures.</span>{' '}
-          {contract.business_definition}
-        </div>
+        {result.headline && (
+          <p className="text-sm leading-relaxed text-slate-200">{result.headline}</p>
+        )}
 
-        <FuturePlaceholder
-          items={[
-            'Why this is normal or abnormal',
-            'Driver analysis and contribution',
-            'Traceable evidence with source freshness',
-            'Trend and expected range',
-            'Recommended action',
-          ]}
-        />
+        <section className="rounded-xl border border-ink-700 bg-ink-850 p-3">
+          <div className="text-[10px] font-semibold uppercase tracking-wider text-slate-500">
+            Copilot summary
+          </div>
+          <div className="mt-2 text-sm leading-relaxed text-slate-200">
+            {loading && <Spinner label="Preparing a short governed explanation…" />}
+            {error && <Alert>{error}</Alert>}
+            {response && <p className="whitespace-pre-wrap">{response.answer}</p>}
+          </div>
+          {response && response.evidence.length > 0 && (
+            <p className="mt-2 text-[11px] text-slate-500">
+              Based on {response.evidence.length} governed evidence item{response.evidence.length === 1 ? '' : 's'}.
+            </p>
+          )}
+        </section>
+
+        <p className="rounded-xl border border-ink-700 bg-ink-850 p-3 text-[11px] leading-relaxed text-slate-500">
+          {STATUS_MEANING[result.status] ?? 'A verdict from comparable history.'}
+        </p>
+
+        <button className="btn-ghost btn-xs w-full" onClick={() => onOpenCopilot(contract, question)}>
+          Open full Copilot
+        </button>
       </div>
     </Modal>
   )
 }
 
-function StageDetailPanel({
-  contract,
-  window,
-  stats,
-  onClose,
-}: {
-  contract: KpiContract
-  window: { start: string; end: string }
-  stats: StageStats
-  onClose: () => void
-}) {
-  return (
-    <Modal open onClose={onClose} title={contract.name} width="max-w-lg">
-      <div className="space-y-4">
-        <span className="chip">
-          Period: {formatDate(window.start)} → {formatDate(window.end)}
-        </span>
-
-        <div>
-          <Row label="Total runs" value={formatNumber(stats.totalRuns)} />
-          <Row
-            label="Normal runs"
-            value={<span className="text-emerald-300">{formatNumber(stats.normal)}</span>}
-          />
-          <Row
-            label="Abnormal runs"
-            value={<span className="text-amber-300">{formatNumber(stats.abnormal)}</span>}
-          />
-          <Row label="Normal percentage" value={`${stats.normalPct.toFixed(1)}%`} />
-        </div>
-
-        <FuturePlaceholder
-          items={[
-            'Run-by-run history with outcomes',
-            'Which dimensions drove abnormal runs',
-            'Detection accuracy and analyst feedback',
-            'Drift in expected behaviour over the period',
-          ]}
-        />
-      </div>
-    </Modal>
-  )
-}

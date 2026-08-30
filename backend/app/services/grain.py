@@ -29,6 +29,7 @@ from app.models.base import SemanticType, TimeGrain
 from app.models.profiling import ColumnProfile, TableGrain, TableProfile
 from app.models.source import SourceColumn, SourceTable
 from app.services.classification import is_key_candidate, is_time_candidate
+from app.services.source_governance import resolve_grain_status
 
 # Keep the candidate pool small enough that the scan stays cheap on a wide table.
 MAX_CANDIDATES = 6
@@ -336,4 +337,8 @@ def _persist(session: Session, table: SourceTable, outcome: GrainOutcome) -> Tab
     grain.time_column = outcome.time_column
     grain.time_grain = outcome.time_grain
     grain.evidence = outcome.evidence
+    # How much authority the recorded grain carries. Inference alone is only ever
+    # a proposal; an administrator's declaration outranks it; a confirmation is a
+    # human decision this pass must never write.
+    grain.grain_status = resolve_grain_status(grain)
     return grain

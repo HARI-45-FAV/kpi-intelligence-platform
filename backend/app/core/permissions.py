@@ -48,6 +48,14 @@ PERMISSIONS: tuple[PermissionSpec, ...] = (
     # Downstream surfaces (present so later sprints need no permission migration)
     PermissionSpec("analytics.read", "analytics", "View dashboards and KPI values"),
     PermissionSpec("investigation.read", "analytics", "View investigations and evidence"),
+    # Detection. Separated from analytics.read because running detection executes
+    # queries against a company's source, while reading a stored result does not.
+    PermissionSpec("detection.run", "analytics", "Run KPI detection against the data source"),
+    PermissionSpec(
+        "detection.configure",
+        "analytics",
+        "Draft and edit the comparison (bucket) configuration detection uses",
+    ),
     # Observability
     PermissionSpec("audit.read", "observability", "View the audit trail"),
     PermissionSpec("telemetry.read", "observability", "View runtime telemetry"),
@@ -112,6 +120,8 @@ ROLES: tuple[RoleSpec, ...] = (
             "kpi.create",
             "kpi.edit",
             "kpi.validate",
+            "detection.run",
+            "detection.configure",
             "investigation.read",
             "telemetry.read",
         ),
@@ -126,7 +136,7 @@ ROLES: tuple[RoleSpec, ...] = (
         key="EXECUTIVE",
         name="Executive",
         description="Consumes headline KPI outcomes across the whole company.",
-        permissions=(*_READ_ONLY, "investigation.read"),
+        permissions=(*_READ_ONLY, "investigation.read", "detection.run"),
         rank=20,
         access_summary="Reads KPI outcomes and investigations for the whole company.",
     ),
@@ -134,7 +144,7 @@ ROLES: tuple[RoleSpec, ...] = (
         key="MANAGER",
         name="Manager",
         description="Consumes KPI outcomes and investigations for their area.",
-        permissions=(*_READ_ONLY, "investigation.read"),
+        permissions=(*_READ_ONLY, "investigation.read", "detection.run"),
         rank=40,
         access_summary="Reads KPI outcomes and investigations for their area.",
     ),
@@ -145,7 +155,7 @@ ROLES: tuple[RoleSpec, ...] = (
             "Same surfaces as Manager, restricted to the regions on their "
             "membership scope."
         ),
-        permissions=(*_READ_ONLY, "investigation.read"),
+        permissions=(*_READ_ONLY, "investigation.read", "detection.run"),
         rank=50,
         access_summary=(
             "Same surfaces as Manager, limited to the regions on their membership "

@@ -28,6 +28,7 @@ from app.models.tenant import (
     User,
 )
 from app.schemas import (
+    AccessScopeOut,
     CalendarOut,
     CalendarUpsert,
     CompanyCreate,
@@ -97,6 +98,8 @@ def _member_out(membership: CompanyUser, user: User, role: Role) -> MemberOut:
         status=membership.status,
         row_scope=membership.row_scope or {},
         denied_columns=membership.denied_columns or [],
+        allowed_domains=membership.allowed_domains or [],
+        allowed_document_scopes=membership.allowed_document_scopes or [],
         created_at=membership.created_at,
     )
 
@@ -418,6 +421,34 @@ def list_my_permissions(
     return sorted(access.permissions)
 
 
+@router.get("/companies/{company_id}/access-scope", response_model=AccessScopeOut)
+def read_my_access_scope(
+    access: AccessContext = Depends(require_permissions("company.read")),
+) -> AccessScopeOut:
+    """What the caller may reach inside this company, as the backend resolved it.
+
+    The company id in the path is an assertion; the dependency chain has already
+    turned it into a verified membership by the time this runs, so the response
+    describes real entitlement rather than repeating what was asked for.
+    """
+    return AccessScopeOut(**access.as_scope())
+
+
+# The three membership fields that widen or narrow reach rather than describing
+# the person. Used only to label the audit entry.
+_SCOPE_FIELDS = frozenset(
+    {"row_scope", "denied_columns", "allowed_domains", "allowed_document_scopes"}
+)
+
+
+def _membership_action(changes: dict[str, object]) -> str:
+    if "role" in changes:
+        return audit.AuditAction.MEMBER_ROLE_CHANGED
+    if changes and set(changes) <= _SCOPE_FIELDS:
+        return audit.AuditAction.MEMBER_SCOPE_UPDATED
+    return audit.AuditAction.MEMBER_UPDATED
+
+
 # ---------------------------------------------------------------------------
 # Members
 # ---------------------------------------------------------------------------
@@ -480,6 +511,8 @@ def add_member(
         status=MembershipStatus.ACTIVE,
         row_scope=payload.row_scope,
         denied_columns=payload.denied_columns,
+        allowed_domains=payload.allowed_domains,
+        allowed_document_scopes=payload.allowed_document_scopes,
     )
     session.add(membership)
     session.flush()
@@ -496,6 +529,8 @@ def add_member(
             "role": role.role_key,
             "row_scope": payload.row_scope,
             "denied_columns": payload.denied_columns,
+            "allowed_domains": payload.allowed_domains,
+            "allowed_document_scopes": payload.allowed_document_scopes,
         },
         request=request,
     )
@@ -530,6 +565,12 @@ def update_member(
     if payload.denied_columns is not None:
         changes["denied_columns"] = payload.denied_columns
         membership.denied_columns = payload.denied_columns
+    if payload.allowed_domains is not None:
+        changes["allowed_domains"] = payload.allowed_domains
+        membership.allowed_domains = payload.allowed_domains
+    if payload.allowed_document_scopes is not None:
+        changes["allowed_document_scopes"] = payload.allowed_document_scopes
+        membership.allowed_document_scopes = payload.allowed_document_scopes
 
     session.flush()
     user = session.get(User, membership.user_id)
@@ -539,7 +580,7 @@ def update_member(
         audit.record(
             session,
             access=access,
-            action=audit.AuditAction.MEMBER_UPDATED,
+            action=_membership_action(changes),
             resource_type="membership",
             resource_id=membership.id,
             resource_label=user.email if user else membership.user_id,

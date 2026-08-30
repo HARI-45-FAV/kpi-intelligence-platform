@@ -6,6 +6,12 @@ autogenerate and ``create_all`` both depend on that happening in one place.
 
 from app.models.base import *  # noqa: F401,F403  (enums and mixins)
 from app.models.catalog import CatalogVersion
+from app.models.detection import (
+    AgentRun,
+    CompanyBucketConfig,
+    ContributionRun,
+    DetectionRun,
+)
 from app.models.document import CompanyDocument, CompanyDocumentVersion
 from app.models.kpi import (
     KpiAccessPolicy,
@@ -49,11 +55,15 @@ __all__ = [
     "CatalogVersion",
     "ColumnProfile",
     "Company",
+    "CompanyBucketConfig",
     "CompanyCalendar",
     "CompanyDocument",
     "CompanyDocumentVersion",
     "CompanyUser",
+    "ContributionRun",
     "DataSource",
+    "AgentRun",
+    "DetectionRun",
     "ExecutionLog",
     "JoinSafety",
     "KpiAccessPolicy",
