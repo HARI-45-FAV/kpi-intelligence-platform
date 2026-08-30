@@ -896,6 +896,32 @@ class DetectionRunOut(ApiModel):
     executed_at: datetime
 
 
+class ResultSummaryOut(ApiModel):
+    total_runs: int
+    anomalies: int
+    abnormal: int
+    normal: int
+    low_confidence: int
+    kpi_count: int
+
+
+class ResultItemOut(ApiModel):
+    id: str
+    kpi_key: str
+    kpi_name: str
+    target_date: date
+    status: str
+    actual_value: float | None
+    expected_value: float | None
+    deviation_absolute: float | None
+    deviation_pct: float | None
+    top_driver: str | None = None
+    ai_explanation: str | None = None
+    explanation_status: str = "READY"
+    explanation_generated_at: datetime | None = None
+    email_status: str = "EMAIL_SENT"
+
+
 # ---------------------------------------------------------------------------
 # Investigation: contribution analysis and manual dimensional analysis
 # ---------------------------------------------------------------------------

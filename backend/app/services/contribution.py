@@ -16,10 +16,13 @@ the same question tomorrow gives the same answer.
 Four rules hold this module in shape.
 
 **A share is not a verdict.** The largest contributor to a movement is usually
-just the largest part of the business. Nothing here labels an entity abnormal,
-assigns it a status, or scores it, because entity-level anomaly detection is a
-separate, on-demand analysis with its own comparable history -- and conflating the
-two would turn "North is 60% of the company" into "North has a problem".
+just the largest part of the business. Nothing in a *breakdown* labels an entity
+abnormal, assigns it a status or scores it, because entity-level anomaly detection
+is a separate analysis with its own comparable history -- and conflating the two
+would turn "North is 60% of the company" into "North has a problem". That separate
+analysis lives in :func:`classify_entity`, runs only when a person names one
+entity, and borrows the platform's own detection engine rather than inventing a
+second classification.
 
 **A share is not a cause.** The output is arithmetic on measured values. It says
 what a movement is *composed of*, never what produced it.
@@ -47,7 +50,7 @@ account for is honest; silently redefining the denominator is not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 
 from sqlalchemy import select
@@ -61,11 +64,18 @@ from app.core.errors import Conflict, NotFound, ValidationFailure
 from app.models.base import Aggregation
 from app.models.detection import ContributionRun, DetectionRun
 from app.models.kpi import KpiDimension, KpiVersion
+from app.services import detection, investigation_map, kpi_breakdown
 from app.services.detection import KpiBinding
-from app.services.kpi_execution import execute_kpi_any
 from app.services.kpi_formula import FilterSpec, FormulaSpec
-from app.services.kpi_sql import KpiValue
+from app.services.kpi_sql import KpiResult, KpiValue
 from app.services.robust_stats import median
+
+#: What this module accepts as a dimension: a governed row, or -- for a KPI whose
+#: dimensions are not registered yet -- a declared stand-in carrying the same
+#: attributes. The engine reads ``dimension_name``, ``source_column``,
+#: ``source_table`` and ``hierarchy`` off either and branches on neither, which is
+#: what lets the declared map be deleted later without touching this file.
+Dimension = KpiDimension | investigation_map.MappedDimension
 
 #: How many groups one breakdown read may return. Ordered largest-first by the
 #: execution layer, so a cap keeps the contributors that matter and drops a tail
@@ -82,11 +92,19 @@ UNSET_LABEL = "(not set)"
 # ---------------------------------------------------------------------------
 # Which dimensions may be used
 # ---------------------------------------------------------------------------
-def available_dimensions(session: Session, version: KpiVersion) -> list[KpiDimension]:
+def available_dimensions(session: Session, version: KpiVersion) -> list[Dimension]:
     """The approved breakdowns for this KPI version, default first.
 
     ``allowed`` is the governance switch: a dimension registered but not allowed
     is a declared column, not a permitted analysis, and never reaches a query.
+
+    A KPI with no approved dimension at all falls back to
+    :func:`app.services.investigation_map.dimensions_for`, which returns whatever
+    was declared for that KPI's own source table -- in declared order, which is the
+    order of the hierarchy. That fallback is metadata, not data: it says which
+    column a breakdown may read, never what the breakdown will find. Registering
+    dimensions on the KPI takes precedence over it in every case, so the map goes
+    quiet on its own as governance catches up.
     """
 
     rows = session.scalars(
@@ -96,6 +114,8 @@ def available_dimensions(session: Session, version: KpiVersion) -> list[KpiDimen
         )
     ).all()
     permitted = [row for row in rows if row.allowed]
+    if not permitted:
+        return list(investigation_map.dimensions_for(session, version))
     return sorted(
         permitted,
         key=lambda row: (not row.is_default_breakdown, row.dimension_name.lower()),
@@ -106,7 +126,7 @@ def resolve_dimension(
     session: Session,
     version: KpiVersion,
     name: str | None,
-) -> KpiDimension:
+) -> Dimension:
     """The dimension to break down by: the one named, or this KPI's default.
 
     Naming nothing is the common case -- the investigation surface opens on
@@ -141,7 +161,7 @@ def resolve_dimension(
 def next_dimensions(
     session: Session,
     version: KpiVersion,
-    dimension: KpiDimension,
+    dimension: Dimension,
 ) -> list[str]:
     """Where a drill-down may go next, from this dimension's registered hierarchy.
 
@@ -170,7 +190,7 @@ def next_dimensions(
 class EntitySelection:
     """One narrowing already applied: an approved dimension and a permitted value."""
 
-    dimension: KpiDimension
+    dimension: Dimension
     value: str
 
     @property
@@ -340,6 +360,21 @@ class ContributionAnalysis:
     detection_run_id: str | None = None
 
     # -- renderings ---------------------------------------------------------
+    @property
+    def movement_pct(self) -> float | None:
+        """The movement as a percentage of what was expected.
+
+        Computed here rather than on the surface so that every reader divides by the
+        same thing -- the size of the expectation, sign discarded, which keeps a
+        movement away from a negative expectation from reporting a reversed
+        direction. ``None`` when there is nothing to divide by, which is a fact to
+        display, not a zero.
+        """
+
+        if self.kpi_movement is None or self.kpi_expected in (None, 0):
+            return None
+        return self.kpi_movement / abs(self.kpi_expected) * 100.0
+
     def business_view(self) -> dict:
         """What the investigation surface shows. No SQL, no statistics, no scores."""
 
@@ -352,6 +387,7 @@ class ContributionAnalysis:
             "actual": self.kpi_actual,
             "expected": self.kpi_expected,
             "movement": self.kpi_movement,
+            "movement_pct": self.movement_pct,
             "status": self.kpi_status,
             "comparison": self.comparison_label,
             "unit": self.unit,
@@ -399,27 +435,56 @@ def _breakdown(
     connector: DataSourceConnector,
     binding: KpiBinding,
     spec: FormulaSpec,
-    column: str,
+    dimension: Dimension,
     day: date,
 ) -> tuple[dict[str | None, KpiValue], str]:
-    """The KPI, grouped by one column, for one day. Keyed by entity."""
+    """The KPI, grouped by one dimension, for one day. Keyed by entity.
 
-    start, end = binding.window_for(day)
-    result = execute_kpi_any(
+    Delegated to :func:`app.services.kpi_breakdown.read_kpi`, which decides whether
+    the dimension can be read alongside the KPI or has to be apportioned to it. A
+    dimension recorded on the KPI's own table takes the same path detection takes,
+    and produces the same query.
+    """
+
+    result = kpi_breakdown.read_kpi(
         connector,
+        binding,
         spec,
-        schema=binding.table.schema_name,
-        table=binding.table.table_name,
-        time_column=binding.time_field,
-        start=start,
-        end=end,
-        group_by=[column],
+        day=day,
+        dimension=dimension,
         limit=MAX_BREAKDOWN_ROWS,
     )
+    column = dimension.source_column
     rows: dict[str | None, KpiValue] = {}
     for row in result.rows:
         rows[_entity_key(row.group.get(column))] = row
     return rows, result.sql
+
+
+def _with_display_labels(
+    connector: DataSourceConnector,
+    dimension: Dimension,
+    contributors: list[Contributor],
+) -> list[Contributor]:
+    """Give each contributor a human name, where the source carries one.
+
+    Only the label changes. ``entity`` stays the value the source holds, because it
+    is what a drill-down filters on and what a stored run is compared against later
+    -- a display name that quietly became the key would break both.
+    """
+
+    codes = [item.entity for item in contributors if item.entity is not None]
+    if not codes:
+        return contributors
+    names = kpi_breakdown.labels_for(connector, dimension, codes)
+    if not names:
+        return contributors
+    return [
+        item
+        if item.entity is None or item.entity not in names
+        else replace(item, label=names[item.entity])
+        for item in contributors
+    ]
 
 
 def _reference_dates(run: DetectionRun | None) -> list[date]:
@@ -447,7 +512,7 @@ def analyse(
     connector: DataSourceConnector,
     binding: KpiBinding,
     run: DetectionRun,
-    dimension: KpiDimension,
+    dimension: Dimension,
     *,
     selections: list[EntitySelection] | None = None,
     top_k: int | None = None,
@@ -465,7 +530,6 @@ def analyse(
     queries: list[str] = []
     chosen = list(selections or [])
     spec = _narrowed_spec(binding.spec, chosen)
-    column = dimension.source_column
     requested_k = top_k if top_k is not None else settings.contribution_top_k
     effective_k = max(1, min(int(requested_k), settings.contribution_max_top_k))
     if requested_k != effective_k:
@@ -483,6 +547,14 @@ def analyse(
             "there is no arithmetic that would make one true."
         )
 
+    # A dimension recorded in finer detail than the KPI is measured in has to be
+    # apportioned to it. Saying so is not a footnote: it is the reason the parts
+    # still reconcile with the number above them, and the reason a small remainder
+    # may not be attributable to any of them.
+    divided = kpi_breakdown.apportionment_note(binding, dimension)
+    if divided:
+        warnings.append(divided)
+
     # --- the movement being split, exactly as the business already saw it ------
     kpi_actual = run.actual_value
     kpi_expected = run.expected_value
@@ -493,7 +565,7 @@ def analyse(
     )
 
     # --- the target date, broken down -----------------------------------------
-    target_rows, target_sql = _breakdown(connector, binding, spec, column, run.target_date)
+    target_rows, target_sql = _breakdown(connector, binding, spec, dimension, run.target_date)
     queries.append(target_sql)
     if len(target_rows) >= MAX_BREAKDOWN_ROWS:
         warnings.append(
@@ -526,7 +598,7 @@ def analyse(
     # its expectation and inflating the movement attributed to it.
     per_day: list[dict[str | None, KpiValue]] = []
     for day in references:
-        rows, sql = _breakdown(connector, binding, spec, column, day)
+        rows, sql = _breakdown(connector, binding, spec, dimension, day)
         queries.append(sql)
         per_day.append(rows)
 
@@ -628,7 +700,7 @@ def analyse(
         )
     )
     ranked_count = len(scaled)
-    contributors = scaled[:effective_k]
+    contributors = _with_display_labels(connector, dimension, scaled[:effective_k])
 
     explained = None
     unexplained = None
@@ -754,12 +826,22 @@ def persist_analysis(
 # ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class EntityProfile:
-    """What one part of the business did over a window. Still not a verdict.
+    """One part of the business, measured over a window and judged on one date.
 
-    No status, no z-score, no threshold. This is a measured history for a person
-    to read, produced on demand for the entity they asked about -- which is the
-    whole difference between it and detection: detection runs for every KPI every
-    day, and nothing runs for every entity ever.
+    Two halves, and the difference between them matters.
+
+    The **trend** -- ``points``, ``latest``, ``typical`` -- is a measured history for
+    a person to read. The **verdict** -- ``status`` and the figures around it -- is
+    the platform's own detection engine, run on this entity's own comparable
+    history because someone named this entity. Both exist only on request. Nothing
+    on this platform sweeps entities: detection runs for every KPI every day, and
+    an entity is analysed when a person asks for it and not before.
+
+    The status is the engine's, not a second opinion. It comes from the same
+    classification, the same approved comparison policy and the same registered
+    tolerance the KPI itself is judged by, so ABNORMAL means here exactly what it
+    means on the dashboard. ``None`` means the engine was not run -- never that it
+    was run and found nothing.
     """
 
     kpi_key: str
@@ -777,6 +859,18 @@ class EntityProfile:
     observed_days: int
     warnings: list[str] = field(default_factory=list)
     queries: list[str] = field(default_factory=list)
+    # --- the engine's verdict for this entity on the target date ---------------
+    target_date: date | None = None
+    status: str | None = None
+    expected: float | None = None
+    variance: float | None = None
+    variance_pct: float | None = None
+    direction: str | None = None
+    headline: str | None = None
+    status_reason: str | None = None
+    comparison_label: str | None = None
+    reference_dates: list[str] = field(default_factory=list)
+    share_of_kpi_pct: float | None = None
 
     def business_view(self) -> dict:
         return {
@@ -784,6 +878,7 @@ class EntityProfile:
             "kpi_key": self.kpi_key,
             "dimension": self.dimension,
             "entity": self.entity,
+            "target_date": self.target_date.isoformat() if self.target_date else None,
             "unit": self.unit,
             "currency": self.currency,
             "points": self.points,
@@ -792,6 +887,18 @@ class EntityProfile:
             "change_vs_typical": self.change_vs_typical,
             "change_pct_vs_typical": self.change_pct_vs_typical,
             "observed_days": self.observed_days,
+            # The engine's verdict for this entity. One classification, the KPI's
+            # own -- these names mean what they mean everywhere else.
+            "actual": self.latest,
+            "expected": self.expected,
+            "variance": self.variance,
+            "variance_pct": self.variance_pct,
+            "direction": self.direction,
+            "status": self.status,
+            "headline": self.headline,
+            "status_reason": self.status_reason,
+            "comparison_label": self.comparison_label,
+            "share_of_kpi_pct": self.share_of_kpi_pct,
             "notes": self.warnings,
         }
 
@@ -799,16 +906,16 @@ class EntityProfile:
 def profile_entity(
     connector: DataSourceConnector,
     binding: KpiBinding,
-    dimension: KpiDimension,
+    dimension: Dimension,
     selection: EntitySelection,
     days: list[date],
 ) -> EntityProfile:
     """Evaluate the KPI for one entity across ``days``, through its own formula.
 
-    One grouped read per day, narrowed to the entity by a governed filter -- the
-    same source, formula and time field the KPI is registered with. ``typical`` is
-    the robust median of the window, the same statistic the detection engine uses
-    for an expectation, so the comparison a reader makes here is the same kind of
+    One read per day, narrowed to the entity by a governed filter -- the same
+    source, formula and time field the KPI is registered with. ``typical`` is the
+    robust median of the window, the same statistic the detection engine uses for an
+    expectation, so the comparison a reader makes here is the same kind of
     comparison the platform makes for a KPI.
     """
 
@@ -818,17 +925,12 @@ def profile_entity(
     warnings: list[str] = []
     values: list[float] = []
 
+    divided = kpi_breakdown.apportionment_note(binding, selection.dimension)
+    if divided:
+        warnings.append(divided)
+
     for day in sorted(days):
-        start, end = binding.window_for(day)
-        result = execute_kpi_any(
-            connector,
-            spec,
-            schema=binding.table.schema_name,
-            table=binding.table.table_name,
-            time_column=binding.time_field,
-            start=start,
-            end=end,
-        )
+        result = kpi_breakdown.read_kpi(connector, binding, spec, day=day)
         queries.append(result.sql)
         row = result.scalar
         value = row.value if row is not None else None
@@ -888,3 +990,165 @@ def profile_entity(
         warnings=warnings,
         queries=queries,
     )
+
+
+def classify_entity(
+    session: Session,
+    connector: DataSourceConnector,
+    binding: KpiBinding,
+    dimension: Dimension,
+    selection: EntitySelection,
+    target_date: date,
+    *,
+    profile: EntityProfile,
+    kpi_actual: float | None = None,
+) -> EntityProfile:
+    """Run the platform's own detection engine on one entity, once, on request.
+
+    This is the whole of entity-level anomaly detection on this platform, and its
+    shape is deliberate: there is no scheduled sweep, no per-entity monitoring and
+    no second opinion. :func:`app.services.detection.detect` decides the verdict --
+    the same comparable-date policy, the same robust expectation, the same
+    dispersion, the same modified z-score, the same registered tolerance and the
+    same wording the KPI itself is judged by. All this function does is narrow
+    *what is read* to the one entity that was asked about, through the governed
+    filter the rest of this module uses, and hand the engine the reader that knows
+    how to reach a dimension recorded at a finer grain than the KPI.
+
+    Two consequences worth being explicit about, because both are safety
+    properties rather than conveniences:
+
+    * The KPI's registered tolerance travels unchanged. An *absolute* threshold is
+      naturally conservative at this scale -- one part of the business moves by
+      less than the whole, so it breaches such a threshold less often, never more
+      -- and the statistical route is scale-free, being measured against this
+      entity's own comparable history and nothing else's. So an entity is never
+      flagged merely for being small, and never excused for it either.
+    * The verdict belongs to the entity, not to the KPI. It does not change the
+      KPI's own status, is not persisted as a detection run, and nothing on the
+      dashboard reads it.
+    """
+
+    config, config_row = detection.policy_for(
+        session, binding.version.company_id, binding.kpi_key
+    )
+    narrowed = _narrowed_spec(binding.spec, [selection])
+
+    def read_entity(
+        conn: DataSourceConnector, bound: KpiBinding, day: date
+    ) -> KpiResult:
+        return kpi_breakdown.read_kpi(conn, bound, narrowed, day=day)
+
+    outcome = detection.detect(
+        connector,
+        binding,
+        config,
+        target_date,
+        materiality=binding.version.materiality,
+        config_row=config_row,
+        read=read_entity,
+    )
+
+    variance = outcome.deviation_absolute
+    if variance is None or abs(variance) < 1e-12:
+        direction = "FLAT"
+    else:
+        direction = "UP" if variance > 0 else "DOWN"
+
+    # The entity's share of the KPI on this date -- a relative size, offered so a
+    # reader knows how much of the business this verdict is about. It is measured
+    # against the KPI's own stored figure, never against a total recomputed here,
+    # and is omitted rather than guessed when there is nothing to divide by.
+    share = None
+    if kpi_actual not in (None, 0) and outcome.actual is not None:
+        share = outcome.actual / abs(kpi_actual) * 100.0
+
+    return replace(
+        profile,
+        target_date=target_date,
+        status=str(outcome.status),
+        expected=outcome.expected,
+        variance=variance,
+        variance_pct=outcome.deviation_pct,
+        direction=direction,
+        headline=outcome.headline,
+        status_reason=outcome.reason,
+        comparison_label=outcome.comparison_label,
+        reference_dates=[point.day.isoformat() for point in outcome.references],
+        share_of_kpi_pct=share,
+        warnings=[*profile.warnings, *outcome.notes],
+        queries=[*profile.queries, *([outcome.source.get("query")] if outcome.source.get("query") else [])],
+    )
+
+
+# ---------------------------------------------------------------------------
+# Which entities are worth looking at: the picker behind "choose an entity"
+# ---------------------------------------------------------------------------
+def top_entities(
+    connector: DataSourceConnector,
+    access: AccessContext,
+    binding: KpiBinding,
+    dimension: Dimension,
+    day: date,
+    *,
+    selections: list[EntitySelection] | None = None,
+    limit: int = 10,
+) -> list[dict[str, Any]]:
+    """The dimension's most substantial values on one date, read from the source.
+
+    This exists so that nobody has to type a business value from memory to start an
+    analysis. Every entry is measured: the list is one grouped read of the KPI on
+    the date in question, ranked by size, entitlement-filtered per row by the same
+    predicate that governs a breakdown. Nothing here is enumerated in code -- a
+    company that renames its territories tomorrow gets the new names for free, and
+    an empty result means the source had no rows, which is worth showing as itself.
+
+    ``share_of_total_pct`` is a share of the date's measured total, not of a
+    movement, and is reported only for a KPI whose parts sum -- these are relative
+    sizes, offered to help someone choose, and they carry no verdict about any
+    entity on the list.
+    """
+
+    spec = _narrowed_spec(binding.spec, list(selections or []))
+    rows, _sql = _breakdown(connector, binding, spec, dimension, day)
+
+    permitted: list[tuple[str | None, KpiValue]] = []
+    for entity, row in rows.items():
+        if entity is not None and not access.permits_scope_value(
+            dimension.dimension_name, entity
+        ):
+            continue
+        permitted.append((entity, row))
+
+    permitted.sort(
+        key=lambda pair: (
+            pair[1].value is None,
+            -abs(pair[1].value or 0.0),
+            (pair[0] or UNSET_LABEL).lower(),
+        )
+    )
+    chosen = permitted[: max(1, int(limit))]
+
+    total = sum(abs(row.value) for _entity, row in permitted if row.value is not None)
+    shares_meaningful = is_additive(spec) and total > 0
+    names = kpi_breakdown.labels_for(
+        connector, dimension, [entity for entity, _row in chosen if entity is not None]
+    )
+
+    out: list[dict[str, Any]] = []
+    for entity, row in chosen:
+        label = UNSET_LABEL if entity is None else names.get(entity, entity)
+        out.append(
+            {
+                "entity": entity,
+                "label": label,
+                "value": row.value,
+                "share_of_total_pct": (
+                    abs(row.value) / total * 100.0
+                    if shares_meaningful and row.value is not None
+                    else None
+                ),
+                "matched_rows": row.matched_rows,
+            }
+        )
+    return out

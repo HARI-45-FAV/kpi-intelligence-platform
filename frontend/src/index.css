@@ -23,7 +23,7 @@
     --accent-violet-soft: #8f6ff5;
     --accent-violet-wash: rgba(109, 74, 236, 0.08);
     --success: #168563;
-    --warning: #b77518;
+    --warning: #7ea9c8;
     --critical: #c24f59;
     --shadow-soft: 0 12px 26px rgba(50, 103, 145, 0.11), 0 3px 8px rgba(50, 103, 145, 0.06);
     --shadow-floating: 0 22px 52px rgba(48, 100, 143, 0.18), 0 5px 14px rgba(48, 100, 143, 0.08);
@@ -297,6 +297,56 @@
       0 2px 6px rgba(48, 100, 143, 0.07),
       inset 0 1px 0 #fff;
     transition: transform 220ms ease-out, box-shadow 220ms ease-out, border-color 220ms ease-out;
+  }
+
+  .segmented-switch {
+    @apply inline-flex items-center gap-1 rounded-full border border-white/80 bg-white/40 p-1 shadow-[0_8px_18px_rgba(55,92,128,0.08)];
+  }
+
+  .segmented-option {
+    @apply rounded-full px-3 py-1.5 text-[11px] font-medium text-slate-500 transition-all duration-200;
+  }
+
+  .segmented-option-active {
+    @apply bg-gradient-to-r from-[#2d8fe0] to-[#1a73c2] text-white shadow-[0_8px_16px_rgba(26,115,194,0.28)];
+  }
+
+  .copilot-composer {
+    @apply rounded-2xl border border-white/80 bg-[rgba(255,255,255,0.2)] p-3 shadow-[0_12px_28px_rgba(37,88,123,0.08)];
+  }
+
+  .copilot-input {
+    @apply w-full resize-none rounded-xl border border-white/80 bg-white/60 px-3 py-2.5 text-sm text-slate-100 placeholder:text-slate-500 focus:border-sky-300 focus:outline-none focus:ring-4 focus:ring-sky-200/60;
+    box-shadow: inset 0 1px 2px rgba(55, 92, 128, 0.06);
+  }
+
+  .copilot-composer-actions {
+    @apply mt-2 flex items-center justify-between gap-3;
+  }
+
+  .copilot-hint {
+    @apply text-[11px] text-slate-500;
+  }
+
+  .suggestion-pill {
+    @apply w-full rounded-xl border border-white/80 bg-white/55 px-3 py-2 text-left text-[11px] leading-relaxed text-slate-600 transition-all duration-200 hover:-translate-y-0.5 hover:border-sky-200 hover:bg-white/80 hover:text-slate-800;
+    box-shadow: 0 8px 18px rgba(44, 95, 138, 0.06);
+  }
+
+  .copilot-status-box {
+    @apply rounded-2xl border border-white/80 bg-white/30 px-3 py-2.5 text-[11px] leading-relaxed text-slate-500 shadow-[0_8px_20px_rgba(39,77,111,0.06)];
+  }
+
+  .copilot-turn {
+    @apply space-y-3 rounded-2xl border border-white/80 bg-white/20 p-3 shadow-[0_10px_20px_rgba(40,82,118,0.06)];
+  }
+
+  .question-bubble {
+    @apply mt-1.5 whitespace-pre-wrap rounded-xl border border-sky-200 bg-white/55 px-3 py-2 text-sm text-slate-700;
+  }
+
+  .answer-bubble {
+    @apply mt-1.5 whitespace-pre-wrap rounded-xl bg-[linear-gradient(140deg,rgba(255,255,255,0.85),rgba(231,244,252,0.7))] px-3 py-2.5 text-sm leading-relaxed text-slate-700 shadow-[inset_0_1px_0_rgba(255,255,255,0.9)];
   }
   /* Interactive cards lift; static ones stay put. Opt in explicitly so a
      read-only tile does not imply it can be clicked. */

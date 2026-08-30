@@ -26,7 +26,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { CopilotChatResponse, CopilotEvidence, CopilotStatus } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { Alert, Drawer, EmptyState, Spinner, StatusBadge } from '../components/ui'
+import { Alert, Drawer, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilot } from './CopilotProvider'
 
@@ -133,12 +133,11 @@ export default function CopilotPanel() {
 
         {status.loading && !status.data && <Spinner label="Checking Copilot availability…" />}
         {status.error && <Alert tone="warn">Could not read Copilot status. ({status.error})</Alert>}
-        {status.data && <StatusNotice status={status.data} />}
 
         {/* ------------------------------------------------------- composer */}
-        <div className="space-y-2">
+        <div className="copilot-composer">
           <textarea
-            className="w-full rounded-md border border-ink-600 bg-ink-850 px-3 py-2 text-sm text-slate-100 placeholder:text-slate-600"
+            className="copilot-input"
             rows={3}
             maxLength={4000}
             placeholder={
@@ -152,16 +151,16 @@ export default function CopilotPanel() {
               if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void submit()
             }}
           />
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <span className="text-[11px] text-slate-600">
-              {available ? '⌘/Ctrl + Enter to send' : 'No model configured — evidence only'}
+          <div className="copilot-composer-actions">
+            <span className="copilot-hint">
+              {available ? '⌘/Ctrl + Enter to send' : 'Evidence only'}
             </span>
             <button
               className="btn-primary btn-xs"
               onClick={() => void submit()}
               disabled={ask.pending || !question.trim()}
             >
-              {ask.pending ? 'Working…' : available ? 'Ask' : 'Retrieve evidence'}
+              {ask.pending ? 'Working…' : available ? 'Ask' : 'Retrieve'}
             </button>
           </div>
         </div>
@@ -171,16 +170,19 @@ export default function CopilotPanel() {
 
         {turns.length === 0 && !ask.pending && (
           <div className="space-y-3">
-            <EmptyState
-              title="Nothing asked yet"
-              description="The Copilot reads KPI contracts, validation results, lineage, documents and data profiles for this company. It cannot run SQL, reach business rows, or change anything under governance."
-            />
-            <div className="space-y-1.5">
+            <div className="rounded-2xl border border-white/80 bg-[rgba(255,255,255,0.22)] p-4 text-center shadow-[0_10px_22px_rgba(38,88,130,0.08)]">
+              <div className="text-sm font-medium text-slate-100">Nothing asked yet</div>
+              <p className="mt-1.5 text-xs leading-relaxed text-slate-500">
+                The Copilot reads KPI contracts, validation results, lineage, documents and data
+                profiles for this company. It cannot run SQL or change governance.
+              </p>
+            </div>
+            <div className="grid gap-2 sm:grid-cols-3">
               {hints.map((hint) => (
                 <button
                   key={hint}
                   onClick={() => setQuestion(hint)}
-                  className="block w-full rounded-md border border-ink-700 bg-ink-850 px-3 py-2 text-left text-xs text-slate-400 transition-colors hover:border-accent/50 hover:text-slate-200"
+                  className="suggestion-pill"
                 >
                   {hint}
                 </button>
@@ -213,44 +215,8 @@ function ContextStrip({
     <div className="flex flex-wrap items-center gap-1.5">
       <span className="chip">Page: {page}</span>
       {label && <span className="chip">KPI: {label}</span>}
-      {screen.kpiVersion != null && <span className="chip">Version {screen.kpiVersion}</span>}
+      {screen.kpiVersion != null && <span className="chip">v{screen.kpiVersion}</span>}
       {screen.selectedDate && <span className="chip">Date: {screen.selectedDate}</span>}
-    </div>
-  )
-}
-
-function StatusNotice({ status }: { status: CopilotStatus }) {
-  if (!status.available) {
-    return (
-      <Alert tone="info">
-        <div className="font-medium">Language model not configured</div>
-        <p className="mt-1 text-xs leading-relaxed">
-          {status.unavailable_reason ??
-            'No language model is configured for this deployment.'}{' '}
-          Retrieval still works: a question returns the governed evidence this platform holds
-          for it, without a written explanation. Every other part of the platform is unaffected.
-        </p>
-      </Alert>
-    )
-  }
-  return (
-    <div className="rounded-md border border-ink-700 bg-ink-850 px-3 py-2 text-[11px] leading-relaxed text-slate-500">
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
-        <StatusBadge status="ACTIVE" label="Model configured" />
-        <span className="text-slate-400">{status.model ?? status.provider}</span>
-        {status.endpoint_host && <span className="text-slate-600">via {status.endpoint_host}</span>}
-      </div>
-      {status.knowledge_sources.length > 0 && (
-        <p className="mt-2">
-          <span className="text-slate-400">Your access covers:</span>{' '}
-          {status.knowledge_sources.join('; ')}.
-        </p>
-      )}
-      <p className="mt-1">
-        {status.tools_available.length} governed read-only tool
-        {status.tools_available.length === 1 ? '' : 's'} available to you. No SQL execution, no
-        business rows, no governance changes.
-      </p>
     </div>
   )
 }
@@ -261,10 +227,10 @@ function TurnView({ turn }: { turn: Turn }) {
   const notes = response.context.notes ?? []
 
   return (
-    <article className="space-y-3 rounded-md border border-ink-700 bg-ink-900 p-3">
+    <article className="copilot-turn">
       <header>
         <div className="text-[11px] uppercase tracking-wider text-slate-500">Question</div>
-        <p className="mt-1 whitespace-pre-wrap text-sm text-slate-200">{turn.question}</p>
+        <p className="question-bubble">{turn.question}</p>
       </header>
 
       <div>
@@ -276,10 +242,7 @@ function TurnView({ turn }: { turn: Turn }) {
             <span className="text-[10px] text-slate-600">{response.model}</span>
           )}
         </div>
-        {/* Only the answer text. There is no reasoning field to render. */}
-        <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-slate-100">
-          {response.answer}
-        </p>
+        <p className="answer-bubble">{response.answer}</p>
       </div>
 
       {response.truncated && (

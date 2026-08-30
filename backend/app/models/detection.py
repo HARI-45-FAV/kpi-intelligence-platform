@@ -226,6 +226,40 @@ class DetectionRun(Base, UUIDPrimaryKey, Timestamped):
     )
 
 
+class AgentRunExplanation(Base, UUIDPrimaryKey, Timestamped):
+    """Stored AI explanation for a KPI/date result.
+
+    This keeps the platform from regenerating the same explanation repeatedly and
+    lets the Results screen show the business-facing summary without calling the
+    model again for historical rows.
+    """
+
+    __tablename__ = "agent_run_explanations"
+    __table_args__ = (
+        UniqueConstraint(
+            "company_id",
+            "kpi_key",
+            "target_date",
+            name="uq_agent_run_explanations_company_kpi_date",
+        ),
+        Index("ix_agent_run_explanations_company_target", "company_id", "target_date"),
+    )
+
+    company_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("companies.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    run_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("detection_runs.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    kpi_key: Mapped[str] = mapped_column(String(80), nullable=False, index=True)
+    kpi_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    target_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    explanation_text: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(30), default="READY", nullable=False)
+    email_status: Mapped[str] = mapped_column(String(30), default="EMAIL_SENT", nullable=False)
+    generated_at: Mapped[datetime | None] = mapped_column(UtcDateTime())
+
+
 class ContributionRun(Base, UUIDPrimaryKey, Timestamped):
     """One investigation: a stored detection movement, split across one dimension.
 

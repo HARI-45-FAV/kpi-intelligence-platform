@@ -8,9 +8,8 @@ import { CopilotProvider, useCopilot } from '../copilot/CopilotProvider'
 const TABS = [
   { to: '/', label: 'Dashboard', end: true },
   { to: '/monitoring', label: 'Monitoring' },
+  { to: '/results', label: 'Results' },
   { to: '/investigation', label: 'Investigation' },
-  { to: '/insights', label: 'Insights' },
-  { to: '/activity', label: 'Activity' },
 ]
 
 export default function AppShell() {
@@ -34,9 +33,11 @@ function Shell() {
       <header className="glass-bar sticky top-3 z-30 mx-auto max-w-[1600px] sm:top-5">
         <div className="flex min-h-[3.75rem] items-center gap-4 px-3.5 sm:gap-6 sm:px-5">
           <div className="flex shrink-0 items-center gap-2.5">
-            <span className="grid h-9 w-9 place-items-center rounded-[13px] bg-gradient-to-br from-accent to-[var(--accent-violet)] text-[13px] font-bold text-white shadow-[0_8px_18px_rgba(25,120,197,0.32),inset_0_1px_0_rgba(255,255,255,0.35)]">
-              BI
-            </span>
+            <img
+              src="/logo.svg"
+              alt="BusinessIntelligence.ai"
+              className="h-9 w-9 rounded-[13px] object-cover shadow-[0_8px_18px_rgba(25,120,197,0.32),inset_0_1px_0_rgba(255,255,255,0.35)]"
+            />
             <span className="hidden text-[15px] font-semibold tracking-tight text-slate-100 sm:block">
               BusinessIntelligence<span className="text-accent">.ai</span>
             </span>
@@ -56,7 +57,6 @@ function Shell() {
               </NavLink>
             ))}
 
-            {/* Visually separated: this is the governed configuration area. */}
             <span className="mx-1.5 h-5 w-px shrink-0 bg-[rgba(120,165,200,0.45)]" />
             <NavLink
               to="/kpi-setup"

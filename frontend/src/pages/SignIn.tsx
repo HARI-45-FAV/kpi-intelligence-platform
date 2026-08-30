@@ -21,32 +21,30 @@ export default function SignIn() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center px-4">
-      <div className="w-full max-w-sm">
+    <div className="flex min-h-screen items-center justify-center px-4 py-8">
+      <div className="w-full max-w-md">
         <div className="mb-7 text-center">
-          <span className="mx-auto mb-3 grid h-10 w-10 place-items-center rounded-lg bg-accent text-sm font-bold text-white">
-            BI
-          </span>
-          <h1 className="text-lg font-semibold text-slate-100">
-            BusinessIntelligence<span className="text-accent">.ai</span>
+          <img
+            src="/logo.svg"
+            alt="BusinessIntelligence.ai"
+            className="mx-auto mb-3 h-14 w-14 rounded-2xl object-cover shadow-[0_12px_24px_rgba(28,111,195,0.32)]"
+          />
+          <h1 className="text-[2rem] font-semibold tracking-tight text-slate-100">
+            BusinessIntelligence<span className="text-[#2d8fe0]">.ai</span>
           </h1>
-          <p className="mt-1 text-xs text-slate-500">
+          <p className="mt-1.5 text-xs text-slate-500">
             Governed KPI intelligence · Sprint 1 foundation
           </p>
         </div>
 
-        <form onSubmit={submit} className="panel space-y-4 p-5">
-          <div className="flex gap-1 rounded-md border border-ink-700 bg-ink-850 p-1">
+        <form onSubmit={submit} className="panel space-y-5 p-5 shadow-[0_24px_60px_rgba(41,89,127,0.18)] sm:p-6">
+          <div className="segmented-switch mx-auto w-full max-w-[320px]">
             {(['login', 'register'] as const).map((option) => (
               <button
                 key={option}
                 type="button"
                 onClick={() => setMode(option)}
-                className={`flex-1 rounded px-3 py-1.5 text-sm transition-colors ${
-                  mode === option
-                    ? 'bg-ink-700 font-medium text-slate-100'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
+                className={`segmented-option flex-1 ${mode === option ? 'segmented-option-active' : ''}`}
               >
                 {option === 'login' ? 'Sign in' : 'Create account'}
               </button>

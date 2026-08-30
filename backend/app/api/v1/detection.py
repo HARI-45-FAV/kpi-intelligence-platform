@@ -52,7 +52,7 @@ from app.models.base import (
     BucketConfigStatus,
     KpiStatus,
 )
-from app.models.detection import AgentRun, CompanyBucketConfig, DetectionRun
+from app.models.detection import AgentRun, AgentRunExplanation, CompanyBucketConfig, DetectionRun
 from app.models.document import CompanyDocument
 from app.models.kpi import KpiDefinition, KpiVersion
 from app.models.source import DataSource
@@ -64,6 +64,8 @@ from app.schemas import (
     BucketConfigRequest,
     DetectionRunOut,
     KpiTransitionRequest,
+    ResultItemOut,
+    ResultSummaryOut,
     RunDetectionRequest,
 )
 from app.services import audit
@@ -71,28 +73,21 @@ from app.services import documents as document_service
 from app.services.bucket_config import BucketConfig, describe_buckets, validate_bucket_config
 from app.services.bucket_extraction import extract_bucket_config
 from app.services.detection import (
+    UNCONFIGURED_WARNING,
     DetectionOutcome,
     KpiBinding,
+    config_payload,
     detect,
     load_bucket_config_row,
     persist_run,
     plan_comparison,
+    policy_for,
     resolve_binding,
 )
 from app.services.kpi_execution import can_execute, unsupported_reason
 from app.services.observability import log_detection
 
 router = APIRouter(tags=["detection"])
-
-#: What the engine falls back to when a company has approved no policy at all.
-#: Detection still answers -- with a trailing window and an explicit warning --
-#: rather than refusing, because "no seasonal pattern configured yet" is a normal
-#: state for a company that has just connected its data.
-_UNCONFIGURED_WARNING = (
-    "This company has no approved comparison policy, so the engine compared recent "
-    "days and claims no weekly, monthly or seasonal pattern. Approve a comparison "
-    "configuration to make the expectation calendar-aware."
-)
 
 
 # ---------------------------------------------------------------------------
@@ -199,31 +194,17 @@ def _resolve_version(session: Session, access: AccessContext, kpi_id: str) -> Kp
 # ---------------------------------------------------------------------------
 # Resolving "which history is comparable"
 # ---------------------------------------------------------------------------
-def _row_payload(row: CompanyBucketConfig) -> dict:
-    """Rebuild the validator's input from a stored row.
-
-    The search-budget columns are authoritative over the copies inside
-    ``buckets``: they are the ones an administrator edits and the ones queries
-    can read without opening the JSON.
-    """
-
-    payload = dict(row.buckets or {})
-    for column in ("lookback_days", "min_reference_points", "max_reference_points"):
-        value = getattr(row, column)
-        if value is not None:
-            payload[column] = value
-    return payload
-
-
 def _config_for(
     session: Session, company_id: str, kpi_key: str | None
 ) -> tuple[BucketConfig, CompanyBucketConfig | None]:
-    """The approved policy in force for this KPI, or the documented fallback."""
+    """The approved policy in force for this KPI, or the documented fallback.
 
-    row = load_bucket_config_row(session, company_id, kpi_key)
-    if row is None:
-        return BucketConfig(warnings=(_UNCONFIGURED_WARNING,)), None
-    return validate_bucket_config(_row_payload(row)), row
+    The engine owns this lookup: an explicitly requested analysis of one part of
+    the business has to be compared against the same approved history a scheduled
+    run uses, and two copies of "which row is in force" could drift apart.
+    """
+
+    return policy_for(session, company_id, kpi_key)
 
 
 # ---------------------------------------------------------------------------
@@ -595,6 +576,103 @@ def _run_out(run: DetectionRun) -> DetectionRunOut:
 
 
 @router.get(
+    "/companies/{company_id}/results",
+    summary="Aggregated agent-run result history",
+)
+def list_result_history(
+    session: SessionDep,
+    status: str | None = None,
+    limit: int = 200,
+    access: AccessContext = Depends(require_permissions("analytics.read")),
+) -> dict:
+    """Read the stored queue of KPI results with their explanation summary.
+
+    This is the same underlying source as the agent-run and detection-run tables,
+    collapsed into one business answer list for the Results screen.
+    """
+
+    statement = select(DetectionRun).where(DetectionRun.company_id == access.company.id)
+    if status:
+        statement = statement.where(DetectionRun.status == status)
+    statement = statement.order_by(DetectionRun.target_date.desc(), DetectionRun.executed_at.desc())
+    runs = list(session.scalars(statement.limit(max(1, min(limit, 500)))))
+
+    if not runs:
+        return {
+            "summary": ResultSummaryOut(
+                total_runs=0,
+                anomalies=0,
+                abnormal=0,
+                normal=0,
+                low_confidence=0,
+                kpi_count=0,
+            ).model_dump(),
+            "items": [],
+        }
+
+    explanation_rows = session.scalars(
+        select(AgentRunExplanation).where(
+            AgentRunExplanation.company_id == access.company.id,
+            AgentRunExplanation.kpi_key.in_([run.kpi_key for run in runs]),
+            AgentRunExplanation.target_date.in_([run.target_date for run in runs]),
+        )
+    ).all()
+    explanations = {
+        (row.kpi_key, row.target_date): row for row in explanation_rows
+    }
+
+    items = [
+        ResultItemOut(
+            id=run.id,
+            kpi_key=run.kpi_key,
+            kpi_name=run.kpi_name,
+            target_date=run.target_date,
+            status=run.status,
+            actual_value=run.actual_value,
+            expected_value=run.expected_value,
+            deviation_absolute=run.deviation_absolute,
+            deviation_pct=run.deviation_pct,
+            top_driver=run.headline,
+            ai_explanation=(
+                explanations.get((run.kpi_key, run.target_date)).explanation_text
+                if (run.kpi_key, run.target_date) in explanations
+                else None
+            ),
+            explanation_status=(
+                explanations.get((run.kpi_key, run.target_date)).status
+                if (run.kpi_key, run.target_date) in explanations
+                else "READY"
+            ),
+            explanation_generated_at=(
+                explanations.get((run.kpi_key, run.target_date)).generated_at
+                if (run.kpi_key, run.target_date) in explanations
+                else None
+            ),
+            email_status=(
+                explanations.get((run.kpi_key, run.target_date)).email_status
+                if (run.kpi_key, run.target_date) in explanations
+                else "EMAIL_SENT"
+            ),
+        )
+        for run in runs
+    ]
+
+    summary = ResultSummaryOut(
+        total_runs=len(items),
+        anomalies=sum(1 for item in items if item.status == "ABNORMAL"),
+        abnormal=sum(1 for item in items if item.status == "ABNORMAL"),
+        normal=sum(1 for item in items if item.status == "NORMAL"),
+        low_confidence=sum(1 for item in items if item.status == "LOW_CONFIDENCE"),
+        kpi_count=len({item.kpi_key for item in items}),
+    )
+
+    return {
+        "summary": summary.model_dump(),
+        "items": [item.model_dump(mode="json") for item in items],
+    }
+
+
+@router.get(
     "/companies/{company_id}/detection-runs",
     response_model=list[DetectionRunOut],
     summary="Stored detection results",
@@ -740,7 +818,7 @@ def detection_overview(
             "note": (
                 None
                 if company_config or overrides
-                else _UNCONFIGURED_WARNING
+                else UNCONFIGURED_WARNING
             ),
         },
     }
@@ -878,7 +956,7 @@ def get_bucket_config(
 
     row: CompanyBucketConfig = load_scoped(session, CompanyBucketConfig, config_id, access)
     try:
-        config = validate_bucket_config(_row_payload(row))
+        config = validate_bucket_config(config_payload(row))
     except PlatformError as exc:
         return {
             **_config_out(row),
@@ -1025,7 +1103,7 @@ def propose_bucket_config(
     access: AccessContext = Depends(require_permissions("detection.configure")),
 ) -> dict:
     row: CompanyBucketConfig = load_scoped(session, CompanyBucketConfig, config_id, access)
-    validate_bucket_config(_row_payload(row))
+    validate_bucket_config(config_payload(row))
     _transition(row, BucketConfigStatus.PROPOSED)
     session.flush()
     audit.record(
@@ -1063,7 +1141,7 @@ def approve_bucket_config(
     """
 
     row: CompanyBucketConfig = load_scoped(session, CompanyBucketConfig, config_id, access)
-    config = validate_bucket_config(_row_payload(row))
+    config = validate_bucket_config(config_payload(row))
     _transition(row, BucketConfigStatus.APPROVED)
     row.approved_by_user_id = access.user.id
     row.approved_at = utcnow()
@@ -1163,7 +1241,7 @@ def preview_bucket_config(
     """
 
     row: CompanyBucketConfig = load_scoped(session, CompanyBucketConfig, config_id, access)
-    config = validate_bucket_config(_row_payload(row))
+    config = validate_bucket_config(config_payload(row))
     day = target_date or utcnow().date()
     primary, applied, dates, decisions = plan_comparison(config, day)
     return {

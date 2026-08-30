@@ -1,29 +1,41 @@
 /**
- * Investigation: a KPI moved — which part of the business accounts for it?
+ * Investigation Center: a KPI moved — which part of the business accounts for it?
  *
  * One generalized workflow, driven entirely by what the KPI's own registration
  * approved. Nothing on this screen names a dimension, an entity or a table: the
- * dimensions come from `/investigation/dimensions`, the drill path comes from the
- * hierarchy each dimension declares, and a company whose business is split by
- * Branch → Service reads exactly the same code as one split by Region → Product.
+ * dimensions come from `/investigation/dimensions`, the entities from
+ * `/investigation/entities`, the drill path from the hierarchy each dimension
+ * declares, and a company whose business is split by Branch → Service reads
+ * exactly the same code as one split by Region → Product.
  *
  * Two entry points, deliberately kept apart:
  *
  * 1. **From a movement.** Pick a KPI and a date the platform already evaluated,
  *    and its stored movement is apportioned across the KPI's default dimension.
- *    Rank the parts, choose one, drill into the next approved dimension. This is
- *    the path an ABNORMAL verdict leads to.
+ *    Rank the parts, choose one, drill into the next approved dimension. The
+ *    order is the KPI's own hierarchy, not the reader's — a guided descent, not a
+ *    free jump between dimensions. This is the path an ABNORMAL verdict leads to.
  * 2. **Manual.** Pick a KPI, a dimension, optionally one entity, a date and a
- *    lookback. With no entity it ranks contributors; with one it reads that entity
- *    alone. Naming an entity never triggers work on the others — nothing on this
- *    platform runs anomaly detection over every entity, on a schedule or otherwise.
+ *    lookback. With no entity it lists the dimension's largest values and ranks
+ *    contributors; with one it reads that entity alone and shows the engine's
+ *    verdict for it. Naming an entity never triggers work on the others — nothing
+ *    on this platform runs anomaly detection over every entity, on a schedule or
+ *    otherwise, and an entity is judged only because someone asked for it.
+ *
+ * **The gate comes first.** Both paths are only open for a date detection already
+ * analysed, which the server decides and this screen only reports. Until then
+ * there is nothing to investigate: the movement being split is the one the
+ * business saw, so a date with no stored run gets an instruction to run the
+ * analysis rather than a breakdown of a number nobody has measured.
  *
  * Two things this screen is careful *not* to say:
  *
- * * **A share is not a verdict.** The largest contributor is the largest
- *   contributor. It gets no status chip, no colour that means "bad" and no
- *   badge — the only status shown anywhere here belongs to the KPI, carried
- *   through from detection. Contribution ranks; it does not judge.
+ * * **A share is not a verdict.** The largest contributor in a ranking is the
+ *   largest contributor. It gets no status chip, no colour that means "bad" and no
+ *   badge — in a breakdown the only status shown belongs to the KPI, carried
+ *   through from detection. Contribution ranks; it does not judge. The one place a
+ *   part carries a status is the single entity a person asked about by name, and
+ *   that status is the detection engine's, in the detection engine's three words.
  * * **A share is not a cause.** The wording throughout is "accounts for" and
  *   "associated with". Nothing here establishes why.
  *
@@ -44,12 +56,14 @@ import type {
   EntityStep,
   InvestigationDimension,
   InvestigationDimensionsResponse,
+  InvestigationEntitiesResponse,
+  InvestigationEntity,
   KpiContract,
   ManualAnalysisResponse,
 } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import { formatCompact, formatCurrency, formatDate, formatNumber } from '../components/format'
-import { Alert, EmptyState, Field, Metric, Panel, Spinner, StatusBadge } from '../components/ui'
+import { Alert, EmptyState, Field, Metric, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
 
@@ -132,6 +146,13 @@ function ShareBar({
 
 /* ------------------------------------------------------- contribution result */
 
+/**
+ * One part of the business, drawn as a bar and a pair of numbers.
+ *
+ * The whole row is the drill affordance when the KPI's hierarchy offers a next
+ * level, and it is inert when it does not — so nothing here is clickable unless
+ * the click leads somewhere the KPI's own registration allows.
+ */
 function ContributorRow({
   contributor,
   leaderShare,
@@ -156,8 +177,8 @@ function ContributorRow({
       ? Math.sign(contributor.change) === movementSign
       : true
 
-  return (
-    <div className="border-b border-ink-800/80 px-4 py-3 last:border-0">
+  const body = (
+    <>
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="text-sm font-medium text-slate-200">{contributor.label}</span>
         <span className="text-sm tabular-nums text-slate-300">
@@ -186,50 +207,64 @@ function ContributorRow({
         )}
         {contributor.note && <span className="text-amber-300">{contributor.note}</span>}
         {onDrill && drillLabel && (
-          <button type="button" className="btn btn-ghost btn-xs" onClick={onDrill}>
-            Break down by {drillLabel}
-          </button>
+          <span className="font-medium text-accent">Break down by {drillLabel} →</span>
         )}
       </div>
-    </div>
+    </>
   )
+
+  if (onDrill && drillLabel) {
+    return (
+      <button
+        type="button"
+        className="row-link block"
+        onClick={onDrill}
+        title={`Break down ${contributor.label} by ${drillLabel}`}
+      >
+        {body}
+      </button>
+    )
+  }
+  return <div className="border-b border-ink-800/80 px-4 py-3 last:border-0">{body}</div>
 }
 
 /**
- * The KPI's own summary, above its breakdown.
+ * The KPI's own movement, above its breakdown.
  *
- * Status is shown once, here, attached to the KPI — which is the only thing on
- * this screen that has one.
+ * Four figures and one verdict, in the order a reader asks for them: what
+ * happened, what was expected, the gap, and how large that gap is relative to the
+ * expectation. Status is shown once, here, attached to the KPI — which is the only
+ * thing on this screen that has one. Every number is the server's; the percentage
+ * is not divided in the browser, because two places dividing is two answers.
  */
 function MovementSummary({ result }: { result: ContributionResult }) {
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <Metric
-        label="Actual"
-        value={kpiValue(result.actual, result.unit, result.currency)}
-        hint={formatDate(result.target_date)}
-      />
-      <Metric
-        label="Expected"
-        value={kpiValue(result.expected, result.unit, result.currency)}
-        hint={result.comparison ?? undefined}
-      />
-      <Metric
-        label="Movement"
-        value={signedValue(result.movement, result.unit, result.currency)}
-        tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
-        hint="The whole that the parts below are measured against."
-      />
-      <div>
-        <div className="text-[11px] uppercase tracking-wider text-slate-500">KPI status</div>
-        <div className="mt-1.5">
-          <StatusBadge status={result.status ?? undefined} />
-        </div>
-        <div className="mt-1 text-[11px] leading-snug text-slate-500">
-          {result.status ? STATUS_MEANING[result.status] ?? '' : ''}
-        </div>
+    <Panel title="KPI movement">
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Metric
+          label="Actual"
+          value={kpiValue(result.actual, result.unit, result.currency)}
+          hint={formatDate(result.target_date)}
+        />
+        <Metric
+          label="Expected"
+          value={kpiValue(result.expected, result.unit, result.currency)}
+          hint={result.comparison ?? undefined}
+        />
+        <Metric
+          label="Variance"
+          value={signedValue(result.movement, result.unit, result.currency)}
+          tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
+          hint="The whole that the parts below are measured against."
+        />
+        <Metric
+          label="Variance %"
+          value={signedPct(result.movement_pct)}
+          tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
+          hint="Against what was expected."
+        />
       </div>
-    </div>
+    </Panel>
   )
 }
 
@@ -240,7 +275,7 @@ function TechnicalDetails({ response }: { response: ContributionResponse }) {
   return (
     <details className="mt-4 rounded-md border border-ink-800 bg-ink-850/60 px-3 py-2">
       <summary className="cursor-pointer text-[11px] font-medium uppercase tracking-wider text-slate-500">
-        Technical details
+        In-depth results
       </summary>
       <dl className="mt-2 space-y-1.5 text-[11px] text-slate-400">
         <div>
@@ -338,6 +373,10 @@ function ContributionView({
               </button>
             </span>
           ))}
+          <span className="flex items-center gap-1">
+            <span className="text-slate-600">→</span>
+            <span className="text-slate-300">{result.dimension}</span>
+          </span>
         </nav>
       )}
 
@@ -356,11 +395,11 @@ function ContributionView({
       )}
 
       <Panel
-        title={`By ${result.dimension}`}
+        title="Where did the movement come from?"
         bodyClassName="p-0"
         actions={
           <span className="text-[11px] text-slate-500">
-            {contributors.length} of {result.ranked_count} shown
+            By {result.dimension} · {contributors.length} of {result.ranked_count} shown
             {result.explained_pct !== null &&
               ` · they account for ${formatNumber(Math.abs(result.explained_pct))}% of the movement`}
           </span>
@@ -390,6 +429,11 @@ function ContributionView({
             ))}
           </div>
         )}
+        {/* Said next to the ranking rather than in a footnote, because the ranking
+            is exactly what invites the wrong reading. */}
+        <p className="border-t border-ink-800/80 px-4 py-3 text-[11px] text-slate-500">
+          Share ≠ verdict. {nextDimension ? `Choose a driver to inspect the ${nextDimension}.` : 'This screen only rates the KPI.'}
+        </p>
       </Panel>
 
       <TechnicalDetails response={response} />
@@ -399,41 +443,127 @@ function ContributionView({
 
 /* -------------------------------------------------------------- entity view */
 
-/** One entity's measured history. No verdict — that is the point of this path. */
+/**
+ * One entity, measured and judged.
+ *
+ * The verdict here is the entity's own and comes from the same engine that judges
+ * the KPI — asked for explicitly, for this one entity, which is why it exists at
+ * all: nothing on this platform classifies every region or product. It is rendered
+ * with the same badge and the same three words the detection screen uses, because a
+ * second vocabulary for "abnormal" would be a second classification system.
+ *
+ * The share is deliberately kept away from the verdict, under its own hint: how
+ * much of the day this entity accounts for says where the money is, not whether
+ * anything went wrong.
+ */
 function EntityView({
   result,
-  queries,
+  evidence,
 }: {
   result: EntityProfileResult
-  queries?: string[]
+  evidence?: {
+    kpi_version: number
+    queries: string[]
+    comparison_label?: string | null
+    reference_dates?: string[]
+  }
 }) {
   const peak = result.points.reduce(
     (max, point) => Math.max(max, Math.abs(point.value ?? 0)),
     0,
   )
+  const judged = result.status !== null
+  const abnormal = result.status === 'ABNORMAL'
+  const direction =
+    result.direction === 'UP'
+      ? 'Above expectation'
+      : result.direction === 'DOWN'
+        ? 'Below expectation'
+        : result.direction === 'FLAT'
+          ? 'At expectation'
+          : '—'
+  const queries = evidence?.queries ?? []
+  const referenceDates = evidence?.reference_dates ?? []
+  const comparison = result.comparison_label ?? evidence?.comparison_label ?? null
+
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 sm:grid-cols-3">
-        <Metric
-          label="Latest"
-          value={kpiValue(result.latest, result.unit, result.currency)}
-          hint={`${result.dimension}: ${result.entity}`}
-        />
-        <Metric
-          label="Typical"
-          value={kpiValue(result.typical, result.unit, result.currency)}
-          hint="Median of the earlier days in this window."
-        />
-        <Metric
-          label="Change vs typical"
-          value={signedValue(result.change_vs_typical, result.unit, result.currency)}
-          hint={
-            result.change_pct_vs_typical !== null
-              ? signedPct(result.change_pct_vs_typical)
-              : undefined
-          }
-        />
-      </div>
+      <Panel
+        title={`${result.dimension}: ${result.entity}`}
+        actions={
+          <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            {result.kpi}
+            {result.target_date && ` · ${formatDate(result.target_date)}`}
+            {/* One status, on the thing it was asked about. */}
+            {judged && <StatusBadge status={result.status} />}
+          </span>
+        }
+      >
+        {result.headline && (
+          <p className="mb-4 text-sm leading-relaxed text-slate-300">{result.headline}</p>
+        )}
+
+        {/* The same four figures, in the same order, as the KPI above its own
+            breakdown -- so reading one after the other needs no translation. */}
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric
+            label="Actual"
+            value={kpiValue(result.actual ?? result.latest, result.unit, result.currency)}
+            hint={result.target_date ? formatDate(result.target_date) : 'Latest measured day.'}
+          />
+          <Metric
+            label="Expected"
+            value={kpiValue(result.expected ?? result.typical, result.unit, result.currency)}
+            hint={comparison ?? 'Median of the earlier days in this window.'}
+          />
+          <Metric
+            label="Variance"
+            value={signedValue(
+              result.variance ?? result.change_vs_typical,
+              result.unit,
+              result.currency,
+            )}
+            tone={abnormal ? 'bad' : 'default'}
+            hint={direction}
+          />
+          <Metric
+            label="Variance %"
+            value={signedPct(result.variance_pct ?? result.change_pct_vs_typical)}
+            tone={abnormal ? 'bad' : 'default'}
+            hint="Against what was expected of this entity."
+          />
+        </div>
+
+        {(judged || result.share_of_kpi_pct !== null) && (
+          <div className="mt-4 grid gap-4 border-t border-ink-800/80 pt-4 sm:grid-cols-2">
+            {judged && (
+              <div>
+                <div className="text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                  Entity status
+                </div>
+                <div className="mt-1 flex items-center gap-2">
+                  <StatusBadge status={result.status} />
+                  <span className="text-xs text-slate-500">
+                    {STATUS_MEANING[result.status ?? ''] ?? ''}
+                  </span>
+                </div>
+                {result.status_reason && (
+                  <p className="mt-1.5 text-[11px] leading-relaxed text-slate-500">
+                    {result.status_reason}
+                  </p>
+                )}
+              </div>
+            )}
+            {result.share_of_kpi_pct !== null && (
+              <Metric
+                label="Share of the KPI"
+                value={`${formatNumber(Math.abs(result.share_of_kpi_pct))}%`}
+                hint={`How much of ${result.kpi} on this date this ${result.dimension} accounts for. A size, not a cause.`}
+              />
+            )}
+          </div>
+        )}
+      </Panel>
 
       {result.notes.map((note, index) => (
         <Alert key={index} tone="warn">
@@ -441,7 +571,7 @@ function EntityView({
         </Alert>
       ))}
 
-      <Panel title={`${result.entity} over ${result.observed_days} day(s)`} bodyClassName="p-0">
+      <Panel title={`Recent trend · ${result.observed_days} day(s)`} bodyClassName="p-0">
         <div className="max-h-96 overflow-y-auto">
           {result.points.map((point) => (
             <div
@@ -467,24 +597,185 @@ function EntityView({
         </div>
       </Panel>
 
-      {queries && queries.length > 0 && (
+      {evidence && (
         <details className="rounded-md border border-ink-800 bg-ink-850/60 px-3 py-2">
           <summary className="cursor-pointer text-[11px] font-medium uppercase tracking-wider text-slate-500">
-            Technical details
+            View details
           </summary>
-          <ul className="mt-2 space-y-1">
-            {queries.map((query, index) => (
-              <li
-                key={index}
-                className="mono overflow-x-auto whitespace-pre rounded bg-ink-900/70 px-2 py-1 text-[10px] text-slate-400"
-              >
-                {query}
-              </li>
-            ))}
-          </ul>
+          <dl className="mt-2 space-y-1.5 text-[11px] text-slate-400">
+            <div>
+              <dt className="inline text-slate-500">KPI version: </dt>
+              <dd className="inline">v{evidence.kpi_version}</dd>
+            </div>
+            <div>
+              <dt className="inline text-slate-500">Comparable dates: </dt>
+              <dd className="inline">
+                {referenceDates.length > 0 ? referenceDates.join(', ') : '—'}
+              </dd>
+            </div>
+            {queries.length > 0 && (
+              <div>
+                <dt className="text-slate-500">Queries</dt>
+                <dd>
+                  <ul className="mt-1 space-y-1">
+                    {queries.map((query, index) => (
+                      <li
+                        key={index}
+                        className="mono overflow-x-auto whitespace-pre rounded bg-ink-900/70 px-2 py-1 text-[10px] text-slate-400"
+                      >
+                        {query}
+                      </li>
+                    ))}
+                  </ul>
+                </dd>
+              </div>
+            )}
+          </dl>
         </details>
       )}
     </div>
+  )
+}
+
+/* --------------------------------------------------------------- the run gate */
+
+/**
+ * Whether this KPI and date can be investigated, and on what authority.
+ *
+ * Reported, never decided here: the server answers from the stored detection run,
+ * and the run's own state is shown so a reader can see *why* an investigation is
+ * offered rather than being asked to trust that it is. When the answer is no, the
+ * only thing on offer is the instruction to run the analysis first — because until
+ * it has, the movement this screen splits does not exist.
+ */
+function RunStatus({ gate, loading }: { gate: InvestigationEntitiesResponse | null; loading: boolean }) {
+  if (loading) {
+    return <Spinner label="Checking whether this date has been analysed…" />
+  }
+  if (!gate) return null
+  if (!gate.run_available) {
+    return (
+      <Alert tone="warn">
+        <span className="font-medium">{gate.message}</span>
+      </Alert>
+    )
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
+      <span>
+        Analysis: <span className="font-medium text-slate-300">{gate.run_state ?? 'Recorded'}</span>
+      </span>
+      <span className="flex items-center gap-1.5">
+        KPI status: <StatusBadge status={gate.kpi_status ?? undefined} />
+      </span>
+      {gate.kpi_status && (
+        <span className="text-slate-500">{STATUS_MEANING[gate.kpi_status] ?? ''}</span>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------- entity picker */
+
+/**
+ * The dimension's largest values on this date, each one investigable on its own.
+ *
+ * This is what makes choosing an entity a selection rather than a typing exercise,
+ * and it is the answer to "which parts of the business are worth looking at?" when
+ * no entity has been named — the case the manual flow lands in by default.
+ *
+ * Every row is a measurement read from the company's own source for this KPI and
+ * this date; nothing is enumerated in code, so the list follows the data. And none
+ * of it is a verdict: these entities have not been analysed, which is precisely
+ * what the action on each one is for.
+ */
+function EntityPicker({
+  gate,
+  selected,
+  unit,
+  currency,
+  onSelect,
+  onClear,
+  pending,
+}: {
+  gate: InvestigationEntitiesResponse
+  selected: string | null
+  unit?: string | null
+  currency?: string | null
+  onSelect: (entity: InvestigationEntity) => void
+  onClear: () => void
+  pending: boolean
+}) {
+  const leader = gate.entities.reduce(
+    (max, item) => Math.max(max, Math.abs(item.value ?? 0)),
+    0,
+  )
+
+  return (
+    <Panel
+      title={`Largest ${gate.dimension ?? 'entities'} on this date`}
+      bodyClassName="p-0"
+      actions={
+        selected ? (
+          <button type="button" className="btn btn-ghost btn-xs" onClick={onClear}>
+            Clear selection
+          </button>
+        ) : (
+          <span className="text-[11px] text-slate-500">
+            {gate.entities.length} shown · read from this KPI's own source
+          </span>
+        )
+      }
+    >
+      {gate.entities.length === 0 ? (
+        <EmptyState
+          title="Nothing to choose from"
+          description={`This KPI has no ${gate.dimension ?? 'dimension'} values on ${formatDate(gate.target_date)} that are within your access scope.`}
+        />
+      ) : (
+        <div>
+          {gate.entities.map((item) => {
+            const isSelected = item.entity === selected
+            return (
+              <div
+                key={item.entity}
+                className={`border-b border-ink-800/80 px-4 py-3 last:border-0 ${isSelected ? 'bg-accent-dim/60' : ''}`}
+              >
+                <div className="flex flex-wrap items-baseline justify-between gap-2">
+                  <span className="text-sm font-medium text-slate-200">{item.label}</span>
+                  <span className="text-sm tabular-nums text-slate-300">
+                    {kpiValue(item.value, unit, currency)}
+                    {item.share_of_total_pct !== null && (
+                      <span className="ml-2 text-slate-500">
+                        {formatNumber(item.share_of_total_pct)}% of the total
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div className="mt-2">
+                  <ShareBar
+                    share={item.value === null ? null : Math.abs(item.value)}
+                    leader={leader}
+                    withMovement
+                  />
+                </div>
+                <div className="mt-2 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-500">
+                  <span>Measured value</span>
+                  <button
+                    type="button"
+                    className={`btn btn-xs ${isSelected ? 'btn-primary' : 'btn-ghost'}`}
+                    disabled={pending}
+                    onClick={() => onSelect(item)}
+                  >
+                    {isSelected ? 'Selected' : 'Investigate'}
+                  </button>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </Panel>
   )
 }
 
@@ -507,6 +798,7 @@ export default function Investigation() {
   const [manualDimension, setManualDimension] = useState('')
   const [manualEntity, setManualEntity] = useState('')
   const [lookback, setLookback] = useState(30)
+  const [manualModalOpen, setManualModalOpen] = useState(false)
 
   const [contribution, setContribution] = useState<ContributionResponse | null>(null)
   const [manual, setManual] = useState<ManualAnalysisResponse | null>(null)
@@ -541,7 +833,10 @@ export default function Investigation() {
 
   // Which breakdowns this KPI approved. Asked of the server for every KPI, because
   // the answer is governance, not a property of the contract the client happens to
-  // hold.
+  // hold -- and the reason there is no client-side fallback list here. A dimension
+  // this endpoint does not return is not one the screen may offer anyway: the
+  // server would refuse to query it, and offering it would produce a dead button
+  // and a mapping kept in two places that could disagree.
   const dimensions = useResource<InvestigationDimensionsResponse>(
     () =>
       api.get(`/companies/${companyId}/investigation/dimensions`, { query: { kpi_id: kpiId } }),
@@ -549,57 +844,7 @@ export default function Investigation() {
     { enabled: Boolean(companyId && kpiId) && allowed },
   )
 
-  const NOVAMART_DIMENSION_FALLBACKS: Record<string, InvestigationDimension[]> = {
-    average_order_value: [
-      { name: 'region', is_default: true, hierarchy: ['sector'], approx_cardinality: 4 },
-      { name: 'sector', is_default: false, hierarchy: ['product'], approx_cardinality: 5 },
-      { name: 'product', is_default: false, hierarchy: [], approx_cardinality: 20 },
-    ],
-    net_revenue: [
-      { name: 'region', is_default: true, hierarchy: ['sector'], approx_cardinality: 4 },
-      { name: 'sector', is_default: false, hierarchy: ['product'], approx_cardinality: 5 },
-      { name: 'product', is_default: false, hierarchy: [], approx_cardinality: 20 },
-    ],
-    revenue: [
-      { name: 'region', is_default: true, hierarchy: ['sector'], approx_cardinality: 4 },
-      { name: 'sector', is_default: false, hierarchy: ['product'], approx_cardinality: 5 },
-      { name: 'product', is_default: false, hierarchy: [], approx_cardinality: 20 },
-    ],
-    orders: [
-      { name: 'region', is_default: true, hierarchy: ['sector'], approx_cardinality: 4 },
-      { name: 'sector', is_default: false, hierarchy: ['product'], approx_cardinality: 5 },
-      { name: 'product', is_default: false, hierarchy: [], approx_cardinality: 20 },
-    ],
-    units_sold: [
-      { name: 'region', is_default: true, hierarchy: ['sector'], approx_cardinality: 4 },
-      { name: 'sector', is_default: false, hierarchy: ['product'], approx_cardinality: 5 },
-      { name: 'product', is_default: false, hierarchy: [], approx_cardinality: 20 },
-    ],
-  }
-
-  const contractDimensionList = useMemo(
-    () =>
-      (contract?.dimensions ?? []).map((item) => ({
-        name: item.dimension_name,
-        is_default: item.is_default_breakdown ?? false,
-        hierarchy: [],
-        approx_cardinality: item.approx_cardinality ?? null,
-        notes: item.monitoring_note ?? null,
-      })),
-    [contract],
-  )
-
-  const fallbackDimensionList = useMemo(() => {
-    if (contractDimensionList.length > 0) return contractDimensionList
-    if (!kpiId) return []
-    const key = kpiId.toLowerCase()
-    return NOVAMART_DIMENSION_FALLBACKS[key] ?? []
-  }, [contractDimensionList, kpiId])
-
-  const dimensionList: InvestigationDimension[] =
-    (dimensions.data?.dimensions?.length ?? 0) > 0
-      ? dimensions.data!.dimensions
-      : fallbackDimensionList
+  const dimensionList: InvestigationDimension[] = dimensions.data?.dimensions ?? []
 
   const currentDimension = useMemo(() => {
     const active = contribution?.result.dimension ?? dimension
@@ -611,6 +856,28 @@ export default function Investigation() {
   const defaultDimension = dimensionList.find((item) => item.is_default) ?? dimensionList[0] ?? null
 
   const nextDimension = currentDimension?.hierarchy[0] ?? null
+
+  // The gate, and the entity list behind it. One request answers both: whether
+  // detection stored a result for this date -- which is the only thing that makes
+  // an investigation available -- and, when it did, the dimension's largest values
+  // read from the KPI's own source. Asked before either button is pressed, so a
+  // date that cannot be investigated says so rather than failing on submit.
+  const gate = useResource<InvestigationEntitiesResponse>(
+    () =>
+      api.get(`/companies/${companyId}/investigation/entities`, {
+        query: {
+          kpi_id: kpiId,
+          target_date: date,
+          ...(mode === 'manual' && manualDimension ? { dimension: manualDimension } : {}),
+          limit: 10,
+        },
+      }),
+    [companyId, kpiId, date, mode, manualDimension],
+    { enabled: Boolean(companyId && kpiId && date) && allowed },
+  )
+
+  const runAvailable = gate.data?.run_available ?? null
+  const blocked = runAvailable === false
 
   // Changing the KPI abandons a path built for a different one: a Region value
   // from another KPI's registration is not a valid narrowing here.
@@ -661,20 +928,49 @@ export default function Investigation() {
     [action, companyId, kpiId, date, noDimensions, topK],
   )
 
-  const runManual = useCallback(async () => {
-    if (!companyId || !kpiId || noDimensions) return
-    const response = await action.run(() =>
-      api.post<ManualAnalysisResponse>(`/companies/${companyId}/investigation/analysis`, {
-        kpi_id: kpiId,
-        dimension: manualDimension || null,
-        entity: manualEntity.trim() || null,
-        target_date: date,
-        lookback_days: lookback,
-        top_k: topK,
-      }),
-    )
-    if (response) setManual(response)
-  }, [action, companyId, kpiId, manualDimension, manualEntity, date, lookback, noDimensions, topK])
+  /**
+   * Run the manual analysis, optionally for one entity chosen just now.
+   *
+   * The entity is a parameter rather than only a piece of state because the picker
+   * chooses and runs in the same gesture, and a state update is not visible to the
+   * call that follows it. Passing `null` is the deliberate "no entity" case: rank
+   * the dimension's contributors instead of analysing one of them.
+   */
+  const runManual = useCallback(
+    async (entity?: string | null) => {
+      if (!companyId || !kpiId || noDimensions) return
+      const chosen = entity === undefined ? manualEntity.trim() || null : entity
+      const response = await action.run(() =>
+        api.post<ManualAnalysisResponse>(`/companies/${companyId}/investigation/analysis`, {
+          kpi_id: kpiId,
+          dimension: manualDimension || null,
+          entity: chosen,
+          target_date: date,
+          lookback_days: lookback,
+          top_k: topK,
+        }),
+      )
+      if (response) setManual(response)
+    },
+    [action, companyId, kpiId, manualDimension, manualEntity, date, lookback, noDimensions, topK],
+  )
+
+  /** Choose one of the measured entities and analyse that entity alone (§13). */
+  const investigateEntity = useCallback(
+    (item: InvestigationEntity) => {
+      setManualEntity(item.entity)
+      setManualModalOpen(true)
+      void runManual(item.entity)
+    },
+    [runManual],
+  )
+
+  /** Put the entity down and go back to ranking the dimension (§14). */
+  const clearEntity = useCallback(() => {
+    setManualEntity('')
+    setManualModalOpen(false)
+    void runManual(null)
+  }, [runManual])
 
   /** Drill one level: the chosen contributor becomes an ancestor. */
   const drill = useCallback(
@@ -720,12 +1016,12 @@ export default function Investigation() {
       <Panel
         title="Investigation"
         actions={
-          <div className="flex gap-1">
+          <div className="segmented-switch">
             {(['movement', 'manual'] as const).map((option) => (
               <button
                 key={option}
                 type="button"
-                className={`btn btn-xs ${mode === option ? 'btn-primary' : 'btn-ghost'}`}
+                className={`segmented-option ${mode === option ? 'segmented-option-active' : ''}`}
                 onClick={() => setMode(option)}
               >
                 {option === 'movement' ? 'From a movement' : 'Manual analysis'}
@@ -734,11 +1030,11 @@ export default function Investigation() {
           </div>
         }
       >
-        <p className="text-xs leading-relaxed text-slate-500">
-          {mode === 'movement'
-            ? 'Takes a movement the platform already measured and apportions it across the dimensions this KPI approved. A large share means a part accounts for much of the movement — it is not a verdict about that part.'
-            : 'Choose a dimension to rank its contributors, or name one entity to read that entity alone. Naming an entity analyses only that entity.'}
-        </p>
+        <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
+          <span>{mode === 'movement' ? 'Movement view' : 'Manual view'}</span>
+          <span className="text-slate-600">•</span>
+          <span>{mode === 'movement' ? 'Stored result' : 'Direct review'}</span>
+        </div>
 
         <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Field label="KPI" required>
@@ -765,10 +1061,7 @@ export default function Investigation() {
           </Field>
 
           {mode === 'manual' && (
-            <Field
-              label="Dimension"
-              hint="Only dimensions this KPI approved appear here."
-            >
+            <Field label="Dimension" hint="Approved only">
               <select
                 className="field"
                 value={manualDimension}
@@ -784,24 +1077,7 @@ export default function Investigation() {
             </Field>
           )}
 
-          {mode === 'manual' && (
-            <Field
-              label="Entity (optional)"
-              hint="Leave empty to rank the top contributors instead."
-            >
-              <input
-                className="field"
-                value={manualEntity}
-                placeholder="e.g. a value of the dimension above"
-                onChange={(event) => setManualEntity(event.target.value)}
-              />
-            </Field>
-          )}
-
-          <Field
-            label="Top contributors"
-            hint="How many parts to list. The shares are always measured against the whole movement."
-          >
+          <Field label="Top contributors" hint="Results shown">
             <select
               className="field"
               value={topK}
@@ -832,23 +1108,36 @@ export default function Investigation() {
           )}
         </div>
 
+        {/*
+          The gate, before the action rather than after it. A date the platform has
+          not analysed has no measured movement to apportion, so the button that
+          would apportion it is not offered -- and the reason is on screen instead
+          of arriving as an error once the request has already been made.
+        */}
+        <div className="mt-4">
+          <RunStatus gate={gate.data} loading={gate.loading} />
+        </div>
+
         <div className="mt-4 flex flex-wrap items-center gap-3">
           <button
             type="button"
             className="btn btn-primary"
-            disabled={!kpiId || action.pending || noDimensions}
+            disabled={!kpiId || action.pending || noDimensions || blocked}
             onClick={() => {
               if (mode === 'movement') void runContribution([], null)
-              else void runManual()
+              else {
+                setManualModalOpen(true)
+                void runManual()
+              }
             }}
           >
-            {action.pending ? 'Analysing…' : mode === 'movement' ? 'Explain the movement' : 'Run'}
+            {action.pending ? 'Analysing…' : mode === 'movement' ? 'Explain' : 'Run'}
           </button>
           {action.pending && <Spinner label="Reading the KPI's registered source…" />}
         </div>
         {defaultDimension && mode === 'movement' && !contribution && (
-          <div className="mt-2 text-xs text-slate-400">
-            Default breakdown: <span className="font-medium text-slate-200">By {defaultDimension.name}</span>
+          <div className="mt-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+            Default: <span className="font-medium text-slate-200">{defaultDimension.name}</span>
           </div>
         )}
 
@@ -871,6 +1160,11 @@ export default function Investigation() {
             </Alert>
           </div>
         )}
+        {gate.error && (
+          <div className="mt-3">
+            <Alert tone="error">{gate.error}</Alert>
+          </div>
+        )}
         {action.error && (
           <div className="mt-3">
             <Alert tone="error">{action.error}</Alert>
@@ -890,25 +1184,69 @@ export default function Investigation() {
           !action.pending && (
             <Panel>
               <EmptyState
-                title="Nothing analysed yet"
-                description="Pick a KPI and a date the platform has already evaluated, then explain the movement. The breakdown reuses that stored result rather than computing a new expectation, so the parts reconcile with the number the business saw."
+                title={blocked ? 'Nothing to investigate on this date' : 'Nothing analysed yet'}
+                description={
+                  blocked
+                    ? 'Select a date that has already been analysed.'
+                    : 'Choose a KPI and a date with an approved run.'
+                }
               />
             </Panel>
           )
         ))}
 
-      {mode === 'manual' &&
-        manual &&
-        (manual.mode === 'contribution' ? (
-          <ContributionView
-            response={manual}
-            nextDimension={nextDimension}
-            onDrill={drill}
-            onBreadcrumb={climb}
-          />
-        ) : (
-          <EntityView result={manual.result} queries={manual.evidence?.queries} />
-        ))}
+      {/*
+        The dimension's own values, measured, each investigable on its own. Offered
+        whenever the date has been analysed -- so "no entity named" is a starting
+        point rather than a dead end -- and never a list written into the client.
+      */}
+      {mode === 'manual' && !blocked && gate.data && (
+        <EntityPicker
+          gate={gate.data}
+          selected={manualEntity || null}
+          unit={contract?.unit ?? null}
+          currency={contract?.currency ?? null}
+          onSelect={investigateEntity}
+          onClear={clearEntity}
+          pending={action.pending}
+        />
+      )}
+
+      {mode === 'manual' && manual && !manualModalOpen && (
+        <Panel
+          title="Latest result"
+          actions={
+            <button type="button" className="btn btn-xs btn-ghost" onClick={() => setManualModalOpen(true)}>
+              View details
+            </button>
+          }
+        >
+          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
+            <span>{manual.result.dimension}</span>
+            <span className="text-slate-600">•</span>
+            <span>{manual.mode === 'contribution' ? 'Contribution view' : 'Entity view'}</span>
+          </div>
+        </Panel>
+      )}
+
+      <Modal
+        open={manualModalOpen && Boolean(manual)}
+        onClose={() => setManualModalOpen(false)}
+        title={manual ? (manual.mode === 'contribution' ? 'Contribution detail' : `${manual.result.dimension}: ${manual.result.entity ?? 'Result'}`) : 'Detail'}
+        width="max-w-5xl"
+      >
+        {manual &&
+          (manual.mode === 'contribution' ? (
+            <ContributionView
+              response={manual}
+              nextDimension={nextDimension}
+              onDrill={drill}
+              onBreadcrumb={climb}
+            />
+          ) : (
+            <EntityView result={manual.result} evidence={manual.evidence} />
+          ))}
+      </Modal>
     </div>
   )
 }

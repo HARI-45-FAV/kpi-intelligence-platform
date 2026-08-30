@@ -41,16 +41,15 @@ const STATUS_TONES: Record<string, string> = {
   APPROVED: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
   NORMAL: 'border-emerald-200 bg-emerald-50/80 text-emerald-700',
   // Needs attention
-  WARNING: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  WARN: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  STALE: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  SAFE_WITH_AGGREGATION: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  REQUIRES_AGGREGATION: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  REQUIRES_DIMENSION_MAPPING: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  UNDER_REVIEW: 'border-amber-200 bg-amber-50/80 text-amber-700',
-  // An extraction that produced something, but not something usable. Amber, not
-  // neutral: it is waiting on a person, and a grey chip would read as "fine".
-  NEEDS_REVIEW: 'border-amber-200 bg-amber-50/80 text-amber-700',
+  WARNING: 'border-sky-200 bg-white/70 text-slate-600',
+  WARN: 'border-sky-200 bg-white/70 text-slate-600',
+  STALE: 'border-sky-200 bg-white/70 text-slate-600',
+  SAFE_WITH_AGGREGATION: 'border-sky-200 bg-white/70 text-slate-600',
+  REQUIRES_AGGREGATION: 'border-sky-200 bg-white/70 text-slate-600',
+  REQUIRES_DIMENSION_MAPPING: 'border-sky-200 bg-white/70 text-slate-600',
+  UNDER_REVIEW: 'border-sky-200 bg-white/70 text-slate-600',
+  // Neutral glass treatment keeps the status readable without the yellow warning cue.
+  NEEDS_REVIEW: 'border-sky-200 bg-white/70 text-slate-600',
   PROPOSED: 'border-sky-200 bg-sky-50/90 text-sky-700',
   // Problems
   POOR: 'border-rose-200 bg-rose-50/85 text-rose-700',
@@ -147,8 +146,8 @@ export function Alert({
 }) {
   const tones = {
     error: 'border-rose-200 bg-rose-50/85 text-rose-700',
-    warn: 'border-amber-200 bg-amber-50/85 text-amber-700',
-    info: 'border-sky-200 bg-sky-50/80 text-sky-800',
+    warn: 'border-sky-200 bg-white/75 text-slate-700 shadow-[0_8px_18px_rgba(55,92,128,0.08)]',
+    info: 'border-sky-200 bg-sky-50/70 text-sky-800 shadow-[0_8px_18px_rgba(55,92,128,0.08)]',
     success: 'border-emerald-200 bg-emerald-50/85 text-emerald-700',
   }
   return (

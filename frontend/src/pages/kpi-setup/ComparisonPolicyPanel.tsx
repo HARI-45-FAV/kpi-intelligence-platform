@@ -614,6 +614,9 @@ type ConfigDetail = BucketConfigSummary & {
   unusable_reason?: string | null
 }
 
+/** The shortest approval note the API will keep. Anything less is refused there. */
+const APPROVAL_NOTE_MIN = 3
+
 function ConfigDrawer({
   base,
   configId,
@@ -631,17 +634,28 @@ function ConfigDrawer({
   )
   const [previewDate, setPreviewDate] = useState(() => new Date().toISOString().slice(0, 10))
   const [preview, setPreview] = useState<BucketConfigPreview | null>(null)
+  // Approval is a recorded decision, not a click: the API keeps the note with the
+  // policy alongside who approved it and when, and refuses an empty one.
+  const [approvalNote, setApprovalNote] = useState('')
   const { pending, error, message, run } = useAction()
 
   const row = detail.data
   const can = (target: string) => row?.allowed_transitions.includes(target) ?? false
+  const note = approvalNote.trim()
+  const noteTooShort = note.length < APPROVAL_NOTE_MIN
 
   const transition = async (verb: 'propose' | 'approve' | 'archive') => {
+    if (verb === 'approve' && noteTooShort) return
     await run(
       () =>
-        api.post(`${base}/bucket-configs/${configId}/${verb}`, { reason: null }, { admin: true }),
+        api.post(
+          `${base}/bucket-configs/${configId}/${verb}`,
+          { reason: note.length > 0 ? note : null },
+          { admin: true },
+        ),
       `Policy ${verb}d.`,
     )
+    setApprovalNote('')
     await detail.reload()
     await onChanged()
   }
@@ -664,35 +678,58 @@ function ConfigDrawer({
       subtitle={row?.description ?? undefined}
       footer={
         row && (
-          <div className="flex flex-wrap justify-end gap-2">
-            {can('ARCHIVED') && (
-              <button
-                className="btn-ghost btn-xs"
-                disabled={pending}
-                onClick={() => transition('archive')}
-              >
-                Archive
-              </button>
-            )}
-            {can('PROPOSED') && (
-              <button
-                className="btn-ghost btn-xs"
-                disabled={pending || !row.usable}
-                title={row.usable ? undefined : (row.unusable_reason ?? undefined)}
-                onClick={() => transition('propose')}
-              >
-                Propose
-              </button>
-            )}
+          <div className="space-y-2">
             {can('APPROVED') && (
-              <button
-                className="btn-primary btn-xs"
-                disabled={pending}
-                onClick={() => transition('approve')}
-              >
-                Approve — the engine will use this
-              </button>
+              <label className="block">
+                <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                  Approval note
+                </span>
+                <input
+                  className="field mt-1"
+                  value={approvalNote}
+                  maxLength={2000}
+                  placeholder="Why this policy is right for this company"
+                  onChange={(event) => setApprovalNote(event.target.value)}
+                />
+              </label>
             )}
+            <div className="flex flex-wrap justify-end gap-2">
+              {can('ARCHIVED') && (
+                <button
+                  className="btn-ghost btn-xs"
+                  disabled={pending}
+                  onClick={() => transition('archive')}
+                >
+                  Archive
+                </button>
+              )}
+              {can('PROPOSED') && (
+                <button
+                  className="btn-ghost btn-xs"
+                  disabled={pending || !row.usable}
+                  title={row.usable ? undefined : (row.unusable_reason ?? undefined)}
+                  onClick={() => transition('propose')}
+                >
+                  Propose
+                </button>
+              )}
+              {can('APPROVED') && (
+                <button
+                  className="btn-primary btn-xs"
+                  disabled={pending || !row.usable || noteTooShort}
+                  title={
+                    !row.usable
+                      ? (row.unusable_reason ?? undefined)
+                      : noteTooShort
+                        ? 'Add a short approval note — it is kept with the policy.'
+                        : undefined
+                  }
+                  onClick={() => transition('approve')}
+                >
+                  Approve — the engine will use this
+                </button>
+              )}
+            </div>
           </div>
         )
       }

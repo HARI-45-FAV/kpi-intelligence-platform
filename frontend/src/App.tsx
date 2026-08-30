@@ -6,9 +6,8 @@ import SignIn from './pages/SignIn'
 import Onboarding from './pages/Onboarding'
 import Dashboard from './pages/Dashboard'
 import Monitoring from './pages/Monitoring'
+import Results from './pages/Results'
 import Investigation from './pages/Investigation'
-import Insights from './pages/Insights'
-import Activity from './pages/Activity'
 import KpiSetup from './pages/kpi-setup/KpiSetup'
 
 export default function App() {
@@ -33,9 +32,8 @@ export default function App() {
       <Route element={<AppShell />}>
         <Route index element={<Dashboard />} />
         <Route path="monitoring" element={<Monitoring />} />
+        <Route path="results" element={<Results />} />
         <Route path="investigation" element={<Investigation />} />
-        <Route path="insights" element={<Insights />} />
-        <Route path="activity" element={<Activity />} />
         <Route path="kpi-setup/*" element={<KpiSetup />} />
         <Route path="*" element={<Navigate to="/" replace />} />
       </Route>

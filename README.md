@@ -6,7 +6,17 @@ question per company:
 > *What does this KPI mean, exactly where does its data come from, who is allowed
 > to see it, and can we reliably calculate it?*
 
-Sprint 1 makes **zero LLM calls**. That is verifiable at
+Every number the platform produces is deterministic. On top of the governed
+foundation sits a **generalized detection engine** — one fixed algorithm that
+learns each company's schema and trading rhythm from configuration rather than
+from code, and answers *"did this KPI behave normally on this date?"* with an
+actual, an expected, a deviation and a status. See
+[docs/DETECTION.md](docs/DETECTION.md).
+
+There is also an **optional governed AI Copilot**, off by default
+(`LLM_ENABLED=false`), which retrieves and explains that governed material and
+computes nothing — see [docs/COPILOT.md](docs/COPILOT.md). With it disabled the
+platform makes **zero model calls**, which is verifiable at
 `GET /api/v1/companies/{id}/telemetry/summary`.
 
 ---
@@ -48,9 +58,18 @@ cd backend
 .venv/Scripts/python -m pytest tests/ -v
 ```
 
-30 tests. The important one is `tests/test_golden_flow.py`, which walks the
+92 backend tests. Two matter most: `tests/test_golden_flow.py`, which walks the
 entire Sprint 1 journey through the real HTTP API and then proves the tenant
-boundary holds.
+boundary holds, and `tests/test_detection_generalization.py`, which provisions two
+tenants that share no table, column, time-field type or weekday pattern and shows
+one detection engine getting both exactly right.
+
+```bash
+cd frontend
+npx tsc -b --noEmit && npx vitest run
+```
+
+12 frontend tests, nine of which pin what the monitoring screen must *not* show.
 
 ---
 
@@ -90,12 +109,22 @@ Everything is environment-driven; `backend/.env` is read if present.
 | Variable | Default | Notes |
 |---|---|---|
 | `DATABASE_URL` | `sqlite:///./data/platform.db` | The **platform metadata** DB. Point at Postgres with `postgresql+psycopg://…` |
-| `SECRET_KEY` | dev value | Signs JWTs **and** derives the key that encrypts data-source credentials. Change it in production; rotating it invalidates stored credentials. |
+| `SECRET_KEY` | dev value | Signs access tokens, and nothing else. Safe to rotate: everyone signs in again and nothing stored becomes unreadable. |
+| `CREDENTIAL_ENCRYPTION_KEY` | unset → `SECRET_KEY` | Seals stored data-source credentials. **Not** safely rotatable — see below. |
+| `ENVIRONMENT` | `development` | Anything outside `development`/`test`/`testing`/`local` refuses to boot on the shipped `SECRET_KEY` and stops serving `/docs`, `/redoc` and `/openapi.json`. |
 | `ACCESS_TOKEN_TTL_MINUTES` | `720` | |
 | `DOCUMENT_STORAGE_DIR` | `./data/documents` | |
 | `CONNECTOR_QUERY_TIMEOUT_SECONDS` | `30` | |
 | `CONNECTOR_MAX_ROWS_RETURNED` | `5000` | Hard cap on any connector read. |
 | `CORS_ORIGINS` | `localhost:5173` | Comma-separated. |
+
+**Two keys, two lifecycles.** A signing key should be rotatable on demand — after a
+leak, on a schedule, whenever every session should be invalidated — and the cost of
+rotating it is one round of sign-ins. A credential key cannot be rotated casually,
+because every registered data source in every company is readable only with the key
+that sealed it. Leave `CREDENTIAL_ENCRYPTION_KEY` unset and `SECRET_KEY` is used, which
+is what earlier installs did; set it and stored credentials are re-sealed under it once,
+at boot, and the count is logged. Back it up separately from everything else.
 
 **Two databases, kept physically apart.** `DATABASE_URL` is *our* metadata
 (companies, users, KPI contracts, catalog, audit). Tenant business data is never
@@ -111,20 +140,27 @@ multi-tenant BI platform leaks across companies.
 backend/
   app/
     core/          config, database, security, deps (authz), telemetry, permissions
-    models/        33 tables: tenant, source, profiling, document, catalog, kpi, observability
+    models/        35 tables: tenant, source, profiling, document, catalog, kpi,
+                   observability, detection (bucket configs + runs)
     connectors/    base interface → sql → {supabase, postgres, sqlite} + warehouse stubs
     services/      discovery, profiling, grain, relationships, join_safety, freshness,
                    reconciliation, catalog, documents, kpi_{formula,sql,discovery,
-                   validation,governance}, classification, audit
-    api/v1/        auth, companies, sources, analysis, documents, catalog, kpis, observability
+                   validation,governance}, classification, audit,
+                   detection + bucket_config + robust_stats + bucket_extraction
+    llm/           provider interface, config, one transport (optional Copilot)
+    copilot/       context, retrieval, evidence, tools, orchestrator
+    api/v1/        auth, companies, sources, analysis, documents, catalog, kpis,
+                   observability, detection, copilot
     seed/          bootstrap (roles + permissions)
   alembic/         schema migrations
-  tests/           golden end-to-end flow, tenant isolation, formula parser
+  tests/           golden end-to-end flow, tenant isolation, formula parser,
+                   detection generalization (two unlike tenants), copilot
 frontend/
   src/
     api/           typed client + response shapes
     auth/          session + elevated admin context
     components/    UI primitives, formatting, data hooks
+    copilot/       provider + panel (screen context, never typed)
     pages/         Dashboard, Monitoring, Investigation, Insights, Activity
     pages/kpi-setup/  Company, Sources, Documents, KPIs, Security, History
 ```
@@ -196,9 +232,15 @@ versioned semantic catalog · governed KPI contracts with nine validation checks
 human approval, versioning, lineage and access policies · append-only audit
 trail · runtime telemetry.
 
-**Deliberately absent.** Anomaly detection · forecasting · expected-value
-monitoring · contribution analysis · root-cause investigation · causal inference
-· document embeddings and RAG · LLM reasoning and narratives · action
+**Also delivered, on top of that foundation.** A generalized deterministic
+**detection engine** — governed comparison policies, calendar-aware expected
+values, robust median / MAD / modified z-score, and a business surface that shows
+KPI, Actual, Expected, Deviation and Status and nothing else. It hard-codes no
+company, table, column, formula, weekday, season or event: see
+[docs/DETECTION.md](docs/DETECTION.md).
+
+**Deliberately absent.** Forecasting · contribution analysis · root-cause
+investigation · causal inference · document embeddings and RAG · action
 recommendations · automated alerts.
 
 Sprint 2 consumes `GET /api/v1/companies/{id}/kpi-contracts` and should never

@@ -8,6 +8,7 @@ from app.models.base import *  # noqa: F401,F403  (enums and mixins)
 from app.models.catalog import CatalogVersion
 from app.models.detection import (
     AgentRun,
+    AgentRunExplanation,
     CompanyBucketConfig,
     ContributionRun,
     DetectionRun,
@@ -63,6 +64,7 @@ __all__ = [
     "ContributionRun",
     "DataSource",
     "AgentRun",
+    "AgentRunExplanation",
     "DetectionRun",
     "ExecutionLog",
     "JoinSafety",

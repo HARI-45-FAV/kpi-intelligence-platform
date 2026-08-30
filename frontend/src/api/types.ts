@@ -915,6 +915,37 @@ export interface DetectionRunResponse {
   persisted: boolean
 }
 
+export interface ResultSummary {
+  total_runs: number
+  anomalies: number
+  abnormal: number
+  normal: number
+  low_confidence: number
+  kpi_count: number
+}
+
+export interface ResultHistoryItem {
+  id: string
+  kpi_key: string
+  kpi_name: string
+  target_date: string
+  status: string
+  actual_value: number | null
+  expected_value: number | null
+  deviation_absolute: number | null
+  deviation_pct: number | null
+  top_driver: string | null
+  ai_explanation: string | null
+  explanation_status: string
+  explanation_generated_at?: string | null
+  email_status: string
+}
+
+export interface ResultHistoryResponse {
+  summary: ResultSummary
+  items: ResultHistoryItem[]
+}
+
 export interface DetectionBatchResponse {
   target_date: string
   agent_run_id: string
@@ -986,6 +1017,48 @@ export interface InvestigationDimensionsResponse {
   dimensions: InvestigationDimension[]
 }
 
+/**
+ * One value of a dimension, and how much of the KPI it accounts for on a date.
+ *
+ * Read from the company's own source for that KPI and that date — never a list
+ * kept in the client. Deliberately no status: nothing has analysed this entity,
+ * and choosing it is what starts an analysis of it. `share_of_total_pct` is
+ * `null` when the KPI's parts do not sum to the whole, because a percentage of
+ * such a total would not be arithmetic.
+ */
+export interface InvestigationEntity {
+  entity: string
+  label: string
+  value: number | null
+  share_of_total_pct: number | null
+  matched_rows: number | null
+}
+
+/**
+ * Whether a date can be investigated at all, and what is inside the dimension.
+ *
+ * `run_available` is the gate, and it is decided by one thing: whether detection
+ * stored a result for the date. When it is `false` the server has read nothing
+ * from the company's source and `message` is what to tell the reader — a
+ * breakdown of an unanalysed date would be a number the platform never measured.
+ */
+export interface InvestigationEntitiesResponse {
+  kpi_key: string
+  kpi_name: string
+  kpi_version: number
+  target_date: string
+  run_available: boolean
+  /** Whether the analysis that produced the stored result finished. */
+  run_state: string | null
+  /** The KPI's own verdict, carried through from detection. Never an entity's. */
+  kpi_status: string | null
+  message: string | null
+  dimensions: InvestigationDimension[]
+  dimension: string | null
+  next_dimensions: string[]
+  entities: InvestigationEntity[]
+}
+
 /** One step already taken in a drill-down: an approved dimension and a value. */
 export interface EntityStep {
   dimension: string
@@ -1023,6 +1096,8 @@ export interface ContributionResult {
   actual: number | null
   expected: number | null
   movement: number | null
+  /** The movement as a percentage of what was expected. Computed server-side. */
+  movement_pct: number | null
   status: string | null
   comparison: string | null
   unit?: string | null
@@ -1038,6 +1113,8 @@ export interface ContributionResult {
   shares_available: boolean
   next_dimensions: string[]
   notes: string[]
+  /** Whether the analysis behind the stored result finished. */
+  run_state?: string | null
 }
 
 /** How the breakdown was produced. Technical details area only. */
@@ -1065,6 +1142,7 @@ export interface EntityProfileResult {
   kpi_key: string
   dimension: string
   entity: string
+  target_date: string | null
   unit?: string | null
   currency?: string | null
   points: Array<{
@@ -1078,6 +1156,24 @@ export interface EntityProfileResult {
   change_vs_typical: number | null
   change_pct_vs_typical: number | null
   observed_days: number
+  /**
+   * The engine's verdict for this entity on `target_date`.
+   *
+   * The same classification the KPI itself is judged by — run on this entity's own
+   * comparable history because someone asked for this entity by name. `null` means
+   * the engine was not run, never that it ran and found nothing.
+   */
+  actual: number | null
+  expected: number | null
+  variance: number | null
+  variance_pct: number | null
+  direction: 'UP' | 'DOWN' | 'FLAT' | null
+  status: string | null
+  headline: string | null
+  status_reason: string | null
+  comparison_label: string | null
+  /** How much of the KPI on this date this entity accounts for. A size, not a cause. */
+  share_of_kpi_pct: number | null
   notes: string[]
 }
 
@@ -1093,7 +1189,12 @@ export type ManualAnalysisResponse =
   | {
       mode: 'entity'
       result: EntityProfileResult
-      evidence?: { kpi_version: number; queries: string[] }
+      evidence?: {
+        kpi_version: number
+        queries: string[]
+        comparison_label?: string | null
+        reference_dates?: string[]
+      }
     }
 
 /**

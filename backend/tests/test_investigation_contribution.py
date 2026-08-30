@@ -667,12 +667,17 @@ def test_manual_analysis_without_an_entity_ranks_contributors(tenant):
 
 
 def test_manual_analysis_with_an_entity_analyses_only_that_entity(tenant):
-    """One entity, on request. Nothing else is read, and nothing is judged.
+    """One entity, on request. Nothing else is read, and nothing else is judged.
 
     This is the permanent rule made observable: KPI anomaly detection is
-    continuous, entity analysis is selective. Asking about one region must not
-    trigger an analysis of every other region, so the response is checked for the
-    absence of any region but the one asked about.
+    continuous, entity anomaly detection is selective. Asking about one region must
+    not trigger an analysis of every other region, so the response is checked for
+    the absence of any region but the one asked about.
+
+    The one asked about *is* judged -- that is what asking for it means -- and by
+    the platform's own engine, so the status here is the same status the dashboard
+    uses. What must not appear is a second scoring vocabulary invented for this
+    screen, so the response is checked for that too.
     """
 
     lookback = 7
@@ -710,9 +715,16 @@ def test_manual_analysis_with_an_entity_analyses_only_that_entity(tenant):
     assert result["change_vs_typical"] == pytest.approx(1.0)
     assert result["change_pct_vs_typical"] == pytest.approx(100.0)
 
-    # A measured history for a person to read -- not a verdict about South.
-    for key in FORBIDDEN_CONTRIBUTOR_KEYS:
-        assert key not in result, f"an entity profile carries {key!r}"
+    # A verdict about South, from the engine that judges the KPI -- and only from
+    # it. The status is the KPI's own vocabulary; nothing here invents a scale.
+    assert result["status"] in {"NORMAL", "ABNORMAL", "LOW_CONFIDENCE"}
+    assert result["direction"] == "UP"
+    assert result["variance"] == pytest.approx(result["actual"] - result["expected"])
+    for invented in ("severity", "score", "confidence", "risk", "z_score", "is_anomalous"):
+        assert invented not in result, (
+            f"an entity analysis carries {invented!r}, which would be a second "
+            "classification system"
+        )
 
     # And no other region was touched, in the result or in the queries.
     rendered = json.dumps(body)

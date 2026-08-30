@@ -34,6 +34,7 @@ read per date, and a query budget the company controls through
 from __future__ import annotations
 
 import time as _time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
 from typing import Any
@@ -62,6 +63,7 @@ from app.services.bucket_config import (
     describe_buckets,
     select_comparable_dates,
     trailing_dates,
+    validate_bucket_config,
 )
 from app.services.kpi_coverage import Coverage, CoverageKey, source_coverage
 from app.services.kpi_execution import execute_kpi_any, execution_mode
@@ -297,6 +299,50 @@ def load_bucket_config_row(
     return newest(generic) if generic else None
 
 
+#: What the engine says when a company has approved no comparison policy yet.
+#: Detection still answers -- with a trailing window and this warning attached --
+#: rather than refusing, because "no seasonal pattern configured yet" is a normal
+#: state for a company that has just connected its data.
+UNCONFIGURED_WARNING = (
+    "This company has no approved comparison policy, so the engine compared recent "
+    "days and claims no weekly, monthly or seasonal pattern. Approve a comparison "
+    "configuration to make the expectation calendar-aware."
+)
+
+
+def config_payload(row: CompanyBucketConfig) -> dict:
+    """Rebuild the validator's input from a stored row.
+
+    The search-budget columns are authoritative over the copies inside
+    ``buckets``: they are the ones an administrator edits and the ones queries can
+    read without opening the JSON.
+    """
+
+    payload = dict(row.buckets or {})
+    for column in ("lookback_days", "min_reference_points", "max_reference_points"):
+        value = getattr(row, column)
+        if value is not None:
+            payload[column] = value
+    return payload
+
+
+def policy_for(
+    session: Session, company_id: str, kpi_key: str | None
+) -> tuple[BucketConfig, CompanyBucketConfig | None]:
+    """The approved comparison policy in force for this KPI, or the fallback.
+
+    One accessor, so that every surface which needs to know *what counts as
+    comparable history* -- a scheduled run, a re-explanation, an explicitly
+    requested analysis of one part of the business -- reads the same approved row
+    and gets the same warning when there is none.
+    """
+
+    row = load_bucket_config_row(session, company_id, kpi_key)
+    if row is None:
+        return BucketConfig(warnings=(UNCONFIGURED_WARNING,)), None
+    return validate_bucket_config(config_payload(row)), row
+
+
 # ---------------------------------------------------------------------------
 # Results
 # ---------------------------------------------------------------------------
@@ -481,6 +527,17 @@ def _kpi_read(
         start=start,
         end=end,
     )
+
+
+#: How a day is read. The engine's own reader is the default and the only one used
+#: for a KPI: a scheduled run always measures the KPI exactly as registered.
+#:
+#: It is a parameter so that an explicitly requested analysis of *one part* of the
+#: business can be classified by this engine rather than by a second one -- the part
+#: is read through a narrowed formula, and everything after the read (comparable
+#: dates, expectation, dispersion, threshold, verdict, wording) is untouched. No
+#: caller inside the platform's scheduled path passes it.
+Reader = Callable[[DataSourceConnector, KpiBinding, date], KpiResult]
 
 
 def _kpi_value(
@@ -713,10 +770,12 @@ def detect(
     materiality: KpiMaterialityRule | None = None,
     config_row: CompanyBucketConfig | None = None,
     coverage_cache: dict[CoverageKey, Coverage] | None = None,
+    read: Reader | None = None,
 ) -> DetectionOutcome:
     """Run detection for one KPI on one date. Deterministic, top to bottom."""
 
     started = _time.perf_counter()
+    read_day = read or _kpi_read
     version = binding.version
     notes: list[str] = [binding.time_field_note]
     notes.extend(config.warnings)
@@ -806,7 +865,7 @@ def detect(
             headline=f"{binding.name} has no source data for {target_date.isoformat()}.",
         )
 
-    reading = _kpi_read(connector, binding, target_date)
+    reading = read_day(connector, binding, target_date)
     measured = reading.scalar
     queries += 1
     source_detail["query"] = reading.sql
@@ -845,7 +904,7 @@ def detect(
     undefined_days = 0
     empty_days = 0
     for day in in_coverage:
-        value = _kpi_value(connector, binding, day)
+        value = read_day(connector, binding, day).scalar
         queries += 1
         if value is None or value.value is None:
             undefined_days += 1

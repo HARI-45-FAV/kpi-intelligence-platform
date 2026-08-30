@@ -7,21 +7,40 @@ because the two run on different schedules and mean different things:
 * Detection is automatic and continuous. It runs at the KPI level, for every KPI
   the company registered, and stores a verdict.
 * Investigation is on demand and selective. Nothing in this file runs on a
-  schedule, nothing sweeps every entity, and nothing here produces a verdict about
-  an entity. A share of a movement is arithmetic; a status belongs to a KPI.
+  schedule and nothing sweeps every entity. A share of a movement is arithmetic
+  and never a verdict: a part accounting for most of a movement is where the
+  movement happened, not something wrong. One named entity *is* judged -- but only
+  when a person asks for it by name, by the same engine that judges the KPI, and
+  the result is neither persisted nor read by any other surface.
 
-Three endpoints, one engine:
+Two modes, kept apart on purpose, and two shared reads in front of them:
 
 ``GET  /companies/{id}/investigation/dimensions``
     Which breakdowns this KPI has, from its own registration. The manual form
     reads its options from here rather than offering a list of columns.
+``GET  /companies/{id}/investigation/entities``
+    Whether a KPI and date can be investigated at all -- decided by whether the
+    agent run for that date recorded a result -- and, when they can, the
+    dimension's largest values read from the source. This is what makes choosing
+    an entity a selection rather than a typing exercise, and it is also the gate:
+    a date with no run returns no entities and reads nothing.
 ``POST /companies/{id}/investigation/contribution``
-    The automatic flow: the movement in the stored detection run for a KPI and
-    date, apportioned across one approved dimension, ranked, Top-K, with the next
-    dimensions a drill-down may go to.
+    **Mode 1 -- from a movement.** The movement the agent run recorded for a KPI
+    and date, apportioned across one approved dimension, ranked, Top-K, with the
+    next dimension the KPI's own hierarchy allows a drill-down to go to. Region ->
+    Sector -> Product is a company's declared hierarchy, not this file's.
 ``POST /companies/{id}/investigation/analysis``
-    The manual flow: KPI, dimension, optional entity, date and lookback. With no
-    entity it ranks contributors; with one it profiles that entity alone.
+    **Mode 2 -- manual analysis.** KPI, date, dimension, and the entity a person
+    chose. Not root-cause descent: one named part of the business is read on its
+    own and judged by the detection engine, and nothing else is read. (The same
+    endpoint still ranks a dimension's contributors when no entity is named, which
+    is the manual way to *find* the entity worth naming.)
+
+The two modes never share an execution path. Mode 1 descends a hierarchy from a
+recorded movement; mode 2 answers about one entity somebody chose. What they do
+share is the engine underneath -- the KPI's registered source and formula, the
+approved comparison policy that decides which history an expectation rests on, and
+one detection engine for every verdict -- because two engines would be two answers.
 
 What every route shares with detection, and must: the KPI's source, formula and
 time field come from its registration, the movement comes from a stored run, and
@@ -41,7 +60,6 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date, timedelta
 from time import perf_counter
-from types import SimpleNamespace
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select
@@ -54,15 +72,15 @@ from app.core.deps import (
     SessionDep,
     require_permissions,
 )
-from app.core.errors import Conflict
+from app.core.errors import Conflict, ValidationFailure
 from app.core.telemetry import usage_of
-from app.models.detection import ContributionRun, DetectionRun
+from app.models.detection import AgentRun, ContributionRun, DetectionRun
 from app.models.kpi import KpiVersion
 from app.models.source import DataSource
 from app.schemas import ContributionRequest, ManualAnalysisRequest
 from app.services import audit
 from app.services import contribution as contribution_service
-from app.services.detection import resolve_binding
+from app.services.detection import KpiBinding, resolve_binding
 from app.services.kpi_execution import can_execute, unsupported_reason
 
 # One rule for "which governed version is this request about", shared with the
@@ -74,104 +92,14 @@ from app.api.v1.detection import _resolve_version
 
 router = APIRouter(tags=["investigation"])
 
-NOVA_MART_FALLBACK_DIMENSIONS: list[dict[str, object]] = [
-    {"name": "region", "is_default": True, "hierarchy": ["sector"], "approx_cardinality": 4, "notes": "Activity by region"},
-    {"name": "sector", "is_default": False, "hierarchy": ["product"], "approx_cardinality": 5, "notes": "Items by sector"},
-    {"name": "product", "is_default": False, "hierarchy": [], "approx_cardinality": 20, "notes": "Contribution within the selected sector"},
-]
-
-
-def _fallback_dimensions(version: KpiVersion) -> list[dict[str, object]]:
-    """Temporary demo mapping for value-like KPIs without registered dimensions.
-
-    The real governance model remains authoritative; this is only a narrow
-    compatibility fallback for demo KPI names to keep the investigation workflow
-    stable until the company registers its real dimensions.
-    """
-    key = (version.definition.kpi_key or "").lower()
-    name = (version.definition.name or "").lower()
-    label = f"{key} {name}".strip()
-    if not label:
-        return []
-    if not any(marker in label for marker in ("revenue", "value", "amount")):
-        return []
-    return list(NOVA_MART_FALLBACK_DIMENSIONS)
-
-
-def _fallback_dimension(version: KpiVersion, name: str | None) -> SimpleNamespace:
-    """Build a light-weight dimension object for demo KPIs without governance rows."""
-    rows = _fallback_dimensions(version)
-    if not rows:
-        raise Conflict(
-            f"'{version.definition.name}' has no approved dimension to break down by. "
-            "A breakdown reads a dimension registered with the KPI and marked "
-            "allowed; it does not choose a column on its own.",
-            details={"kpi_version_id": version.id},
-        )
-
-    requested = (name or "").strip()
-    if not requested:
-        for row in rows:
-            if bool(row.get("is_default")):
-                row = row.copy()
-                return SimpleNamespace(
-                    company_id=version.company_id,
-                    kpi_version_id=version.id,
-                    dimension_name=str(row["name"]),
-                    source_column=str(row["name"]),
-                    hierarchy=list(row.get("hierarchy") or []),
-                    allowed=True,
-                    is_default_breakdown=True,
-                    approx_cardinality=row.get("approx_cardinality"),
-                    notes=row.get("notes"),
-                )
-        row = rows[0].copy()
-        return SimpleNamespace(
-            company_id=version.company_id,
-            kpi_version_id=version.id,
-            dimension_name=str(row["name"]),
-            source_column=str(row["name"]),
-            hierarchy=list(row.get("hierarchy") or []),
-            allowed=True,
-            is_default_breakdown=True,
-            approx_cardinality=row.get("approx_cardinality"),
-            notes=row.get("notes"),
-        )
-
-    for row in rows:
-        if str(row.get("name", "")).lower() == requested.lower():
-            return SimpleNamespace(
-                company_id=version.company_id,
-                kpi_version_id=version.id,
-                dimension_name=str(row["name"]),
-                source_column=str(row["name"]),
-                hierarchy=list(row.get("hierarchy") or []),
-                allowed=True,
-                is_default_breakdown=bool(row.get("is_default")),
-                approx_cardinality=row.get("approx_cardinality"),
-                notes=row.get("notes"),
-            )
-
-    raise Conflict(
-        f"'{requested}' is not available as a fallback dimension for '{version.definition.name}'.",
-        details={"approved": [str(row["name"]) for row in rows]},
-    )
-
-
-def _fallback_selection(
-    version: KpiVersion,
-    access: AccessContext,
-    dimension_name: str,
-    value: str,
-):
-    """Validate a fallback drill-down value without consulting the governed dimension table."""
-    dimension = _fallback_dimension(version, dimension_name)
-    stated = (value or "").strip()
-    if not stated:
-        raise Conflict(f"A value is required to narrow by {dimension.dimension_name}.")
-    if not access.permits_scope_value(dimension.dimension_name, stated):
-        raise Conflict(f"No {dimension.dimension_name} matching '{stated}' is available to you.")
-    return contribution_service.EntitySelection(dimension=dimension, value=stated)
+#: What a business reader is told when the date they picked was never analysed.
+#: Phrased as an instruction rather than an error, because it is one: the movement
+#: an investigation splits is the movement the agent run measured, so there is
+#: nothing to split until that run has happened.
+NO_RUN_MESSAGE = (
+    "Agent run not available for this date — investigation cannot be performed. "
+    "Run the KPI analysis first, then this movement can be investigated."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -214,22 +142,15 @@ def _connector_pool(
 # ---------------------------------------------------------------------------
 # Resolving the KPI and its stored result
 # ---------------------------------------------------------------------------
-def _stored_run(
+def _find_run(
     session: Session,
     access: AccessContext,
     version: KpiVersion,
     target_date: date,
-) -> DetectionRun:
-    """The detection run whose movement is being split.
+) -> DetectionRun | None:
+    """The most recent stored detection run for this KPI and date, if there is one."""
 
-    Requiring one is the point. The movement apportioned here is the movement the
-    business already saw on the detection surface, computed by the engine from the
-    company's approved comparison policy -- not a fresh expectation invented for
-    the investigation. If no run exists for the date, the honest answer is to run
-    detection first, which is a different button with a different permission.
-    """
-
-    run = session.scalars(
+    return session.scalars(
         select(DetectionRun)
         .where(
             DetectionRun.company_id == access.company.id,
@@ -238,15 +159,57 @@ def _stored_run(
         )
         .order_by(DetectionRun.executed_at.desc())
     ).first()
+
+
+def _run_state(session: Session, run: DetectionRun | None) -> str | None:
+    """Whether the agent run that produced this result finished.
+
+    A result reached by a batch agent run carries that run's state; one produced by
+    a direct request is complete by the fact of existing, because it is written
+    once the engine has a number. Reported so a reader can see *why* an
+    investigation is offered, rather than being told to trust that it is.
+    """
+
+    if run is None:
+        return None
+    if not run.agent_run_id:
+        return "COMPLETED"
+    sweep = session.get(AgentRun, run.agent_run_id)
+    return "COMPLETED" if sweep is None else sweep.status
+
+
+def _stored_run(
+    session: Session,
+    access: AccessContext,
+    version: KpiVersion,
+    target_date: date,
+) -> DetectionRun:
+    """The one gate both modes pass through: was this date analysed at all?
+
+    Requiring a recorded run is the point, and it is the same requirement for a
+    guided drill-down and for a single named entity -- otherwise the strictest path
+    on the screen would be reachable by typing around the loosest. The movement
+    being investigated is the movement the business already saw on the detection
+    surface, computed by the engine from the company's approved comparison policy --
+    not a fresh expectation invented for the investigation. With no run for the
+    date, the honest answer is to run the analysis first, which is a different
+    button with a different permission.
+    """
+
+    run = _find_run(session, access, version, target_date)
     if run is not None:
         return run
 
     raise Conflict(
         f"'{version.definition.name}' has no stored detection result for "
         f"{target_date.isoformat()}, so there is no measured movement to break down. "
-        "Run detection for that date first; the investigation splits the result the "
-        "engine produced rather than computing an expectation of its own.",
-        details={"kpi_key": version.definition.kpi_key, "target_date": target_date.isoformat()},
+        + NO_RUN_MESSAGE,
+        details={
+            "kpi_key": version.definition.kpi_key,
+            "target_date": target_date.isoformat(),
+            "run_available": False,
+            "message": NO_RUN_MESSAGE,
+        },
     )
 
 
@@ -254,16 +217,36 @@ def _payload(
     analysis: contribution_service.ContributionAnalysis,
     access: AccessContext,
     stored: ContributionRun | None = None,
+    *,
+    run_state: str | None = None,
 ) -> dict:
     """Business answer always; method only for callers entitled to read KPIs."""
 
-    out: dict = {"result": analysis.business_view()}
+    result = analysis.business_view()
+    if run_state:
+        result["run_state"] = run_state
+    out: dict = {"result": result}
     if access.has("kpi.read"):
         evidence = analysis.evidence()
         if stored is not None:
             evidence["contribution_run_id"] = stored.id
         out["evidence"] = evidence
     return out
+
+
+def _dimension_view(session: Session, version: KpiVersion) -> list[dict]:
+    """The breakdowns this KPI offers, each with where a drill-down may go next."""
+
+    return [
+        {
+            "name": row.dimension_name,
+            "is_default": row.is_default_breakdown,
+            "hierarchy": contribution_service.next_dimensions(session, version, row),
+            "approx_cardinality": row.approx_cardinality,
+            "notes": row.notes,
+        }
+        for row in contribution_service.available_dimensions(session, version)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -280,29 +263,81 @@ def list_dimensions(
     kpi_id: str = Query(min_length=1, max_length=80),
 ) -> dict:
     version = _resolve_version(session, access, kpi_id)
-    dimensions = contribution_service.available_dimensions(session, version)
-    resolved = [
-        {
-            "name": row.dimension_name,
-            "is_default": row.is_default_breakdown,
-            "hierarchy": contribution_service.next_dimensions(session, version, row),
-            "approx_cardinality": row.approx_cardinality,
-            "notes": row.notes,
-        }
-        for row in dimensions
-    ]
-    if not resolved:
-        resolved = _fallback_dimensions(version)
     return {
         "kpi_key": version.definition.kpi_key,
         "kpi_name": version.definition.name,
         "kpi_version": version.version,
-        "dimensions": resolved,
+        "dimensions": _dimension_view(session, version),
     }
 
 
 # ---------------------------------------------------------------------------
-# The automatic flow: apportion a measured movement
+# Whether this date can be investigated at all, and what is in the dimension
+# ---------------------------------------------------------------------------
+@router.get(
+    "/companies/{company_id}/investigation/entities",
+    summary="Whether a date can be investigated, and the dimension's largest values",
+)
+def list_entities(
+    company_id: str,
+    request: Request,
+    session: SessionDep,
+    access: AccessContext = Depends(require_permissions("investigation.read")),
+    kpi_id: str = Query(min_length=1, max_length=80),
+    target_date: date = Query(),
+    dimension: str | None = Query(default=None, max_length=120),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict:
+    """Answer two questions the investigation surface has to ask before it opens.
+
+    *Can this date be investigated?* -- decided solely by whether a detection run
+    was stored for it. A date with no run returns ``run_available: false`` and an
+    empty list, and reads nothing from the company's source: computing a breakdown
+    for an unanalysed date would put a number on screen that the platform never
+    measured and no one could reproduce.
+
+    *Which parts of the business are worth choosing?* -- read from the source, per
+    KPI, per date, ranked by size and filtered to what the caller may see. Nothing
+    is enumerated in code, so the list follows the data rather than the other way
+    round. Sizes are not verdicts: none of these entities has been analysed, and
+    that is exactly what the ``Investigate`` action on each one is for.
+    """
+
+    version = _resolve_version(session, access, kpi_id)
+    run = _find_run(session, access, version, target_date)
+
+    out: dict = {
+        "kpi_key": version.definition.kpi_key,
+        "kpi_name": version.definition.name,
+        "kpi_version": version.version,
+        "target_date": target_date.isoformat(),
+        "run_available": run is not None,
+        "run_state": _run_state(session, run),
+        "kpi_status": None if run is None else run.status,
+        "message": None if run is not None else NO_RUN_MESSAGE,
+        "dimensions": _dimension_view(session, version),
+        "dimension": None,
+        "next_dimensions": [],
+        "entities": [],
+    }
+    if run is None:
+        return out
+
+    chosen = contribution_service.resolve_dimension(session, version, dimension)
+    out["dimension"] = chosen.dimension_name
+    out["next_dimensions"] = contribution_service.next_dimensions(session, version, chosen)
+
+    binding = resolve_binding(session, version)
+    with _connector_pool(request) as acquire:
+        connector = acquire(binding.data_source)
+        out["entities"] = contribution_service.top_entities(
+            connector, access, binding, chosen, run.target_date, limit=limit
+        )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Mode 1: from a movement -- the guided descent down the KPI's own hierarchy
 # ---------------------------------------------------------------------------
 @router.post(
     "/companies/{company_id}/investigation/contribution",
@@ -315,28 +350,29 @@ def analyse_contribution(
     session: SessionDep,
     access: AccessContext = Depends(require_permissions("investigation.read")),
 ) -> dict:
+    """Root-cause descent: one recorded movement, one level at a time.
+
+    Nothing here is chosen by the caller except *where in the hierarchy they are*.
+    The movement comes from the recorded run, the dimension defaults to the KPI's
+    own, the next level comes from that dimension's declared hierarchy, and every
+    ancestor in ``path`` is re-checked for approval and entitlement before a query
+    is built. This is the path an ABNORMAL verdict leads to, and it is the only
+    path on this surface that descends.
+    """
+
     version = _resolve_version(session, access, payload.kpi_id)
     run = _stored_run(session, access, version, payload.target_date)
     binding = resolve_binding(session, version)
 
     # Ancestors first: each one is an approved dimension and a permitted value, and
     # a refusal here stops the query being built at all.
-    if not contribution_service.available_dimensions(session, version):
-        selections = [
-            _fallback_selection(version, access, step.dimension, step.value)
-            for step in payload.path
-        ]
-    else:
-        selections = [
-            contribution_service.resolve_selection(
-                session, version, access, step.dimension, step.value
-            )
-            for step in payload.path
-        ]
-    if not contribution_service.available_dimensions(session, version):
-        dimension = _fallback_dimension(version, payload.dimension)
-    else:
-        dimension = contribution_service.resolve_dimension(session, version, payload.dimension)
+    selections = [
+        contribution_service.resolve_selection(
+            session, version, access, step.dimension, step.value
+        )
+        for step in payload.path
+    ]
+    dimension = contribution_service.resolve_dimension(session, version, payload.dimension)
 
     started = perf_counter()
     with _connector_pool(request) as acquire:
@@ -389,94 +425,34 @@ def analyse_contribution(
         request=request,
     )
     session.commit()
-    return _payload(analysis, access, stored)
+    return _payload(analysis, access, stored, run_state=_run_state(session, run))
 
 
 # ---------------------------------------------------------------------------
-# The manual flow: a dimension, and optionally one entity
+# Mode 2: manual analysis -- one part of the business, chosen and read on its own
 # ---------------------------------------------------------------------------
-@router.post(
-    "/companies/{company_id}/investigation/analysis",
-    summary="Manual dimensional analysis: a dimension, and optionally one entity",
-)
-def manual_analysis(
-    company_id: str,
+def _entity_analysis(
     payload: ManualAnalysisRequest,
     request: Request,
-    session: SessionDep,
-    access: AccessContext = Depends(require_permissions("investigation.read")),
+    session: Session,
+    access: AccessContext,
+    version: KpiVersion,
+    binding: KpiBinding,
+    dimension: contribution_service.Dimension,
+    run: DetectionRun,
 ) -> dict:
-    """Two shapes behind one entry point, chosen by whether an entity was given.
+    """Read one named entity across its own window and let the engine judge it.
 
-    No entity: rank the dimension's top contributors, exactly as the automatic
-    flow does, against the stored run for the date. One entity: read that entity
-    alone across the lookback window. The second is the reason this endpoint
-    exists -- someone with a specific part of the business in mind should not have
-    to trigger an analysis of every other part to look at it, and nothing on this
-    platform ever analyses every entity on a schedule.
+    This is manual analysis proper, and it descends nothing: a person named a
+    dimension and a value, so exactly that value is read -- one query per day
+    through the KPI's own formula, narrowed by a governed filter -- and exactly
+    that value is classified. Nothing on this platform analyses every entity, on a
+    schedule or otherwise, and an entity is judged only because somebody asked.
     """
 
-    version = _resolve_version(session, access, payload.kpi_id)
-    binding = resolve_binding(session, version)
-    if not contribution_service.available_dimensions(session, version):
-        dimension = _fallback_dimension(version, payload.dimension)
-    else:
-        dimension = contribution_service.resolve_dimension(session, version, payload.dimension)
-
-    if not payload.entity:
-        run = _stored_run(session, access, version, payload.target_date)
-        started = perf_counter()
-        with _connector_pool(request) as acquire:
-            connector = acquire(binding.data_source)
-            analysis = contribution_service.analyse(
-                session,
-                access,
-                connector,
-                binding,
-                run,
-                dimension,
-                top_k=payload.top_k,
-            )
-        # The same breakdown as the automatic flow's, and stored the same way. Only
-        # ``entry_point`` differs, because how someone arrived at a question is worth
-        # keeping and the answer is not different for having been typed.
-        stored = contribution_service.persist_analysis(
-            session,
-            analysis,
-            entry_point="MANUAL",
-            executed_by_user_id=access.user.id,
-            duration_ms=int((perf_counter() - started) * 1000),
-        )
-        audit.record(
-            session,
-            access=access,
-            action=audit.AuditAction.CONTRIBUTION_ANALYSED,
-            resource_type="detection_run",
-            resource_id=run.id,
-            resource_label=f"{analysis.kpi_name} {analysis.target_date.isoformat()}",
-            summary=(
-                f"Manual breakdown by {analysis.dimension} on "
-                f"{analysis.target_date.isoformat()}."
-            ),
-            details={
-                "kpi_key": analysis.kpi_key,
-                "dimension": analysis.dimension,
-                "top_k": analysis.top_k,
-                "entry_point": "manual",
-                "withheld_by_scope": analysis.withheld_count,
-                "contribution_run_id": stored.id,
-            },
-            request=request,
-        )
-        session.commit()
-        return {"mode": "contribution", **_payload(analysis, access, stored)}
-
-    if not contribution_service.available_dimensions(session, version):
-        selection = _fallback_selection(version, access, dimension.dimension_name, payload.entity)
-    else:
-        selection = contribution_service.resolve_selection(
-            session, version, access, dimension.dimension_name, payload.entity
-        )
+    selection = contribution_service.resolve_selection(
+        session, version, access, dimension.dimension_name, payload.entity or ""
+    )
     days = [
         payload.target_date - timedelta(days=offset)
         for offset in range(payload.lookback_days - 1, -1, -1)
@@ -486,6 +462,40 @@ def manual_analysis(
         connector = acquire(binding.data_source)
         profile = contribution_service.profile_entity(
             connector, binding, dimension, selection, days
+        )
+        # An entity the source never matched is not an analysis with empty figures;
+        # it is a selection that does not exist here. Said plainly rather than
+        # rendered as a row of dashes a reader would have to interpret.
+        touched = any(
+            point["value"] is not None or (point.get("matched_rows") or 0) > 0
+            for point in profile.points
+        )
+        if not touched:
+            raise Conflict(
+                f"'{selection.value}' has no recorded {dimension.dimension_name} "
+                f"activity for {binding.name} in the {payload.lookback_days} day(s) to "
+                f"{payload.target_date.isoformat()}, so there is nothing to analyse. "
+                "Choose one of the values measured on this date.",
+                details={
+                    "kpi_key": profile.kpi_key,
+                    "dimension": dimension.dimension_name,
+                    "entity": selection.value,
+                    "target_date": payload.target_date.isoformat(),
+                    "entity_available": False,
+                },
+            )
+        # Entity-level detection, for this one entity, because it was asked for.
+        # The engine decides the verdict against the company's approved comparison
+        # policy; nothing here does.
+        profile = contribution_service.classify_entity(
+            session,
+            connector,
+            binding,
+            dimension,
+            selection,
+            payload.target_date,
+            profile=profile,
+            kpi_actual=run.actual_value,
         )
 
     audit.record(
@@ -506,6 +516,10 @@ def manual_analysis(
             "lookback_days": payload.lookback_days,
             "target_date": payload.target_date.isoformat(),
             "observed_days": profile.observed_days,
+            # The verdict is audited because it is a judgement about a named part of
+            # the business, and because "who asked, and what were they told" is the
+            # question an audit trail exists to answer.
+            "entity_status": profile.status,
         },
         request=request,
     )
@@ -516,5 +530,115 @@ def manual_analysis(
         out["evidence"] = {
             "kpi_version": profile.kpi_version,
             "queries": profile.queries,
+            "comparison_label": profile.comparison_label,
+            "reference_dates": profile.reference_dates,
         }
     return out
+
+
+def _dimension_ranking(
+    payload: ManualAnalysisRequest,
+    request: Request,
+    session: Session,
+    access: AccessContext,
+    binding: KpiBinding,
+    dimension: contribution_service.Dimension,
+    run: DetectionRun,
+) -> dict:
+    """Rank a dimension's contributors without descending into any of them.
+
+    The manual way to *find* the value worth naming: same engine, same recorded
+    movement, no hierarchy and no drill path -- so what comes back is a list of
+    sizes for one dimension the caller picked, and choosing from it is a separate
+    request about a single entity.
+    """
+
+    started = perf_counter()
+    with _connector_pool(request) as acquire:
+        connector = acquire(binding.data_source)
+        analysis = contribution_service.analyse(
+            session,
+            access,
+            connector,
+            binding,
+            run,
+            dimension,
+            top_k=payload.top_k,
+        )
+    # Stored the same way the movement mode stores its breakdown. Only
+    # ``entry_point`` differs, because how someone arrived at a question is worth
+    # keeping and the answer is not different for having been typed.
+    stored = contribution_service.persist_analysis(
+        session,
+        analysis,
+        entry_point="MANUAL",
+        executed_by_user_id=access.user.id,
+        duration_ms=int((perf_counter() - started) * 1000),
+    )
+    audit.record(
+        session,
+        access=access,
+        action=audit.AuditAction.CONTRIBUTION_ANALYSED,
+        resource_type="detection_run",
+        resource_id=run.id,
+        resource_label=f"{analysis.kpi_name} {analysis.target_date.isoformat()}",
+        summary=(
+            f"Manual breakdown by {analysis.dimension} on "
+            f"{analysis.target_date.isoformat()}."
+        ),
+        details={
+            "kpi_key": analysis.kpi_key,
+            "dimension": analysis.dimension,
+            "top_k": analysis.top_k,
+            "entry_point": "manual",
+            "withheld_by_scope": analysis.withheld_count,
+            "contribution_run_id": stored.id,
+        },
+        request=request,
+    )
+    session.commit()
+    return {
+        "mode": "contribution",
+        **_payload(analysis, access, stored, run_state=_run_state(session, run)),
+    }
+
+
+@router.post(
+    "/companies/{company_id}/investigation/analysis",
+    summary="Manual analysis: a dimension the caller picked, and the entity they chose",
+)
+def manual_analysis(
+    company_id: str,
+    payload: ManualAnalysisRequest,
+    request: Request,
+    session: SessionDep,
+    access: AccessContext = Depends(require_permissions("investigation.read")),
+) -> dict:
+    """Validate the selection, then hand it to whichever path it named.
+
+    Everything a manual request can get wrong is checked here, once, before any
+    query is built and in the order that gives the most useful refusal: the KPI
+    must resolve inside the caller's company, the dimension must be one the KPI
+    approved, the date must be one the agent run analysed, and -- in
+    :func:`_entity_analysis` -- the entity must be inside the caller's row scope
+    and actually present in the source. The two paths below share this preamble and
+    nothing else, and neither of them is the movement mode: no hierarchy is walked
+    and no drill path is accepted here.
+    """
+
+    version = _resolve_version(session, access, payload.kpi_id)
+    dimension = contribution_service.resolve_dimension(session, version, payload.dimension)
+    if payload.entity is not None and not payload.entity.strip():
+        raise ValidationFailure(
+            f"Choose a {dimension.dimension_name} to analyse, or clear the selection to "
+            "rank the whole dimension instead."
+        )
+    binding = resolve_binding(session, version)
+    # The gate, before either path and before anything is read.
+    run = _stored_run(session, access, version, payload.target_date)
+
+    if payload.entity:
+        return _entity_analysis(
+            payload, request, session, access, version, binding, dimension, run
+        )
+    return _dimension_ranking(payload, request, session, access, binding, dimension, run)
