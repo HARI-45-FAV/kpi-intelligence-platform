@@ -11,7 +11,7 @@
 import { useState } from 'react'
 import { Navigate, NavLink, Route, Routes, useNavigate } from 'react-router-dom'
 import { useAuth } from '../../auth/AuthContext'
-import { Alert, Field, Panel } from '../../components/ui'
+import { Alert, Field, Panel, PasswordInput } from '../../components/ui'
 import { useAction } from '../../components/useResource'
 import CompanyPanel from './CompanyPanel'
 import SourcesPanel from './SourcesPanel'
@@ -147,9 +147,7 @@ function AdminUnlock() {
           </Field>
 
           <Field label="Password" required>
-            <input
-              type="password"
-              className="field"
+            <PasswordInput
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete="current-password"

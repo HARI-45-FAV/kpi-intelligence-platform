@@ -26,7 +26,13 @@ import type {
   KpiContract,
 } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatCompact, formatCurrency, formatDate, formatNumber } from '../components/format'
+import {
+  formatCompact,
+  formatCurrency,
+  formatDate,
+  formatKpiName,
+  formatNumber,
+} from '../components/format'
 import { Alert, EmptyState, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilot, useCopilotScreen } from '../copilot/CopilotProvider'
@@ -601,7 +607,7 @@ function KpiResultCard({
   if (!result) {
     return (
       <div className="rounded-[22px] border border-white/95 bg-white/50 p-4 text-left shadow-[0_11px_22px_rgba(50,103,145,0.08)] backdrop-blur-md">
-        <div className="text-sm font-medium text-slate-300">{contract.name}</div>
+        <div className="text-sm font-medium text-slate-300">{formatKpiName(contract.name)}</div>
         <p className="mt-3 text-xs leading-relaxed text-slate-500">
           {skippedReason ?? 'Not evaluated in this run.'}
         </p>
@@ -615,7 +621,7 @@ function KpiResultCard({
       className="surface-card surface-card-lift p-4 text-left"
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="text-sm font-medium text-slate-100">{contract.name}</span>
+        <span className="text-sm font-medium text-slate-100">{formatKpiName(contract.name)}</span>
         <StatusBadge status={result.status} />
       </div>
 
@@ -660,7 +666,7 @@ function StageCard({
       onClick={onClick}
       className="surface-card surface-card-lift p-4 text-left"
     >
-      <div className="text-sm font-medium text-slate-100">{contract.name}</div>
+      <div className="text-sm font-medium text-slate-100">{formatKpiName(contract.name)}</div>
 
       {stats.totalRuns === 0 ? (
         <p className="mt-3 text-xs leading-relaxed text-slate-500">
@@ -721,7 +727,7 @@ function KpiEvaluationPopup({
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const date = result.target_date
-  const question = `Give a short plain-language explanation of ${contract.name}: what it measures, how it is calculated, and its latest governed validation state.`
+  const question = `Give a short plain-language explanation of ${formatKpiName(contract.name)}: what it measures, how it is calculated, and its latest governed validation state.`
 
   useEffect(() => {
     let cancelled = false
@@ -763,7 +769,7 @@ function KpiEvaluationPopup({
     <Modal open onClose={onClose} title="Performance explained" width="max-w-md">
       <div className="space-y-3">
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-sm font-semibold text-slate-100">{contract.name}</span>
+          <span className="text-sm font-semibold text-slate-100">{formatKpiName(contract.name)}</span>
           <span className="chip">Date: {formatDate(date)}</span>
           <StatusBadge status={result.status} />
         </div>

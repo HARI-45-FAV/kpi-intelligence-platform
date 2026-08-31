@@ -34,7 +34,13 @@ import type {
   DetectionRunSummary,
 } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatCompact, formatCurrency, formatDate, formatRelative } from '../components/format'
+import {
+  formatCompact,
+  formatCurrency,
+  formatDate,
+  formatKpiName,
+  formatRelative,
+} from '../components/format'
 import { Alert, EmptyState, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
@@ -211,7 +217,7 @@ export default function Monitoring() {
     kpiId: openKpi?.kpi.kpi_key ?? null,
     kpiVersion: openKpi?.kpi.kpi_version ?? null,
     selectedDate: openKpi?.result?.target_date ?? date,
-    label: openKpi?.kpi.name ?? null,
+    label: openKpi ? formatKpiName(openKpi.kpi.name) : null,
   })
 
   if (overview.loading && !overview.data) return <Spinner label="Loading monitored KPIs…" />
@@ -341,7 +347,7 @@ export default function Monitoring() {
           <ul className="divide-y divide-ink-800">
             {blocked.map((kpi) => (
               <li key={kpi.kpi_id} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-2.5">
-                <span className="text-sm font-medium text-slate-200">{kpi.name}</span>
+                <span className="text-sm font-medium text-slate-200">{formatKpiName(kpi.name)}</span>
                 <span className="flex-1 text-xs leading-relaxed text-slate-500">
                   {kpi.blocked_reason ?? 'Not available for detection.'}
                 </span>
@@ -377,7 +383,7 @@ function VerdictCard({
   if (!result) {
     return (
       <div className="rounded-[22px] border border-white/95 bg-white/50 p-4 text-left shadow-[0_11px_22px_rgba(50,103,145,0.08)] backdrop-blur-md">
-        <div className="text-sm font-medium text-slate-300">{kpi.name}</div>
+        <div className="text-sm font-medium text-slate-300">{formatKpiName(kpi.name)}</div>
         <p className="mt-3 text-xs leading-relaxed text-slate-500">
           {skippedReason ?? 'Not evaluated yet.'}
         </p>
@@ -391,7 +397,7 @@ function VerdictCard({
       className="surface-card surface-card-lift p-4 text-left"
     >
       <div className="flex items-start justify-between gap-2">
-        <span className="text-sm font-medium text-slate-100">{result.kpi}</span>
+        <span className="text-sm font-medium text-slate-100">{formatKpiName(result.kpi)}</span>
         <StatusBadge status={result.status} />
       </div>
 
@@ -449,7 +455,7 @@ function DetailRow({ label, value }: { label: string; value: ReactNode }) {
 function VerdictModal({ row, onClose }: { row: KpiRow; onClose: () => void }) {
   const result = row.result!
   return (
-    <Modal open onClose={onClose} title={result.kpi} width="max-w-md">
+    <Modal open onClose={onClose} title={formatKpiName(result.kpi)} width="max-w-md">
       <div className="space-y-4">
         <div className="flex flex-wrap items-center gap-2">
           <span className="chip">Date: {formatDate(result.target_date)}</span>

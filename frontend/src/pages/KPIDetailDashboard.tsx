@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react'
 import type { KpiContract } from '../api/types'
 import type { DetectionRunSummary } from '../api/types'
-import { formatCompact, formatCurrency, formatDate } from '../components/format'
+import { formatCompact, formatCurrency, formatDate, formatKpiName } from '../components/format'
 import { EmptyState, Overlay, StatusBadge } from '../components/ui'
 
 const WEEKDAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat']
@@ -107,10 +107,10 @@ export default function KPIDetailDashboard({
           <div className="text-[10px] font-semibold uppercase tracking-[0.18em] text-sky-700">
             KPI detail workspace
           </div>
-          <h3 className="mt-1 text-lg font-semibold text-slate-900">{contract.name}</h3>
+          <h3 className="mt-1 text-lg font-semibold text-slate-900">{formatKpiName(contract.name)}</h3>
           <p className="text-xs text-slate-500">Historical Performance · stored Agent Run results</p>
         </div>
-        <button className="btn-ghost btn-xs" onClick={onClose} aria-label={`Close ${contract.name} detail`}>
+        <button className="btn-ghost btn-xs" onClick={onClose} aria-label={`Close ${formatKpiName(contract.name)} detail`}>
           Close
         </button>
       </header>
@@ -236,7 +236,7 @@ export default function KPIDetailDashboard({
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
               <div>
                 <div className="text-[10px] font-semibold uppercase tracking-[0.16em] text-sky-700">Run detail</div>
-                <h4 className="mt-1 text-base font-semibold text-slate-900">{contract.name} · {formatDate(selected.target_date)}</h4>
+                <h4 className="mt-1 text-base font-semibold text-slate-900">{formatKpiName(contract.name)} · {formatDate(selected.target_date)}</h4>
               </div>
               <button className="btn-ghost btn-xs" onClick={() => setIsRunModalOpen(false)} aria-label="Close run detail">Close</button>
             </div>
@@ -285,7 +285,7 @@ export default function KPIDetailDashboard({
           <>
             <div className="flex flex-wrap items-center justify-between gap-2">
               <div>
-                <div className="text-sm font-semibold text-slate-900">{contract.name} · {formatDate(selectedDate)}</div>
+                <div className="text-sm font-semibold text-slate-900">{formatKpiName(contract.name)} · {formatDate(selectedDate)}</div>
                 <div className="text-[11px] text-slate-500">Persisted detection result · no recalculation</div>
               </div>
               <StatusBadge status={selected.status} />
@@ -298,7 +298,7 @@ export default function KPIDetailDashboard({
             </dl>
           </>
         ) : (
-          <EmptyState title="No run available for this date" description={`${contract.name} has no persisted Agent Run result for ${formatDate(selectedDate)}.`} />
+          <EmptyState title="No run available for this date" description={`${formatKpiName(contract.name)} has no persisted Agent Run result for ${formatDate(selectedDate)}.`} />
         )}
       </section>
     </section>

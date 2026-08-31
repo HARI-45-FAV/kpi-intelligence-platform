@@ -934,6 +934,52 @@ def test_batch_run_persists_agent_aggregate_and_linked_results(company_b):
     }
 
 
+def test_results_history_carries_its_unit_and_states_no_explanation_it_lacks(company_b):
+    """The Results screen's contract, on both counts the screen used to get wrong.
+
+    * The row carries ``unit`` and ``currency``, so the browser renders the KPI's
+      own money. Without them the screen inferred "money" from the substring
+      ``revenue`` in the KPI key and printed it as USD -- wrong symbol for this
+      tenant's INR books, and no symbol at all for ``refund_value``.
+
+    * Nothing in the platform writes ``agent_run_explanations`` -- explanation
+      generation is the Copilot's, and it is off by default -- so a row reports
+      ``NOT_GENERATED``/``NOT_SENT`` and a null ``ai_explanation`` rather than
+      defaulting to ``READY``/``EMAIL_SENT``, which claimed a finished
+      explanation and a delivered email for every historical row of a platform
+      that has no email engine. ``top_driver`` still carries the engine's own
+      deterministic headline, which is what the screen shows instead.
+    """
+
+    admin, base = company_b["admin"], company_b["base"]
+    ran = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": company_b["target"].isoformat(),
+            "kpi_ids": [company_b["revenue_id"], company_b["refunds_id"]],
+        },
+    )
+    assert ran.status_code == 200, ran.text
+
+    response = admin.get(f"{base}/results")
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["summary"]["total_runs"] == len(body["items"])
+    rows = {item["kpi_key"]: item for item in body["items"]}
+    assert {"revenue", "refund_value"} <= set(rows)
+
+    for kpi_key, item in rows.items():
+        assert item["unit"] == "currency", kpi_key
+        assert item["currency"] == "INR", kpi_key
+        # Always present: the engine stores a headline for every run, so the
+        # summary column never has to render an empty cell.
+        assert item["top_driver"], kpi_key
+        assert item["ai_explanation"] is None, kpi_key
+        assert item["explanation_status"] == "NOT_GENERATED", kpi_key
+        assert item["email_status"] == "NOT_SENT", kpi_key
+
+
 def test_kpi_handbook_extraction_persists_and_drives_real_detection(company_b, monkeypatch):
     """The handbook JSON is validated, approved, and consumed by the real engine."""
 

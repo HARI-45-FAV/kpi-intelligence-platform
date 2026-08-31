@@ -36,7 +36,7 @@ class ApiModel(BaseModel):
 # ---------------------------------------------------------------------------
 class RegisterRequest(ApiModel):
     email: EmailStr
-    password: str = Field(min_length=10, max_length=200)
+    password: str = Field(min_length=6, max_length=200)
     full_name: str = Field(min_length=1, max_length=200)
 
     @field_validator("password")
@@ -195,7 +195,7 @@ class CalendarOut(ApiModel):
 class MemberInvite(ApiModel):
     email: EmailStr
     full_name: str | None = Field(default=None, max_length=200)
-    password: str | None = Field(default=None, min_length=10, max_length=200)
+    password: str | None = Field(default=None, min_length=6, max_length=200)
     role_key: str = Field(min_length=1, max_length=40)
     row_scope: dict[str, Any] = Field(default_factory=dict)
     denied_columns: list[str] = Field(default_factory=list)
@@ -915,11 +915,18 @@ class ResultItemOut(ApiModel):
     expected_value: float | None
     deviation_absolute: float | None
     deviation_pct: float | None
+    # Carried so the screen can render the measurement in the KPI's own unit
+    # rather than guessing money from the KPI's name.
+    unit: str | None = None
+    currency: str | None = None
     top_driver: str | None = None
+    # ``ai_explanation`` means a model wrote this sentence. It stays null when no
+    # explanation was generated, and the deterministic ``top_driver`` headline is
+    # what the screen falls back to -- the two are never conflated.
     ai_explanation: str | None = None
-    explanation_status: str = "READY"
+    explanation_status: str = "NOT_GENERATED"
     explanation_generated_at: datetime | None = None
-    email_status: str = "EMAIL_SENT"
+    email_status: str = "NOT_SENT"
 
 
 # ---------------------------------------------------------------------------

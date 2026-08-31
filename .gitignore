@@ -2,6 +2,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv*/
 .pytest_cache/
 .ruff_cache/
 
@@ -11,6 +12,7 @@ backend/tests/_tmp/
 # pytest's default tmp root is a junction under AppData that Windows refuses to
 # unlink at teardown, so runs here pass --basetemp=.pytest-tmp instead.
 backend/.pytest-tmp/
+backend/.pytmp*/
 *.log
 
 # Secrets — never commit

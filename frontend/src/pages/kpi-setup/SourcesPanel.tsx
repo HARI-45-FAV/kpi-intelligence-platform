@@ -38,6 +38,7 @@ import {
   Metric,
   Modal,
   Panel,
+  PasswordInput,
   SectionHeader,
   SectionHelp,
   Spinner,
@@ -581,15 +582,28 @@ function AddSourceModal({
                 required={field.required}
                 hint={field.help_text || undefined}
               >
-                <input
-                  className={`field ${field.name === 'project_url' ? 'mono' : ''}`}
-                  type={field.kind === 'password' ? 'password' : field.kind === 'number' ? 'number' : 'text'}
-                  value={values[field.name] ?? ''}
-                  onChange={(e) => setValues((p) => ({ ...p, [field.name]: e.target.value }))}
-                  placeholder={field.placeholder}
-                  required={field.required}
-                  autoComplete="off"
-                />
+                {/* A connector secret is typed once and rarely memorable, so it
+                    gets the same reveal toggle as every other masked field. */}
+                {field.kind === 'password' ? (
+                  <PasswordInput
+                    value={values[field.name] ?? ''}
+                    onChange={(e) => setValues((p) => ({ ...p, [field.name]: e.target.value }))}
+                    placeholder={field.placeholder}
+                    required={field.required}
+                    autoComplete="off"
+                    toggleLabel={field.label.toLowerCase()}
+                  />
+                ) : (
+                  <input
+                    className={`field ${field.name === 'project_url' ? 'mono' : ''}`}
+                    type={field.kind === 'number' ? 'number' : 'text'}
+                    value={values[field.name] ?? ''}
+                    onChange={(e) => setValues((p) => ({ ...p, [field.name]: e.target.value }))}
+                    placeholder={field.placeholder}
+                    required={field.required}
+                    autoComplete="off"
+                  />
+                )}
               </Field>
             ))
           )}

@@ -28,7 +28,13 @@ import type {
   CompanyDocument,
 } from '../../api/types'
 import { useAuth } from '../../auth/AuthContext'
-import { formatDateTime, monthName, titleCase, weekdayName } from '../../components/format'
+import {
+  formatDateTime,
+  formatKpiName,
+  monthName,
+  titleCase,
+  weekdayName,
+} from '../../components/format'
 import {
   Alert,
   DefinitionRow,
@@ -148,7 +154,9 @@ export default function ComparisonPolicyPanel() {
                   )}
                 </div>
                 <div className="mt-1 text-[11px] text-slate-500">
-                  {row.scope === 'kpi' ? `Applies to ${row.kpi_key}` : 'Applies to all KPIs'}
+                  {row.scope === 'kpi'
+                    ? `Applies to ${formatKpiName(row.kpi_key)}`
+                    : 'Applies to all KPIs'}
                   {row.enabled_slots.length
                     ? ` · ${row.enabled_slots.length} rule(s) enabled`
                     : ' · no rule enabled yet'}
@@ -745,7 +753,9 @@ function ConfigDrawer({
 
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge status={row.status} />
-            <span className="chip">{row.scope === 'kpi' ? `KPI: ${row.kpi_key}` : 'All KPIs'}</span>
+            <span className="chip">
+              {row.scope === 'kpi' ? `KPI: ${formatKpiName(row.kpi_key)}` : 'All KPIs'}
+            </span>
             <span className="chip">{titleCase(row.source)}</span>
             {row.extraction_model && <span className="chip">{row.extraction_model}</span>}
           </div>

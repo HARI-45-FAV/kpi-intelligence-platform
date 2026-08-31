@@ -1,6 +1,6 @@
 /** Small presentational primitives shared across the app. */
 
-import { useState, type ReactNode } from 'react'
+import { useState, type InputHTMLAttributes, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 
 export function Panel({
@@ -132,6 +132,88 @@ export function Field({
       {children}
       {hint && <div className="hint">{hint}</div>}
     </label>
+  )
+}
+
+/**
+ * A password field with a reveal toggle.
+ *
+ * Masked on arrival, because a password left on screen is a password anyone
+ * behind the reader can copy. The eye reveals it on demand, which is what stops
+ * people mistyping a long passphrase into a field they cannot check. The icon
+ * shows the action available rather than the state, so an open eye means
+ * "show me" and a crossed-out eye means "hide it again".
+ *
+ * `type` belongs to this component, hence its absence from the accepted props.
+ * Everything else an `<input>` takes — `value`, `onChange`, `required`,
+ * `minLength`, `autoComplete`, `autoFocus` — passes straight through, so this
+ * drops into a `Field` exactly where a plain masked `<input>` sat.
+ */
+export function PasswordInput({
+  className = 'field',
+  toggleLabel = 'password',
+  ...props
+}: Omit<InputHTMLAttributes<HTMLInputElement>, 'type'> & { toggleLabel?: string }) {
+  const [visible, setVisible] = useState(false)
+  const action = visible ? `Hide ${toggleLabel}` : `Show ${toggleLabel}`
+  return (
+    <div className="relative">
+      <input {...props} type={visible ? 'text' : 'password'} className={`${className} pr-10`} />
+      <button
+        type="button"
+        // These fields live inside Field's <label>, where a click would hand
+        // focus to the input and move the caret to its end. Suppressing mousedown
+        // leaves the caret where the reader left it, so typing continues.
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => setVisible((current) => !current)}
+        aria-label={action}
+        title={action}
+        className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-500 transition hover:bg-white/70 hover:text-slate-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/50"
+      >
+        {visible ? <EyeOffIcon /> : <EyeIcon />}
+      </button>
+    </div>
+  )
+}
+
+/* No icon package is installed, so the two glyphs are inline and take their
+   colour from the button around them. */
+
+function EyeIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M1.8 10S4.9 4.7 10 4.7 18.2 10 18.2 10 15.1 15.3 10 15.3 1.8 10 1.8 10Z" />
+      <circle cx="10" cy="10" r="2.5" />
+    </svg>
+  )
+}
+
+function EyeOffIcon() {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      aria-hidden="true"
+      className="h-4 w-4"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M8.2 5A8 8 0 0 1 10 4.7c5.1 0 8.2 5.3 8.2 5.3a15.4 15.4 0 0 1-2.3 3" />
+      <path d="M4.7 6.3A15.3 15.3 0 0 0 1.8 10s3.1 5.3 8.2 5.3a8 8 0 0 0 3-.55" />
+      <path d="M8.3 8.4a2.5 2.5 0 0 0 3.4 3.4" />
+      <path d="M3 3l14 14" />
+    </svg>
   )
 }
 

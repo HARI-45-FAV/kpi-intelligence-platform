@@ -28,7 +28,7 @@ import type {
   ValidationReport,
 } from '../../api/types'
 import { useAuth } from '../../auth/AuthContext'
-import { formatDateTime, formatNumber, titleCase } from '../../components/format'
+import { formatDateTime, formatKpiName, formatNumber, titleCase } from '../../components/format'
 import {
   Alert,
   DefinitionRow,
@@ -422,7 +422,9 @@ function CompanyDefinitionRow({
   return (
     <div className="border-b border-ink-800 px-4 py-3 last:border-0 transition-colors hover:bg-white/45">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="min-w-[10rem] flex-1 font-medium text-slate-100">{definition.name}</span>
+        <span className="min-w-[10rem] flex-1 font-medium text-slate-100">
+          {formatKpiName(definition.name)}
+        </span>
         {!definition.is_active && <span className="chip text-slate-500">inactive in source</span>}
         <StatusBadge
           status={resolved ? 'ACTIVE' : 'WARNING'}
@@ -712,7 +714,7 @@ function ValidationPanel({
                     onClick={() => onOpenKpi(kpi.id)}
                   >
                     <div className="truncate text-[15px] font-semibold text-slate-100">
-                      {kpi.name}
+                      {formatKpiName(kpi.name)}
                     </div>
                   </button>
                   <StatusBadge
@@ -877,7 +879,9 @@ function ProposalRow({
   return (
     <div className="border-b border-ink-800 px-4 py-3 last:border-0">
       <div className="flex flex-wrap items-center gap-3">
-        <span className="min-w-[9rem] font-medium text-slate-100">{proposal.name}</span>
+        <span className="min-w-[9rem] font-medium text-slate-100">
+          {formatKpiName(proposal.name)}
+        </span>
         <span className="mono flex-1 truncate text-slate-400">{proposal.formula_expression}</span>
         <span className="chip">{proposal.kind === 'RATIO' ? 'ratio' : 'simple'}</span>
         <button className="btn-ghost btn-xs" onClick={() => setExpanded((v) => !v)}>
@@ -1033,7 +1037,7 @@ function KpiDrawer({
     panel: 'kpi_setup',
     kpiId,
     kpiVersion: contract?.version ?? null,
-    label: detail.data?.definition.name ?? null,
+    label: detail.data ? formatKpiName(detail.data.definition.name) : null,
   })
 
   const refresh = async () => {
@@ -1048,7 +1052,7 @@ function KpiDrawer({
       width="max-w-4xl"
       title={
         <span className="flex items-center gap-2">
-          {detail.data?.definition.name ?? 'KPI'}
+          {detail.data ? formatKpiName(detail.data.definition.name) : 'KPI'}
           {contract && <StatusBadge status={contract.status} />}
           {contract && <span className="chip">v{contract.version}</span>}
         </span>
@@ -1145,7 +1149,7 @@ function KpiDrawer({
                 className="btn-ghost btn-xs"
                 onClick={() =>
                   openPanel(
-                    `Explain the ${detail.data?.definition.name ?? 'KPI'} contract at version ` +
+                    `Explain the ${detail.data ? formatKpiName(detail.data.definition.name) : 'KPI'} contract at version ` +
                       `${contract.version}: what it measures, how it is calculated, its lineage, ` +
                       `and what its validation found.`,
                   )

@@ -2,23 +2,57 @@ import { useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { ResultHistoryResponse, ResultHistoryItem } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatCompact, formatCurrency, formatDate, formatNumber } from '../components/format'
+import { formatCompact, formatCurrency, formatDate, formatKpiName } from '../components/format'
 import { Alert, EmptyState, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
 import { useResource } from '../components/useResource'
 
 const FILTERS = ['all', 'NORMAL', 'ABNORMAL', 'LOW_CONFIDENCE'] as const
 
-function formatValue(item: ResultHistoryItem): string {
-  if (item.actual_value === null || item.actual_value === undefined) return '—'
-  if (item.kpi_key.toLowerCase().includes('revenue') || item.kpi_key.toLowerCase().includes('sales')) {
-    return formatCurrency(item.actual_value, 'USD', true)
-  }
-  return formatCompact(item.actual_value)
+/**
+ * A measurement in the KPI's own unit — the same rule Monitoring applies.
+ *
+ * The row carries `currency` and `unit` from the stored run, so the unit is read,
+ * never inferred. Guessing money by looking for "revenue" or "sales" in the KPI
+ * key mislabels every other currency KPI, and pinning the symbol to USD prints
+ * dollars for a company whose books are in something else.
+ */
+function formatValue(item: ResultHistoryItem, value: number | null | undefined): string {
+  if (value === null || value === undefined) return '—'
+  if (item.currency) return formatCurrency(value, item.currency, true)
+  if (item.unit === 'currency') return formatCurrency(value, 'INR', true)
+  return formatCompact(value)
 }
 
 function formatDeviation(item: ResultHistoryItem): string {
   if (item.deviation_pct === null || item.deviation_pct === undefined) return '—'
   return `${item.deviation_pct >= 0 ? '+' : ''}${item.deviation_pct.toFixed(1)}%`
+}
+
+/**
+ * The sentence to show for a row.
+ *
+ * A generated explanation is used when one exists. Nothing in the platform writes
+ * them today — explanation generation belongs to the Copilot and is off by
+ * default — so in practice this is the engine's deterministic headline, which is
+ * stored for every run. Showing that beats the empty column this page used to
+ * render on every single row.
+ */
+function summaryText(item: ResultHistoryItem): string | null {
+  return item.ai_explanation ?? item.top_driver ?? null
+}
+
+/**
+ * The small caption under a KPI's name.
+ *
+ * A registered KPI has both a key and a display name, and for many of them the
+ * two say the same thing once the key is read as English. Printing the key only
+ * when it adds something keeps the row from repeating itself, and means no raw
+ * `snake_case` identifier reaches the page either way.
+ */
+function subtitleFor(item: ResultHistoryItem): string | null {
+  const name = formatKpiName(item.kpi_name)
+  const key = formatKpiName(item.kpi_key)
+  return key === name ? null : key
 }
 
 export default function Results() {
@@ -39,7 +73,9 @@ export default function Results() {
     const base = history.data?.items ?? []
     return base.filter((item) => {
       const matchesStatus = statusFilter === 'all' || item.status === statusFilter
-      const haystack = `${item.kpi_name} ${item.kpi_key} ${item.status}`.toLowerCase()
+      // Both spellings are searchable: what the reader sees, and the key they
+      // may know the KPI by from the registry.
+      const haystack = `${formatKpiName(item.kpi_name)} ${item.kpi_name} ${item.kpi_key} ${item.status}`.toLowerCase()
       const matchesQuery = !query || haystack.includes(query.toLowerCase())
       return matchesStatus && matchesQuery
     })
@@ -140,24 +176,26 @@ export default function Results() {
                   <th className="table-head">Expected</th>
                   <th className="table-head">Deviation</th>
                   <th className="table-head">Status</th>
-                  <th className="table-head">AI summary</th>
+                  <th className="table-head">Summary</th>
                 </tr>
               </thead>
               <tbody>
                 {items.map((item) => (
                   <tr key={item.id} className="border-b border-ink-800/80 align-top hover:bg-white/40">
                     <td className="table-cell min-w-[12rem]">
-                      <div className="font-medium text-slate-100">{item.kpi_name}</div>
-                      <div className="mt-1 text-[11px] uppercase tracking-wider text-slate-500">
-                        {item.kpi_key}
-                      </div>
+                      <div className="font-medium text-slate-100">{formatKpiName(item.kpi_name)}</div>
+                      {subtitleFor(item) && (
+                        <div className="mt-1 text-[11px] uppercase tracking-wider text-slate-500">
+                          {subtitleFor(item)}
+                        </div>
+                      )}
                     </td>
                     <td className="table-cell text-slate-300">{formatDate(item.target_date)}</td>
-                    <td className="table-cell text-slate-200">{formatValue(item)}</td>
+                    <td className="table-cell text-slate-200">
+                      {formatValue(item, item.actual_value)}
+                    </td>
                     <td className="table-cell text-slate-300">
-                      {item.expected_value === null || item.expected_value === undefined
-                        ? '—'
-                        : formatNumber(item.expected_value, 2)}
+                      {formatValue(item, item.expected_value)}
                     </td>
                     <td className="table-cell text-slate-200">{formatDeviation(item)}</td>
                     <td className="table-cell">
@@ -166,12 +204,12 @@ export default function Results() {
                     <td className="table-cell min-w-[16rem]">
                       <div className="flex items-center gap-2">
                         <div className="line-clamp-2 max-w-md text-sm text-slate-300">
-                          {item.ai_explanation ?? 'No explanation stored for this run.'}
+                          {summaryText(item) ?? 'No summary stored for this run.'}
                         </div>
-                        {item.ai_explanation && (
+                        {summaryText(item) && (
                           <button
                             type="button"
-                            className="btn btn-xs btn-ghost"
+                            className="btn btn-xs btn-ghost shrink-0"
                             onClick={() => setSelected(item)}
                           >
                             View
@@ -190,17 +228,25 @@ export default function Results() {
       <Modal
         open={Boolean(selected)}
         onClose={() => setSelected(null)}
-        title={selected ? `${selected.kpi_name} · ${formatDate(selected.target_date)}` : 'Result details'}
+        title={
+          selected
+            ? `${formatKpiName(selected.kpi_name)} · ${formatDate(selected.target_date)}`
+            : 'Result details'
+        }
         width="max-w-2xl"
       >
         {selected && (
           <div className="space-y-5 text-sm text-slate-300">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
-                  {selected.kpi_key}
+                {subtitleFor(selected) && (
+                  <div className="text-[11px] uppercase tracking-[0.16em] text-slate-500">
+                    {subtitleFor(selected)}
+                  </div>
+                )}
+                <div className="mt-1 text-lg font-semibold text-slate-100">
+                  {formatKpiName(selected.kpi_name)}
                 </div>
-                <div className="mt-1 text-lg font-semibold text-slate-100">{selected.kpi_name}</div>
               </div>
               <StatusBadge status={selected.status} />
             </div>
@@ -208,28 +254,35 @@ export default function Results() {
             <div className="grid gap-3 sm:grid-cols-2">
               <div className="rounded-xl border border-white/80 bg-white/45 p-3">
                 <div className="text-[11px] uppercase tracking-wider text-slate-500">Actual</div>
-                <div className="mt-2 text-xl font-semibold text-slate-100">{formatValue(selected)}</div>
+                <div className="mt-2 text-xl font-semibold text-slate-100">
+                  {formatValue(selected, selected.actual_value)}
+                </div>
               </div>
               <div className="rounded-xl border border-white/80 bg-white/45 p-3">
                 <div className="text-[11px] uppercase tracking-wider text-slate-500">Expected</div>
                 <div className="mt-2 text-xl font-semibold text-slate-100">
-                  {selected.expected_value === null || selected.expected_value === undefined
-                    ? '—'
-                    : formatNumber(selected.expected_value, 2)}
+                  {formatValue(selected, selected.expected_value)}
                 </div>
               </div>
             </div>
 
             <div className="rounded-xl border border-white/80 bg-white/45 p-3">
-              <div className="text-[11px] uppercase tracking-wider text-slate-500">AI explanation</div>
+              <div className="text-[11px] uppercase tracking-wider text-slate-500">
+                {selected.ai_explanation ? 'AI explanation' : 'What the platform found'}
+              </div>
               <div className="mt-2 leading-relaxed text-slate-300">
-                {selected.ai_explanation ?? 'No explanation is stored for this result yet.'}
+                {summaryText(selected) ?? 'No summary is stored for this result yet.'}
               </div>
             </div>
 
             <div className="flex flex-wrap gap-2 text-[11px] uppercase tracking-wider text-slate-500">
               <span className="chip">Deviation {formatDeviation(selected)}</span>
-              <span className="chip">Explanation {selected.explanation_status}</span>
+              {/* Only claimed when a model really wrote one: the endpoint reports
+                  NOT_GENERATED otherwise, and asserting "Explanation READY" on
+                  every historical row was simply untrue. */}
+              {selected.ai_explanation && (
+                <span className="chip">Explanation {selected.explanation_status}</span>
+              )}
               {selected.explanation_generated_at && (
                 <span className="chip">
                   Generated {formatDate(selected.explanation_generated_at)}

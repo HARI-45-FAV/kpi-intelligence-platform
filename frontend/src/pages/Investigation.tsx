@@ -62,7 +62,13 @@ import type {
   ManualAnalysisResponse,
 } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
-import { formatCompact, formatCurrency, formatDate, formatNumber } from '../components/format'
+import {
+  formatCompact,
+  formatCurrency,
+  formatDate,
+  formatKpiName,
+  formatNumber,
+} from '../components/format'
 import { Alert, EmptyState, Field, Metric, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
@@ -359,7 +365,7 @@ function ContributionView({
       {result.path.length > 0 && (
         <nav className="flex flex-wrap items-center gap-1 text-xs text-slate-500">
           <button type="button" className="underline" onClick={() => onBreadcrumb(0)}>
-            All {result.kpi}
+            All {formatKpiName(result.kpi)}
           </button>
           {result.path.map((step, index) => (
             <span key={`${step.dimension}-${step.value}`} className="flex items-center gap-1">
@@ -492,7 +498,7 @@ function EntityView({
         title={`${result.dimension}: ${result.entity}`}
         actions={
           <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-            {result.kpi}
+            {formatKpiName(result.kpi)}
             {result.target_date && ` · ${formatDate(result.target_date)}`}
             {/* One status, on the thing it was asked about. */}
             {judged && <StatusBadge status={result.status} />}
@@ -558,7 +564,7 @@ function EntityView({
               <Metric
                 label="Share of the KPI"
                 value={`${formatNumber(Math.abs(result.share_of_kpi_pct))}%`}
-                hint={`How much of ${result.kpi} on this date this ${result.dimension} accounts for. A size, not a cause.`}
+                hint={`How much of ${formatKpiName(result.kpi)} on this date this ${result.dimension} accounts for. A size, not a cause.`}
               />
             )}
           </div>
@@ -706,10 +712,11 @@ function EntityPicker({
   onClear: () => void
   pending: boolean
 }) {
-  const leader = gate.entities.reduce(
-    (max, item) => Math.max(max, Math.abs(item.value ?? 0)),
-    0,
-  )
+  // A response that arrives without the list at all is treated as an empty one:
+  // the panel then says "nothing to choose from", which is the truthful reading
+  // and is a great deal better than the screen going blank on a reduce.
+  const entities = gate.entities ?? []
+  const leader = entities.reduce((max, item) => Math.max(max, Math.abs(item.value ?? 0)), 0)
 
   return (
     <Panel
@@ -722,19 +729,19 @@ function EntityPicker({
           </button>
         ) : (
           <span className="text-[11px] text-slate-500">
-            {gate.entities.length} shown · read from this KPI's own source
+            {entities.length} shown · read from this KPI's own source
           </span>
         )
       }
     >
-      {gate.entities.length === 0 ? (
+      {entities.length === 0 ? (
         <EmptyState
           title="Nothing to choose from"
           description={`This KPI has no ${gate.dimension ?? 'dimension'} values on ${formatDate(gate.target_date)} that are within your access scope.`}
         />
       ) : (
         <div>
-          {gate.entities.map((item) => {
+          {entities.map((item) => {
             const isSelected = item.entity === selected
             return (
               <div
@@ -904,7 +911,7 @@ export default function Investigation() {
     selectedDate: date,
     dimension: contribution?.result.dimension ?? currentDimension?.name ?? null,
     selectedEntity: path.length > 0 ? path[path.length - 1].value : null,
-    label: contract?.name ?? null,
+    label: contract ? formatKpiName(contract.name) : null,
   })
 
   const runContribution = useCallback(
@@ -1045,7 +1052,7 @@ export default function Investigation() {
             >
               {contractList.map((item) => (
                 <option key={item.kpi_id} value={item.kpi_id}>
-                  {item.name} (v{item.version})
+                  {formatKpiName(item.name)} (v{item.version})
                 </option>
               ))}
             </select>
@@ -1154,7 +1161,7 @@ export default function Investigation() {
         {noDimensions && (
           <div className="mt-3">
             <Alert tone="warn">
-              {contract?.name ?? 'This KPI'} has no approved dimension to break down by. A
+              {contract ? formatKpiName(contract.name) : 'This KPI'} has no approved dimension to break down by. A
               breakdown reads a dimension registered with the KPI and marked allowed; the platform
               does not choose a column on its own.
             </Alert>

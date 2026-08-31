@@ -103,6 +103,42 @@ export function titleCase(value: string | null | undefined): string {
     .replace(/\b\w/g, (c) => c.toUpperCase())
 }
 
+/**
+ * A KPI or metric name as a person should read it.
+ *
+ * Names reach the browser in whatever shape the KPI was registered in —
+ * `average_order_value`, `total-revenue`, `orders.count` — and a technical key
+ * is not something to put in front of a business reader. Separators become
+ * spaces and every word gets a capital: `average_order_value` reads as
+ * `Average Order Value`.
+ *
+ * Two kinds of word are left exactly as written, because "Title Case" applied
+ * blindly makes them worse:
+ *
+ *   - a short all-caps token, which is an acronym (`MRR`, `AOV`, `GMV`) and
+ *     must not become `Mrr`;
+ *   - a word that already mixes cases (`eCommerce`), which someone typed
+ *     deliberately.
+ *
+ * So a display name an administrator authored by hand survives untouched, and
+ * only a raw key is rewritten. This is presentation only — `kpi_key` is still
+ * what gets sent back to the API, filtered on and matched against a contract.
+ */
+export function formatKpiName(value: string | null | undefined, fallback = '—'): string {
+  if (value === null || value === undefined) return fallback
+  const words = value.trim().replace(/[_\-.]+/g, ' ').split(/\s+/).filter(Boolean)
+  if (words.length === 0) return fallback
+  return words.map(formatKpiWord).join(' ')
+}
+
+function formatKpiWord(word: string): string {
+  const hasLower = /[a-z]/.test(word)
+  const hasUpper = /[A-Z]/.test(word)
+  // An acronym, or a deliberately mixed-case word: keep the author's capitals.
+  if ((hasUpper && !hasLower && word.length <= 4) || (hasUpper && hasLower)) return word
+  return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase()
+}
+
 const MONTHS = [
   'January', 'February', 'March', 'April', 'May', 'June',
   'July', 'August', 'September', 'October', 'November', 'December',

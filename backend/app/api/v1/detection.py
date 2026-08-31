@@ -575,6 +575,40 @@ def _run_out(run: DetectionRun) -> DetectionRunOut:
     return DetectionRunOut.model_validate(run)
 
 
+def _result_item(run: DetectionRun, explanation: AgentRunExplanation | None) -> ResultItemOut:
+    """One stored result, with a generated explanation only if one really exists.
+
+    Nothing in the platform writes ``agent_run_explanations`` today -- explanation
+    generation is the Copilot's job and it is off by default -- so the common case
+    is ``explanation is None``. That case reports ``NOT_GENERATED`` and
+    ``NOT_SENT`` rather than defaulting to ``READY`` and ``EMAIL_SENT``: the
+    screen previously claimed every historical row had a finished explanation and
+    a delivered email, and this platform has no email engine at all.
+
+    ``top_driver`` is the engine's own deterministic headline and is always
+    present, which is what the screen shows instead.
+    """
+
+    return ResultItemOut(
+        id=run.id,
+        kpi_key=run.kpi_key,
+        kpi_name=run.kpi_name,
+        target_date=run.target_date,
+        status=run.status,
+        actual_value=run.actual_value,
+        expected_value=run.expected_value,
+        deviation_absolute=run.deviation_absolute,
+        deviation_pct=run.deviation_pct,
+        unit=run.unit,
+        currency=run.currency,
+        top_driver=run.headline,
+        ai_explanation=explanation.explanation_text if explanation else None,
+        explanation_status=explanation.status if explanation else "NOT_GENERATED",
+        explanation_generated_at=explanation.generated_at if explanation else None,
+        email_status=explanation.email_status if explanation else "NOT_SENT",
+    )
+
+
 @router.get(
     "/companies/{company_id}/results",
     summary="Aggregated agent-run result history",
@@ -610,11 +644,14 @@ def list_result_history(
             "items": [],
         }
 
+    # Deduplicated: a page of 500 rows is only a handful of distinct KPIs and
+    # dates, and two 500-element IN lists would push past SQLite's bind-parameter
+    # ceiling on older builds.
     explanation_rows = session.scalars(
         select(AgentRunExplanation).where(
             AgentRunExplanation.company_id == access.company.id,
-            AgentRunExplanation.kpi_key.in_([run.kpi_key for run in runs]),
-            AgentRunExplanation.target_date.in_([run.target_date for run in runs]),
+            AgentRunExplanation.kpi_key.in_({run.kpi_key for run in runs}),
+            AgentRunExplanation.target_date.in_({run.target_date for run in runs}),
         )
     ).all()
     explanations = {
@@ -622,38 +659,7 @@ def list_result_history(
     }
 
     items = [
-        ResultItemOut(
-            id=run.id,
-            kpi_key=run.kpi_key,
-            kpi_name=run.kpi_name,
-            target_date=run.target_date,
-            status=run.status,
-            actual_value=run.actual_value,
-            expected_value=run.expected_value,
-            deviation_absolute=run.deviation_absolute,
-            deviation_pct=run.deviation_pct,
-            top_driver=run.headline,
-            ai_explanation=(
-                explanations.get((run.kpi_key, run.target_date)).explanation_text
-                if (run.kpi_key, run.target_date) in explanations
-                else None
-            ),
-            explanation_status=(
-                explanations.get((run.kpi_key, run.target_date)).status
-                if (run.kpi_key, run.target_date) in explanations
-                else "READY"
-            ),
-            explanation_generated_at=(
-                explanations.get((run.kpi_key, run.target_date)).generated_at
-                if (run.kpi_key, run.target_date) in explanations
-                else None
-            ),
-            email_status=(
-                explanations.get((run.kpi_key, run.target_date)).email_status
-                if (run.kpi_key, run.target_date) in explanations
-                else "EMAIL_SENT"
-            ),
-        )
+        _result_item(run, explanations.get((run.kpi_key, run.target_date)))
         for run in runs
     ]
 

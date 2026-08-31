@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useAuth } from '../auth/AuthContext'
-import { Alert, Field } from '../components/ui'
+import { Alert, Field, PasswordInput } from '../components/ui'
 import { useAction } from '../components/useResource'
 
 export default function SignIn() {
@@ -79,16 +79,18 @@ export default function SignIn() {
           <Field
             label="Password"
             required
-            hint={mode === 'register' ? 'At least 12 characters.' : undefined}
+            hint={
+              mode === 'register'
+                ? 'At least 6 characters, using two of: lowercase, uppercase, digits, symbols.'
+                : undefined
+            }
           >
-            <input
-              type="password"
-              className="field"
+            <PasswordInput
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
               required
-              minLength={mode === 'register' ? 12 : undefined}
+              minLength={mode === 'register' ? 6 : undefined}
             />
           </Field>
 

@@ -26,6 +26,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { api } from '../api/client'
 import type { CopilotChatResponse, CopilotEvidence, CopilotStatus } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import { formatKpiName } from '../components/format'
 import { Alert, Drawer, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilot } from './CopilotProvider'
@@ -58,7 +59,10 @@ interface Turn {
 }
 
 /** Starting points, built from what the screen already knows. */
-function suggestions(kpiName: string | null | undefined): string[] {
+function suggestions(rawName: string | null | undefined): string[] {
+  // Screens pass a readable label already; formatting again is a no-op and keeps
+  // a raw key out of the prompt if some future screen forgets.
+  const kpiName = rawName ? formatKpiName(rawName) : rawName
   if (kpiName) {
     return [
       `How is ${kpiName} calculated, and from which columns?`,

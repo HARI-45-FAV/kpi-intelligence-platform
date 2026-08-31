@@ -22,6 +22,7 @@ import {
   HelpSection,
   Modal,
   Panel,
+  PasswordInput,
   SectionHeader,
   SectionHelp,
   Spinner,
@@ -655,14 +656,14 @@ function InviteModal({
 
         <Field
           label="Initial password"
-          hint="Only needed if this person does not already have an account."
+          hint="Only needed if this person does not already have an account. At least 6 characters, using two of: lowercase, uppercase, digits, symbols."
         >
-          <input
-            type="password"
-            className="field"
+          <PasswordInput
             value={form.password}
             onChange={(e) => set('password', e.target.value)}
             autoComplete="new-password"
+            minLength={6}
+            toggleLabel="initial password"
           />
         </Field>
 

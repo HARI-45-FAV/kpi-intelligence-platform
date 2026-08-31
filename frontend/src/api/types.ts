@@ -934,7 +934,11 @@ export interface ResultHistoryItem {
   expected_value: number | null
   deviation_absolute: number | null
   deviation_pct: number | null
+  unit?: string | null
+  currency?: string | null
+  /** The engine's own deterministic headline. Always present. */
   top_driver: string | null
+  /** Set only when a model actually generated an explanation for this row. */
   ai_explanation: string | null
   explanation_status: string
   explanation_generated_at?: string | null
