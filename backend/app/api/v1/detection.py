@@ -29,11 +29,12 @@ from contextlib import contextmanager
 from datetime import date
 
 from fastapi import APIRouter, Depends, Request, status
-from sqlalchemy import func, select
+from sqlalchemy import and_, false, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.connectors.base import DataSourceConnector
 from app.connectors.registry import build_connector
+from app.copilot import explain as explain_service
 from app.copilot.text import extract_text, unreadable_reason
 from app.core.clock import utcnow
 from app.core.deps import (
@@ -44,7 +45,13 @@ from app.core.deps import (
     require_permissions,
     resolve_access,
 )
-from app.core.errors import Conflict, NotFound, PlatformError, ValidationFailure
+from app.core.errors import (
+    Conflict,
+    NotFound,
+    PermissionDenied,
+    PlatformError,
+    ValidationFailure,
+)
 from app.core.telemetry import llm_usage_of, usage_of
 from app.models.base import (
     BUCKET_CONFIG_TRANSITIONS,
@@ -54,6 +61,7 @@ from app.models.base import (
 )
 from app.models.detection import AgentRun, AgentRunExplanation, CompanyBucketConfig, DetectionRun
 from app.models.document import CompanyDocument
+from app.models.investigation import InvestigationFinding
 from app.models.kpi import KpiDefinition, KpiVersion
 from app.models.source import DataSource
 from app.schemas import (
@@ -65,11 +73,13 @@ from app.schemas import (
     DetectionRunOut,
     KpiTransitionRequest,
     ResultItemOut,
+    ResultExplainRequest,
     ResultSummaryOut,
     RunDetectionRequest,
 )
 from app.services import audit
 from app.services import documents as document_service
+from app.services import run_email
 from app.services.bucket_config import BucketConfig, describe_buckets, validate_bucket_config
 from app.services.bucket_extraction import extract_bucket_config
 from app.services.detection import (
@@ -398,6 +408,85 @@ def run_detection_flat(
     return _response(outcome, run, access)
 
 
+# ---------------------------------------------------------------------------
+# One business date, one Agent Run
+# ---------------------------------------------------------------------------
+# The states that mean "this date has been evaluated and the answer is on file".
+# A run still ``RUNNING`` is not one of them: it has no complete set of results to
+# return, so a caller arriving mid-execution is allowed to start its own rather
+# than being handed a half-finished day.
+COMPLETED_RUN_STATES: tuple[str, ...] = ("COMPLETED", "COMPLETED_WITH_ERRORS")
+
+ALREADY_COMPLETED_MESSAGE = "Run already completed for this date."
+
+
+def _completed_agent_run(
+    session: Session, access: AccessContext, target_date: date
+) -> AgentRun | None:
+    """The most recent completed Agent Run for this company and business date.
+
+    Most recent rather than first: when a re-run has been authorised, the latest
+    reading is the one the screen should open on, while the earlier rows stay
+    queryable through ``/agent-runs`` and remain attached to their own results.
+    """
+
+    return session.scalars(
+        select(AgentRun)
+        .where(
+            AgentRun.company_id == access.company.id,
+            AgentRun.target_date == target_date,
+            AgentRun.status.in_(COMPLETED_RUN_STATES),
+        )
+        .order_by(AgentRun.started_at.desc())
+        .limit(1)
+    ).first()
+
+
+def _replay_agent_run(session: Session, access: AccessContext, agent_run: AgentRun) -> dict:
+    """A completed date, answered from storage in the shape a fresh run returns.
+
+    Byte-for-byte the same envelope as an execution, so the caller has one response
+    to render and only ``already_completed`` to branch on. The results come from
+    ``_response_from_stored`` -- the same reader ``/agent-runs/{id}`` uses -- so a
+    replayed day and a reopened day cannot disagree about what the platform found.
+
+    Nothing here writes, and nothing re-reads the company's source.
+    """
+
+    stored = list(
+        session.scalars(
+            select(DetectionRun)
+            .where(
+                DetectionRun.company_id == access.company.id,
+                DetectionRun.agent_run_id == agent_run.id,
+            )
+            .order_by(DetectionRun.kpi_name)
+        )
+    )
+    results = [_response_from_stored(run, access) for run in stored]
+    # The skips are replayed from the run's own error log rather than recomputed:
+    # why a KPI was left out on the day is part of what was recorded.
+    skipped = [
+        {
+            "kpi_id": str(entry.get("kpi_id", "")),
+            "reason": str(entry.get("reason", "")),
+        }
+        for entry in (agent_run.errors or [])
+        if isinstance(entry, dict)
+    ]
+    return {
+        "target_date": agent_run.target_date,
+        "agent_run_id": agent_run.id,
+        "agent_run": AgentRunOut.model_validate(agent_run).model_dump(),
+        "results": results,
+        "skipped": skipped,
+        "counts": {"evaluated": len(results), "skipped": len(skipped)},
+        "already_completed": True,
+        "executed": False,
+        "message": ALREADY_COMPLETED_MESSAGE,
+    }
+
+
 @router.post(
     "/companies/{company_id}/run-detection/batch",
     summary="Evaluate several KPIs on one date",
@@ -413,6 +502,22 @@ def run_detection_batch(
     A KPI that cannot be evaluated -- unapproved, unbound, wrong grain -- is
     reported beside the ones that could, rather than failing the whole request:
     a dashboard should render what it can and say plainly what it could not.
+
+    **A date is evaluated once.** An Agent Run belongs to a business date, and a
+    date that already has a completed one is answered from what was stored rather
+    than measured again. That is not merely a saving: re-reading a source days
+    later can return different rows -- a late correction, a backfill, a deleted
+    record -- so a second execution would quietly replace the reading the business
+    already acted on. The stored results are returned instead, flagged with
+    ``already_completed`` so the caller can say so rather than implying work
+    happened.
+
+    ``force_rerun`` is the deliberate exception, for the case where the source
+    genuinely has changed and someone wants a fresh reading. It executes and
+    records a **new** Agent Run; the original row and every ``DetectionRun``
+    hanging off it are left exactly as they were, because a historical result is a
+    record of what the platform said at the time and overwriting it would erase
+    the answer someone made a decision on.
     """
 
     if payload.company_id and payload.company_id != access.company.id:
@@ -420,6 +525,10 @@ def run_detection_batch(
             "The company in the request body does not match the company in the URL.",
             details={"path_company_id": access.company.id, "body_company_id": payload.company_id},
         )
+
+    existing = _completed_agent_run(session, access, payload.target_date)
+    if existing is not None and not payload.force_rerun:
+        return _replay_agent_run(session, access, existing)
 
     wanted = payload.kpi_ids or [
         definition.kpi_key
@@ -431,6 +540,10 @@ def run_detection_batch(
     ]
 
     started_at = utcnow()
+    # A re-run is a new row, deliberately. There is no unique constraint on
+    # (company_id, target_date) and no update-in-place here: the earlier run keeps
+    # its status, its counts and its DetectionRun children, so the reading the
+    # business acted on stays readable next to the one that superseded it.
     agent_run = AgentRun(
         company_id=access.company.id,
         target_date=payload.target_date,
@@ -497,7 +610,8 @@ def run_detection_batch(
         resource_id=agent_run.id,
         resource_label=payload.target_date.isoformat(),
         summary=(
-            f"Detection on {payload.target_date.isoformat()} for {len(results)} KPI(s)"
+            ("Re-run of " if existing is not None else "")
+            + f"Detection on {payload.target_date.isoformat()} for {len(results)} KPI(s)"
             + (f"; {len(skipped)} skipped." if skipped else ".")
         ),
         details={
@@ -507,10 +621,21 @@ def run_detection_batch(
             },
             "skipped": skipped,
             "agent_run_id": agent_run.id,
+            # Which run this one was authorised to supersede, so the trail records
+            # that a second reading of the day was asked for rather than leaving
+            # two runs on one date looking like an accident.
+            "rerun_of_agent_run_id": existing.id if existing is not None else None,
         },
         outcome="SUCCESS" if not skipped else "PARTIAL_FAILURE",
         request=request,
     )
+
+    # The summary goes out from the stored rows this run just wrote, and only for a
+    # run that actually executed: ``_replay_agent_run`` never reaches here, so
+    # reopening a completed date sends nothing. An unconfigured mail host, or a mail
+    # server that refuses, is reported in ``email`` and never fails the run.
+    email = run_email.send_run_summary(session, access, agent_run)
+
     return {
         "target_date": payload.target_date,
         "agent_run_id": agent_run.id,
@@ -518,6 +643,11 @@ def run_detection_batch(
         "results": results,
         "skipped": skipped,
         "counts": {"evaluated": len(results), "skipped": len(skipped)},
+        "already_completed": False,
+        "executed": True,
+        "rerun_of_agent_run_id": existing.id if existing is not None else None,
+        "email": email,
+        "message": None,
     }
 
 
@@ -609,6 +739,65 @@ def _result_item(run: DetectionRun, explanation: AgentRunExplanation | None) -> 
     )
 
 
+def _result_filter_options(session: Session, access: AccessContext) -> dict:
+    """The values this company's stored results can actually be filtered by.
+
+    Server-issued rather than derived from the page the caller just received: the
+    list is capped, so a KPI or a date that fell off the end of it would otherwise
+    be unreachable -- the reader would have no control for the very row they were
+    looking for. Each list is a DISTINCT read over the company's own runs, so it
+    offers exactly the values that would return something and nothing that would
+    return an empty table.
+    """
+
+    kpi_rows = session.execute(
+        select(DetectionRun.kpi_key, func.max(DetectionRun.kpi_name))
+        .where(DetectionRun.company_id == access.company.id)
+        .group_by(DetectionRun.kpi_key)
+        .order_by(func.max(DetectionRun.kpi_name))
+    ).all()
+    date_rows = session.scalars(
+        select(DetectionRun.target_date)
+        .where(DetectionRun.company_id == access.company.id)
+        .group_by(DetectionRun.target_date)
+        .order_by(DetectionRun.target_date.desc())
+    ).all()
+    status_rows = session.scalars(
+        select(DetectionRun.status)
+        .where(DetectionRun.company_id == access.company.id)
+        .group_by(DetectionRun.status)
+        .order_by(DetectionRun.status)
+    ).all()
+
+    # A detection run measures a KPI's own total, so it carries no dimension of
+    # its own. The dimensional reading of a result lives in the findings recorded
+    # against it, and those are investigation data: a VIEWER holds
+    # ``analytics.read`` without ``investigation.read``, so this list is empty for
+    # them and the screen offers no control it could not honour.
+    dimensions: list[str] = []
+    if access.has("investigation.read"):
+        dimensions = [
+            value
+            for value in session.scalars(
+                select(InvestigationFinding.dimension)
+                .where(
+                    InvestigationFinding.company_id == access.company.id,
+                    InvestigationFinding.dimension.is_not(None),
+                )
+                .group_by(InvestigationFinding.dimension)
+                .order_by(InvestigationFinding.dimension)
+            ).all()
+            if value
+        ]
+
+    return {
+        "kpis": [{"kpi_key": key, "kpi_name": name} for key, name in kpi_rows],
+        "dates": [value.isoformat() for value in date_rows],
+        "statuses": list(status_rows),
+        "dimensions": dimensions,
+    }
+
+
 @router.get(
     "/companies/{company_id}/results",
     summary="Aggregated agent-run result history",
@@ -616,6 +805,9 @@ def _result_item(run: DetectionRun, explanation: AgentRunExplanation | None) -> 
 def list_result_history(
     session: SessionDep,
     status: str | None = None,
+    kpi_key: str | None = None,
+    target_date: date | None = None,
+    dimension: str | None = None,
     limit: int = 200,
     access: AccessContext = Depends(require_permissions("analytics.read")),
 ) -> dict:
@@ -623,13 +815,70 @@ def list_result_history(
 
     This is the same underlying source as the agent-run and detection-run tables,
     collapsed into one business answer list for the Results screen.
+
+    Every filter narrows the same stored rows; none of them recompute anything. The
+    ``summary`` therefore describes the narrowed view, which is what the reader is
+    looking at, and ``total_stored`` keeps the company's full count visible so a
+    filtered page never reads as data loss.
     """
 
-    statement = select(DetectionRun).where(DetectionRun.company_id == access.company.id)
+    if dimension and not access.has("investigation.read"):
+        # Refused rather than silently ignored: a caller who cannot read findings
+        # would otherwise receive an unnarrowed list and take it for a narrowed one.
+        raise PermissionDenied(
+            "Filtering results by dimension reads recorded findings, which needs "
+            "investigation access."
+        )
+
+    scoped = DetectionRun.company_id == access.company.id
+    statement = select(DetectionRun).where(scoped)
     if status:
         statement = statement.where(DetectionRun.status == status)
+    if kpi_key:
+        statement = statement.where(DetectionRun.kpi_key == kpi_key)
+    if target_date is not None:
+        statement = statement.where(DetectionRun.target_date == target_date)
+    if dimension:
+        # The KPI/date pairs a finding on this dimension was recorded against.
+        # Matched on the pair rather than on ``detection_run_id`` because a finding
+        # may be recorded from the investigation screen without a run in hand.
+        # Written as an OR of pairs rather than a row-value IN, which not every
+        # supported database renders.
+        marked_pairs = select(
+            InvestigationFinding.kpi_key, InvestigationFinding.target_date
+        ).where(
+            InvestigationFinding.company_id == access.company.id,
+            InvestigationFinding.dimension == dimension,
+        )
+        pairs = {(row[0], row[1]) for row in session.execute(marked_pairs).all()}
+        statement = statement.where(
+            or_(
+                *(
+                    and_(
+                        DetectionRun.kpi_key == pair_key,
+                        DetectionRun.target_date == pair_date,
+                    )
+                    for pair_key, pair_date in pairs
+                )
+            )
+            if pairs
+            else false()
+        )
+
     statement = statement.order_by(DetectionRun.target_date.desc(), DetectionRun.executed_at.desc())
     runs = list(session.scalars(statement.limit(max(1, min(limit, 500)))))
+
+    total_stored = session.scalar(select(func.count(DetectionRun.id)).where(scoped)) or 0
+    envelope: dict = {
+        "filters": {
+            "status": status,
+            "kpi_key": kpi_key,
+            "target_date": target_date.isoformat() if target_date else None,
+            "dimension": dimension,
+        },
+        "options": _result_filter_options(session, access),
+        "total_stored": total_stored,
+    }
 
     if not runs:
         return {
@@ -642,6 +891,7 @@ def list_result_history(
                 kpi_count=0,
             ).model_dump(),
             "items": [],
+            **envelope,
         }
 
     # Deduplicated: a page of 500 rows is only a handful of distinct KPIs and
@@ -663,6 +913,41 @@ def list_result_history(
         for run in runs
     ]
 
+    # The dimensional reading of each result, when the caller may see it. Attached
+    # here rather than folded into the row's own columns because a detection run
+    # measures a KPI total: these are the dimensions somebody recorded a finding
+    # against, which is a different fact from what the engine measured.
+    if access.has("investigation.read"):
+        marks = session.execute(
+            select(
+                InvestigationFinding.kpi_key,
+                InvestigationFinding.target_date,
+                InvestigationFinding.dimension,
+                InvestigationFinding.entity,
+            ).where(
+                InvestigationFinding.company_id == access.company.id,
+                InvestigationFinding.kpi_key.in_({run.kpi_key for run in runs}),
+                InvestigationFinding.target_date.in_({run.target_date for run in runs}),
+            )
+        ).all()
+        by_pair: dict[tuple[str, date], tuple[set[str], set[str]]] = {}
+        for row_kpi, row_date, row_dimension, row_entity in marks:
+            dimensions_seen, entities_seen = by_pair.setdefault((row_kpi, row_date), (set(), set()))
+            if row_dimension:
+                dimensions_seen.add(row_dimension)
+            if row_entity:
+                entities_seen.add(row_entity)
+        marked = [
+            {
+                **item.model_dump(mode="json"),
+                "dimensions": sorted(by_pair.get((item.kpi_key, item.target_date), (set(), set()))[0]),
+                "entities": sorted(by_pair.get((item.kpi_key, item.target_date), (set(), set()))[1]),
+            }
+            for item in items
+        ]
+    else:
+        marked = [item.model_dump(mode="json") for item in items]
+
     summary = ResultSummaryOut(
         total_runs=len(items),
         anomalies=sum(1 for item in items if item.status == "ABNORMAL"),
@@ -674,7 +959,8 @@ def list_result_history(
 
     return {
         "summary": summary.model_dump(),
-        "items": [item.model_dump(mode="json") for item in items],
+        "items": marked,
+        **envelope,
     }
 
 
@@ -828,6 +1114,106 @@ def detection_overview(
             ),
         },
     }
+
+
+# ---------------------------------------------------------------------------
+# Explaining one stored result
+# ---------------------------------------------------------------------------
+#: Same gate as the investigation API, for the same reason. An explanation is a
+#: reading of a measurement; with no measurement there is nothing to read, and
+#: composing one from a fresh calculation would produce prose about a number the
+#: business never saw on its detection surface.
+NO_STORED_RESULT = (
+    "This KPI has no stored evaluation for that date, so there is no result to "
+    "explain. Run detection for the date first."
+)
+
+
+def _stored_result(
+    session: Session, access: AccessContext, version: KpiVersion, target_date: date
+) -> DetectionRun:
+    run = session.scalars(
+        select(DetectionRun)
+        .where(
+            DetectionRun.company_id == access.company.id,
+            DetectionRun.kpi_version_id == version.id,
+            DetectionRun.target_date == target_date,
+        )
+        .order_by(DetectionRun.executed_at.desc())
+        .limit(1)
+    ).first()
+    if run is None:
+        raise Conflict(NO_STORED_RESULT)
+    return run
+
+
+@router.post(
+    "/companies/{company_id}/results/explain",
+    summary="Explain one stored KPI result from its own evidence",
+)
+async def explain_result_endpoint(
+    payload: ResultExplainRequest,
+    session: SessionDep,
+    request: Request,
+    access: AccessContext = Depends(require_permissions("analytics.read")),
+) -> dict:
+    """The labelled sections about one stored result.
+
+    Reads no business data. Every figure is a column of the stored run or of a
+    stored breakdown, and the supporting context is drawn from approved documents
+    through the Copilot's own retriever, so the same permission rules that decide
+    what a person may read in the document library decide what may appear here.
+
+    ``analytics.read`` because that is the permission that lets somebody see the
+    result at all -- an explanation of a verdict they can already read is not a
+    wider disclosure. What *is* narrower: the ``facts`` block, which is the
+    detection statistics in another shape and therefore answers to ``kpi.read``,
+    exactly as the ``evidence`` block does everywhere else in this file.
+    """
+
+    version = _resolve_version(session, access, payload.kpi_id)
+    run = _stored_result(session, access, version, payload.target_date)
+
+    result = await explain_service.explain_result(
+        session,
+        access,
+        run,
+        request_id=getattr(request.state, "request_id", None),
+        usage_sink=llm_usage_of(request),
+        narrate_with_model=payload.use_model,
+    )
+    body = result.as_dict()
+    if not access.has("kpi.read"):
+        body.pop("facts", None)
+
+    audit.record(
+        session,
+        access=access,
+        action=audit.AuditAction.RESULT_EXPLAINED,
+        resource_type="detection_run",
+        resource_id=run.id,
+        resource_label=f"{run.kpi_name} {run.target_date.isoformat()}",
+        summary=(
+            f"Explained {run.status} result at {result.confidence.level} confidence"
+            + (
+                f", narrated by {result.model}."
+                if result.model_written
+                else ", in platform prose."
+            )
+        ),
+        details={
+            "kpi_key": run.kpi_key,
+            "target_date": run.target_date.isoformat(),
+            "status": run.status,
+            "confidence": result.confidence.level,
+            "model_written": result.model_written,
+            "model": result.model,
+            "citations": len(result.citations),
+        },
+        request=request,
+    )
+    session.commit()
+    return {"explanation": body}
 
 
 # ---------------------------------------------------------------------------

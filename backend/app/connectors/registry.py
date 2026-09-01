@@ -47,6 +47,15 @@ class ConnectorDescriptor:
     # When set, the form offers "paste a connection string" as an alternative
     # to filling every field by hand.
     accepts_connection_uri: bool = False
+    # Whether one query against this source may read two related tables.
+    #
+    # False for every source reached over REST or registered as metadata only: a
+    # row-per-record table and the row-per-line table beneath it can each be read,
+    # but not matched to each other in a single pass. That distinction is what
+    # decides whether a KPI measured at the coarser grain may be broken down along
+    # the finer one, so it is recorded here -- beside the driver that has the
+    # limitation -- rather than inferred from the source type somewhere downstream.
+    supports_multi_table_reads: bool = False
 
 
 _SUPABASE_FIELDS = (
@@ -110,6 +119,7 @@ CONNECTOR_CATALOG: tuple[ConnectorDescriptor, ...] = (
         supports_profiling=True,
         fields=_POSTGRES_FIELDS,
         accepts_connection_uri=True,
+        supports_multi_table_reads=True,
         notes="Full metadata reflection and pushdown profiling.",
     ),
     ConnectorDescriptor(
@@ -124,6 +134,7 @@ CONNECTOR_CATALOG: tuple[ConnectorDescriptor, ...] = (
                 placeholder="/path/to/database.db",
             ),
         ),
+        supports_multi_table_reads=True,
         notes="Local file source. Used by the automated test suite.",
     ),
     ConnectorDescriptor(
@@ -312,3 +323,17 @@ def build_connector(source: DataSource) -> DataSourceConnector:
 
 def descriptor_for(source_type: str) -> ConnectorDescriptor | None:
     return DESCRIPTORS_BY_TYPE.get(source_type)
+
+
+def supports_multi_table_reads(source_type: str | None) -> bool:
+    """Whether one query against this source type may match two related tables.
+
+    Asked before a breakdown along a finer-grained table is *offered*, not when it
+    is run, so that a source which cannot make the match never produces a
+    drill-down that refuses on click. An unknown type answers ``False``: declining
+    to offer a breakdown is recoverable, and offering one that cannot be built is a
+    dead end.
+    """
+
+    descriptor = DESCRIPTORS_BY_TYPE.get(source_type or "")
+    return bool(descriptor and descriptor.supports_multi_table_reads)

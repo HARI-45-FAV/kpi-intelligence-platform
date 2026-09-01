@@ -7,6 +7,7 @@ import Onboarding from './pages/Onboarding'
 import Dashboard from './pages/Dashboard'
 import Monitoring from './pages/Monitoring'
 import Results from './pages/Results'
+import ResultDetail from './pages/ResultDetail'
 import Investigation from './pages/Investigation'
 import KpiSetup from './pages/kpi-setup/KpiSetup'
 
@@ -33,6 +34,11 @@ export default function App() {
         <Route index element={<Dashboard />} />
         <Route path="monitoring" element={<Monitoring />} />
         <Route path="results" element={<Results />} />
+        {/* One stored evaluation, addressable on its own so a movement can be
+            linked to from the dashboard, an alert or a colleague's message. The
+            parameter is the detection run id, which is what the results list
+            returns as each row's id. */}
+        <Route path="results/:runId" element={<ResultDetail />} />
         <Route path="investigation" element={<Investigation />} />
         <Route path="kpi-setup/*" element={<KpiSetup />} />
         <Route path="*" element={<Navigate to="/" replace />} />

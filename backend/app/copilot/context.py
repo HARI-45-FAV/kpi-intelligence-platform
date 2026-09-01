@@ -65,6 +65,10 @@ PANELS: frozenset[str] = frozenset(
         "kpi_setup",
         "monitoring",
         "dashboard",
+        # The two explainability surfaces. Both are anchored on a stored result, so
+        # both belong to the set that auto-attaches one as evidence.
+        "kpi_result",
+        "investigation_node",
     }
 )
 

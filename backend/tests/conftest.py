@@ -32,6 +32,14 @@ os.environ.setdefault("ENVIRONMENT", "test")
 # wins over .env while still leaving CI free to set it before pytest starts.
 os.environ["LLM_ENABLED"] = "false"
 
+# The transport is pinned for the same reason. The tests that enable a model
+# script the *provider* and patch the ``llm_*`` settings around it, so a .env
+# selecting the hosted transport -- which reads ``GEMINI_*`` instead -- would
+# leave those patches unread and the suite asserting against a configuration no
+# test wrote. Which transport a deployment uses is covered on its own, in
+# ``test_gemini_transport.py`` and ``test_copilot.py``'s replay tests.
+os.environ["LLM_PROVIDER"] = "openai_compatible"
+
 # Tool calling is pinned on for the same reason, in the other direction. It is a
 # capability of the governed tool layer rather than of any one model, so the
 # suite asserts the layer's behaviour -- which tools a role is offered, which

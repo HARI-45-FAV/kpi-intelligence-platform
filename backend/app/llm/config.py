@@ -22,7 +22,14 @@ from app.core.config import Settings, get_settings
 # Provider names this build knows how to speak to. Kept here so a bad value in
 # the environment is a clear configuration error rather than an import failure
 # at the first Copilot request.
-SUPPORTED_PROVIDERS: tuple[str, ...] = ("openai_compatible",)
+SUPPORTED_PROVIDERS: tuple[str, ...] = ("openai_compatible", "gemini")
+
+# Gemini's REST endpoint and a current default model. Held here rather than in
+# ``Settings`` defaults so a deployment that sets nothing but ``GEMINI_API_KEY``
+# is already usable, and so the only Gemini-specific strings in the settings
+# layer are the two an operator is asked for.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+GEMINI_DEFAULT_MODEL = "gemini-2.5-flash"
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +71,20 @@ class LLMConfig:
         if not self.base_url.strip():
             return "LLM_ENABLED is true but LLM_BASE_URL is empty."
         if not self.model.strip():
-            return "LLM_ENABLED is true but LLM_MODEL is empty."
+            return (
+                "LLM_ENABLED is true but GEMINI_MODEL is empty."
+                if self.provider == "gemini"
+                else "LLM_ENABLED is true but LLM_MODEL is empty."
+            )
+        if self.provider == "gemini" and not self.api_key.strip():
+            # A hosted API cannot be reached without a key, and saying so here
+            # keeps it a configuration message rather than a 401 that arrives
+            # mid-answer. The key itself is never part of this string.
+            return (
+                "LLM_PROVIDER=gemini but GEMINI_API_KEY is empty. "
+                "Set it in the backend environment -- the key stays server-side "
+                "and is never sent to the browser."
+            )
         return None
 
     @property
@@ -108,12 +128,28 @@ class LLMConfig:
 
 
 def llm_config_from_settings(settings: Settings) -> LLMConfig:
+    provider = settings.llm_provider.strip().lower()
+    base_url = settings.llm_base_url.strip().rstrip("/")
+    api_key = settings.llm_api_key
+    model = settings.llm_model.strip()
+
+    if provider == "gemini":
+        # Gemini reads its own three values, so switching provider is one line in
+        # the environment and does not require rewriting LLM_BASE_URL, LLM_MODEL
+        # and LLM_API_KEY -- which still hold whatever the OpenAI-compatible
+        # endpoint needs, ready for switching back. LLM_MODEL is deliberately not
+        # consulted as a fallback: a model name meant for a local server is a 404
+        # at Google, and a clear "GEMINI_MODEL is empty" beats that.
+        base_url = settings.gemini_base_url.strip().rstrip("/") or GEMINI_BASE_URL
+        api_key = settings.gemini_api_key.strip()
+        model = settings.gemini_model.strip() or GEMINI_DEFAULT_MODEL
+
     return LLMConfig(
         enabled=settings.llm_enabled,
-        provider=settings.llm_provider.strip().lower(),
-        base_url=settings.llm_base_url.strip().rstrip("/"),
-        api_key=settings.llm_api_key,
-        model=settings.llm_model.strip(),
+        provider=provider,
+        base_url=base_url,
+        api_key=api_key,
+        model=model,
         temperature=settings.llm_temperature,
         max_output_tokens=settings.llm_max_output_tokens,
         request_timeout_seconds=settings.llm_request_timeout_seconds,

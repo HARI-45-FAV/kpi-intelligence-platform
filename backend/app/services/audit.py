@@ -75,12 +75,33 @@ class AuditAction:
     BUCKET_CONFIG_ARCHIVED = "detection.bucket_config_archived"
     DETECTION_RUN = "detection.executed"
     AGENT_RUN = "AGENT_RUN"
+    # The summary mail for a completed Agent Run. This row is also the platform's
+    # duplicate guard: reopening a stored date finds it and sends nothing, so the
+    # trail of what was delivered and the rule preventing a second delivery are the
+    # same record rather than two that can disagree.
+    RUN_SUMMARY_EMAILED = "detection.run_summary_emailed"
 
     # Investigation is a read, but a read of the company's own business data
     # broken down by an entity someone chose -- so who looked at which part of the
     # business, and when, is exactly what an audit trail is for.
     CONTRIBUTION_ANALYSED = "investigation.contribution_analysed"
     ENTITY_ANALYSED = "investigation.entity_analysed"
+
+    # A finding is a person's written conclusion about a movement. It changes no
+    # business data and no verdict, which is precisely why its trail matters: the
+    # note is the only record of *why* someone closed an investigation, and an
+    # edit to it is an edit to the reasoning of record.
+    FINDING_CREATED = "investigation.finding_created"
+    FINDING_UPDATED = "investigation.finding_updated"
+    FINDING_STATUS_CHANGED = "investigation.finding_status_changed"
+    FINDING_DELETED = "investigation.finding_deleted"
+
+    # An explanation is assembled from stored evidence and, when a model is
+    # configured, narrated by it. Logged because it is the moment governed figures
+    # and permission-filtered documents were composed into something a person will
+    # act on -- and because whether a model wrote the prose is part of the record.
+    RESULT_EXPLAINED = "explainability.result_explained"
+    NODE_EXPLAINED = "explainability.node_explained"
 
 
 def record(
@@ -148,12 +169,41 @@ def event(
 
 _SECRET_HINTS = ("password", "secret", "token", "key", "credential", "dsn", "connection_uri")
 
+#: Field names that contain a secret hint but are governance identifiers, not
+#: secrets. Without this, ``key`` matches ``kpi_key`` and the audit trail answers
+#: "who explained which KPI?" with ``[redacted]`` -- which defeats the trail for
+#: exactly the question the platform exists to answer.
+#:
+#: An allowlist rather than a narrower pattern, because the failure modes are not
+#: symmetric: a governance identifier wrongly redacted costs the audit screen a
+#: column, while a credential wrongly allowed through is a credential in a table
+#: nobody deletes from. So the exceptions are enumerated, and anything not on this
+#: list carrying a secret hint is still redacted.
+_IDENTIFIER_KEYS = frozenset(
+    {
+        "kpi_key",
+        "config_key",
+        "bucket_config_key",
+        "role_key",
+        "document_key",
+        "source_key",
+        "dimension_key",
+        "company_key",
+        "permission_key",
+        "table_key",
+        "metric_key",
+    }
+)
+
 
 def _scrub(payload: dict[str, Any]) -> dict[str, Any]:
     """Never let a credential reach the audit trail."""
     clean: dict[str, Any] = {}
     for key, value in payload.items():
-        if any(hint in key.lower() for hint in _SECRET_HINTS):
+        lowered = key.lower()
+        if lowered in _IDENTIFIER_KEYS:
+            clean[key] = _scrub(value) if isinstance(value, dict) else value
+        elif any(hint in lowered for hint in _SECRET_HINTS):
             clean[key] = "[redacted]"
         elif isinstance(value, dict):
             clean[key] = _scrub(value)

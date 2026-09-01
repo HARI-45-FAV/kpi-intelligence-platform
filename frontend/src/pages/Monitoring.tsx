@@ -42,6 +42,7 @@ import {
   formatRelative,
 } from '../components/format'
 import { Alert, EmptyState, Modal, Panel, Spinner, StatusBadge } from '../components/ui'
+import MonitoringOverview from '../components/MonitoringOverview'
 import { useAction, useResource } from '../components/useResource'
 import { useCopilotScreen } from '../copilot/CopilotProvider'
 
@@ -258,6 +259,12 @@ export default function Monitoring() {
           plain recent-days window. Saying so is the point: an unstated fallback
           is the kind of thing that gets discovered during an argument. */}
       {note && <Alert tone="info">{note}</Alert>}
+
+      {/* What the platform has already evaluated, counted from stored runs. The
+          detection panel below is how a new evaluation gets added to it — the two
+          are on one screen because "what is monitored" and "evaluate it" are the
+          same question asked in two tenses. */}
+      <MonitoringOverview />
 
       <Panel
         title="Detection"

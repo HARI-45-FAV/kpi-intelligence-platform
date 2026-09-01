@@ -122,6 +122,18 @@ class Settings(BaseSettings):
     llm_base_url: str = "http://localhost:8000/v1"
     llm_api_key: str = "EMPTY"
     llm_model: str = "Qwen/Qwen3-30B-A3B-Instruct-2507"
+    # Read only when ``llm_provider`` selects the hosted Google transport, which
+    # takes its endpoint, key and model from these three rather than from the
+    # ``llm_*`` values above -- so switching provider is one line in the
+    # environment and the local-endpoint settings stay intact for switching
+    # back. The key is server-side configuration: it is never returned by an
+    # endpoint, logged, audited or sent to the browser, and the model layer's
+    # ``describe()`` deliberately has no field for it.
+    gemini_api_key: str = ""
+    gemini_model: str = ""
+    # Overridable so a deployment can pin an API version, but the default in
+    # ``app.llm.config`` is the one Google documents.
+    gemini_base_url: str = ""
     llm_temperature: float = 0.1
     llm_max_output_tokens: int = 1_200
     llm_request_timeout_seconds: int = 90
@@ -139,6 +151,27 @@ class Settings(BaseSettings):
     # locally hosted model, which is the default deployment.
     llm_input_cost_per_1k_usd: float = 0.0
     llm_output_cost_per_1k_usd: float = 0.0
+
+    # ---- Post-run email --------------------------------------------------
+    # A completed Agent Run can be sent out as a summary of what was already
+    # stored. Off unless a host is configured, and the transport is selected in
+    # ``app.notifications`` -- nothing outside that package speaks SMTP.
+    #
+    # ``email_recipients`` is a comma-separated list. It is deliberately a
+    # deployment setting rather than a per-user preference: this build has no
+    # subscription model, and inventing one silently would mean deciding on a
+    # company's behalf who receives its KPI results.
+    email_enabled: bool = False
+    email_provider: str = "smtp"
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    smtp_timeout_seconds: int = 20
+    email_from: str = ""
+    email_recipients: str = ""
+    email_subject_prefix: str = "[KPI Intelligence]"
 
     # ---- Copilot retrieval ---------------------------------------------
     # Retrieval reads governed platform metadata and authorised documents.

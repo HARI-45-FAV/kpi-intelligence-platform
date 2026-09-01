@@ -241,6 +241,11 @@ def build_provider(config: LLMConfig | None = None) -> LLMProvider:
 
         return OpenAICompatibleProvider(cfg)
 
+    if cfg.provider == "gemini":
+        from app.llm.gemini import GeminiProvider
+
+        return GeminiProvider(cfg)
+
     # Unreachable while `is_available` gates on SUPPORTED_PROVIDERS, but an
     # explicit failure beats a silent fallback to a different model.
     raise LLMUnavailable(

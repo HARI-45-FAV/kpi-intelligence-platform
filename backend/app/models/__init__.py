@@ -14,6 +14,7 @@ from app.models.detection import (
     DetectionRun,
 )
 from app.models.document import CompanyDocument, CompanyDocumentVersion
+from app.models.investigation import InvestigationFinding
 from app.models.kpi import (
     KpiAccessPolicy,
     KpiDefinition,
@@ -67,6 +68,7 @@ __all__ = [
     "AgentRunExplanation",
     "DetectionRun",
     "ExecutionLog",
+    "InvestigationFinding",
     "JoinSafety",
     "KpiAccessPolicy",
     "KpiDefinition",

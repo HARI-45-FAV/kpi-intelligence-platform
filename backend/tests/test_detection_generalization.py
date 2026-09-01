@@ -980,6 +980,74 @@ def test_results_history_carries_its_unit_and_states_no_explanation_it_lacks(com
         assert item["email_status"] == "NOT_SENT", kpi_key
 
 
+def test_the_results_list_offers_only_filters_that_would_return_something(company_b):
+    """The Results screen's filter contract.
+
+    The stored list is capped, so a screen that filtered the page it already held
+    would leave an older date unreachable -- the reader would have no control for
+    the very row they came for. The narrowing therefore happens here, and the
+    values on offer are read from the company's own stored runs rather than written
+    into the client, so no control can be offered that returns an empty table.
+
+    ``total_stored`` is what keeps a narrowed page honest: the tile above the table
+    reads "N of M stored" rather than presenting the filtered count as the whole.
+    """
+
+    admin, base = company_b["admin"], company_b["base"]
+    target = company_b["target"]
+    ran = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": target.isoformat(),
+            "kpi_ids": [company_b["revenue_id"], company_b["refunds_id"]],
+        },
+    )
+    assert ran.status_code == 200, ran.text
+
+    unfiltered = admin.get(f"{base}/results")
+    assert unfiltered.status_code == 200, unfiltered.text
+    body = unfiltered.json()
+
+    options = body["options"]
+    stored_keys = {item["kpi_key"] for item in body["items"]}
+    offered_keys = {row["kpi_key"] for row in options["kpis"]}
+    assert stored_keys <= offered_keys
+    assert target.isoformat() in options["dates"]
+    assert {item["status"] for item in body["items"]} <= set(options["statuses"])
+    assert body["total_stored"] == len(body["items"])
+    # Echoed, so the screen never claims a narrowing the server did not apply.
+    assert body["filters"] == {
+        "status": None,
+        "kpi_key": None,
+        "target_date": None,
+        "dimension": None,
+    }
+
+    one_kpi = admin.get(f"{base}/results", params={"kpi_key": "revenue"})
+    assert one_kpi.status_code == 200, one_kpi.text
+    narrowed = one_kpi.json()
+    assert {item["kpi_key"] for item in narrowed["items"]} == {"revenue"}
+    assert narrowed["filters"]["kpi_key"] == "revenue"
+    # The summary describes what the reader is looking at; the company's own total
+    # stays alongside it rather than being replaced by it.
+    assert narrowed["summary"]["total_runs"] == len(narrowed["items"])
+    assert narrowed["total_stored"] == body["total_stored"]
+    assert narrowed["total_stored"] > narrowed["summary"]["total_runs"]
+
+    one_date = admin.get(f"{base}/results", params={"target_date": target.isoformat()})
+    assert one_date.status_code == 200, one_date.text
+    assert {item["target_date"] for item in one_date.json()["items"]} == {target.isoformat()}
+
+    empty_date = admin.get(f"{base}/results", params={"target_date": "1999-01-01"})
+    assert empty_date.status_code == 200, empty_date.text
+    drained = empty_date.json()
+    assert drained["items"] == []
+    assert drained["summary"]["total_runs"] == 0
+    # The options survive an empty page, so the reader can filter their way back.
+    assert drained["options"]["kpis"]
+    assert drained["total_stored"] == body["total_stored"]
+
+
 def test_kpi_handbook_extraction_persists_and_drives_real_detection(company_b, monkeypatch):
     """The handbook JSON is validated, approved, and consumed by the real engine."""
 
@@ -1053,3 +1121,189 @@ def test_kpi_handbook_extraction_persists_and_drives_real_detection(company_b, m
     assert result["evidence"]["source"]["formula"] == "SUM(sales_transactions.amount)"
     assert result["evidence"]["source"]["time_field"] == "transaction_date"
     assert result["evidence"]["bucket"]["config_key"] == "borealis-handbook-policy"
+
+
+# ---------------------------------------------------------------------------
+# The post-run summary mail
+# ---------------------------------------------------------------------------
+class _Recorder:
+    """A transport that keeps what it was handed instead of sending it."""
+
+    name = "recorder"
+
+    def __init__(self) -> None:
+        self.sent: list = []
+
+    def send(self, message):
+        from app.notifications.provider import SendResult
+
+        self.sent.append(message)
+        return SendResult(
+            sent=True, provider=self.name, recipient_count=len(message.recipients)
+        )
+
+    def describe(self) -> dict:
+        return {"provider": self.name}
+
+
+def _configured_email():
+    from app.notifications.config import EmailConfig
+
+    return EmailConfig(
+        enabled=True,
+        provider="smtp",
+        host="mail.internal",
+        port=587,
+        username="",
+        password="",
+        use_tls=True,
+        timeout_seconds=5,
+        sender="agent@borealis.example.com",
+        recipients=("ops@borealis.example.com",),
+        subject_prefix="[KPI Intelligence]",
+    )
+
+
+def test_no_mail_host_configured_is_a_state_not_a_failed_run(company_b):
+    """The default deployment sends nothing and still completes.
+
+    A summary is a notification about work that already finished and is already
+    stored. So an unconfigured mail host is reported in ``email`` with the reason,
+    the run's own results are returned unchanged, and the request succeeds -- the
+    alternative would let a mail setting decide whether a business gets its KPI
+    results.
+    """
+
+    admin, base = company_b["admin"], company_b["base"]
+    response = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": company_b["target"].isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["results"], "the run must still return its results"
+    assert body["email"]["sent"] is False
+    assert "EMAIL_ENABLED" in (body["email"]["reason"] or "")
+
+
+def test_the_summary_mail_reprints_the_stored_result_and_is_sent_once(
+    company_b, monkeypatch
+):
+    """One mail per Agent Run, composed from the rows the run stored.
+
+    Three properties, each of which is invisible when it breaks:
+
+    * **The figures are the stored ones.** The mail's actual and expected are the
+      values the API returns for the same run, so the mail and the Results screen
+      cannot drift into two different analyses of one movement.
+    * **Reopening a completed date sends nothing.** The second request is answered
+      from storage, so no work happened and there is nothing to announce.
+    * **An authorised re-run sends its own.** It is a new Agent Run and a new
+      reading, and suppressing that would hide the fact that the day was measured
+      again.
+
+    And throughout: no causal language. The mail carries the same non-causal prose
+    the explanation service assembles.
+    """
+
+    from app.services import run_email
+
+    recorder = _Recorder()
+    monkeypatch.setattr(run_email, "load_email_config", _configured_email)
+    monkeypatch.setattr(run_email, "build_email_provider", lambda *a, **k: recorder)
+
+    admin, base = company_b["admin"], company_b["base"]
+    target = company_b["target"]
+
+    first = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": target.isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert first.status_code == 200, first.text
+    assert first.json()["email"]["sent"] is True
+    assert len(recorder.sent) == 1
+
+    message = recorder.sent[0]
+    assert message.recipients == ("ops@borealis.example.com",)
+    assert target.isoformat() in message.subject
+    assert "[KPI Intelligence]" in message.subject
+    body = message.body
+    # The chain requirement asks for: actual vs expected, status, contributors,
+    # confidence, recommendation.
+    for heading in ("Actual", "Expected", "Deviation", "Status"):
+        assert heading in body, heading
+    assert "Top Contributors" in body
+    assert "Confidence Level" in body
+    assert "Recommended Next Step" in body
+    assert "Contribution is not causation" in body
+    for word in ("caused", "drove", "driven by", "led to", "resulted in", "root cause"):
+        assert word not in body.lower(), f"the summary claims causation: {word!r}"
+
+    # The same figures the API reports for this run, rendered the same way.
+    result = first.json()["results"][0]["result"]
+    assert f"{abs(result['actual']):,.0f}" in body or f"{abs(result['actual']):,.1f}" in body
+
+    # Reopening the date: answered from storage, so nothing is announced.
+    replay = admin.post(
+        f"{base}/run-detection/batch",
+        json={"target_date": target.isoformat(), "kpi_ids": [company_b["revenue_id"]]},
+    )
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["already_completed"] is True
+    assert "email" not in replay.json()
+    assert len(recorder.sent) == 1, "a reopened date must not re-send its summary"
+
+    # An authorised re-run is a new reading, and it announces itself.
+    again = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": target.isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert again.status_code == 200, again.text
+    assert again.json()["email"]["sent"] is True
+    assert len(recorder.sent) == 2
+
+
+def test_a_refused_mail_server_is_recorded_and_does_not_fail_the_run(
+    company_b, monkeypatch
+):
+    """A transport failure is the summary's state, never the run's."""
+
+    from app.notifications.provider import SendResult
+    from app.services import run_email
+
+    class _Refuses:
+        name = "smtp"
+
+        def send(self, message):
+            return SendResult(
+                sent=False, provider=self.name, reason="The mail server refused the summary."
+            )
+
+    monkeypatch.setattr(run_email, "load_email_config", _configured_email)
+    monkeypatch.setattr(run_email, "build_email_provider", lambda *a, **k: _Refuses())
+
+    admin, base = company_b["admin"], company_b["base"]
+    response = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": company_b["target"].isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["results"], "the run's results survive a mail failure"
+    assert response.json()["email"]["sent"] is False
+    assert "refused" in (response.json()["email"]["reason"] or "").lower()

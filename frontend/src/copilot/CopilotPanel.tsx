@@ -322,9 +322,12 @@ function EvidenceCard({ item }: { item: CopilotEvidence }) {
   )
   return (
     <li
-      className={`rounded-md border px-3 py-2 ${
+      className={`rounded-xl border px-3 py-2 shadow-[0_6px_16px_rgba(38,88,130,0.06)] ${
         item.is_placeholder
-          ? 'border-amber-900/70 bg-amber-950/20'
+          ? // The remapped amber pair. `amber-950/20` and `amber-900/70` are not in
+            // the light theme's override list, so they rendered as raw dark Tailwind
+            // amber — a muddy brown tile on a sky-blue card.
+            'border-amber-800 bg-amber-950/50'
           : 'border-ink-700 bg-ink-850'
       }`}
     >

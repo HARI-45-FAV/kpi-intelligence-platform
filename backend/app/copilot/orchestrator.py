@@ -104,8 +104,23 @@ _FIGURE_TRIGGERS = (
 #: for "what does this KPI mean" would attach a placeholder disclosure to an answer
 #: that never needed a number.
 _FIGURE_PANELS = frozenset(
-    {"stage_performance", "detection_detail", "historical_run", "investigation", "future_action"}
+    {
+        "stage_performance",
+        "detection_detail",
+        "historical_run",
+        "investigation",
+        "future_action",
+        "kpi_result",
+        "investigation_node",
+    }
 )
+
+#: Panels that display a movement split into parts. A turn from one of these gets
+#: the stored breakdown attached whatever the question was, for the same reason the
+#: figure panels get the stored run: a model shown a total and no parts will
+#: estimate parts. ``kpi_result`` is in here because its contributors section is on
+#: screen beside the answer.
+_BREAKDOWN_PANELS = frozenset({"investigation", "investigation_node", "kpi_result"})
 
 # The system prompt asks for plain text, but this final presentation guard keeps
 # a non-compliant model response from leaking Markdown chrome into the product.
@@ -141,6 +156,16 @@ _TOOL_KEYWORDS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
 
 def _plain_short_answer(text: str) -> str:
     """Present a compact, readable answer without changing its facts or citations."""
+    return _capped(plain_text(text))
+
+
+def plain_text(text: str) -> str:
+    """Strip Markdown chrome without touching facts, figures or citations.
+
+    Separated from the length cap so a caller that needs different bounds -- a
+    structured explanation, for one -- gets the same presentation guard without
+    inheriting the chat answer's word budget.
+    """
     cleaned = _MARKDOWN_LINK.sub(r"\1", text.strip())
     cleaned = _MARKDOWN_HEADING.sub("", cleaned)
     cleaned = _MARKDOWN_QUOTE.sub("", cleaned)
@@ -150,18 +175,22 @@ def _plain_short_answer(text: str) -> str:
     cleaned = "\n".join(line.strip() for line in cleaned.splitlines() if line.strip())
     if len(cleaned) >= 2 and cleaned[0] in "\"'" and cleaned[-1] == cleaned[0]:
         cleaned = cleaned[1:-1].strip()
-    return _capped(cleaned)
+    return cleaned
 
 
-def _capped(text: str) -> str:
+def _capped(text: str, limit: int = _MAX_ANSWER_WORDS) -> str:
     """Trim an over-long answer without flattening it into one paragraph.
 
     Whole lines are kept whole for as long as the budget allows, because a figure
     answer is three labelled paragraphs and running them together would misattribute
     the context to the measurement. Only the line that crosses the limit is cut.
+
+    ``limit`` is a parameter because a structured explanation is a longer document
+    with the same labelled sections and trimming behaviour: the chat cap would
+    cut it off inside the second heading.
     """
     kept: list[str] = []
-    budget = _MAX_ANSWER_WORDS
+    budget = limit
     for line in text.splitlines():
         words = line.split()
         if len(words) <= budget:
@@ -352,7 +381,7 @@ def _gather_evidence(context: CopilotContext, question: str) -> tuple[EvidenceBu
     # analysis is fetched for that panel whatever the question was, and when none
     # exists the turn is told so explicitly -- "nobody has run this yet" is the
     # normal state for an on-demand analysis, and it has to be sayable.
-    if context.panel == "investigation" and context.access.has("investigation.read"):
+    if context.panel in _BREAKDOWN_PANELS and context.access.has("investigation.read"):
         breakdown = _stored_contribution_run(context)
         if breakdown is not None:
             bundle.add(**contribution_run_evidence(breakdown))

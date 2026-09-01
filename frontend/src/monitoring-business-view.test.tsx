@@ -193,6 +193,49 @@ const OVERVIEW = {
   },
 }
 
+/**
+ * The overview that sits above the detection panel, for a window with nothing in it.
+ *
+ * The Monitoring screen mounts `MonitoringOverview`, so this file has to serve
+ * `/monitoring` — but it serves an *empty* window on purpose. This file's subject
+ * is the detection panel's five figures and the method it must not print, and a
+ * populated overview would put a second set of KPI names and status badges into
+ * the same document, so every assertion here would start matching two elements and
+ * stop meaning what it says. The populated overview — including what a reader
+ * without `investigation.read` is not told — is pinned in
+ * `monitoring-overview.test.tsx` instead.
+ *
+ * Empty is still a real response: this is exactly what the server returns for a
+ * company that has never run detection, and it keeps the negative assertions below
+ * honest by covering the overview's empty states too.
+ */
+const MONITORING = {
+  window_days: 90,
+  window_from: null,
+  window_to: null,
+  last_evaluated_at: null,
+  counts: {
+    kpis_monitored: 3,
+    evaluated: 0,
+    normal: 0,
+    abnormal: 0,
+    low_confidence: 0,
+    unrecognised: 0,
+    unrecognised_statuses: [],
+    not_evaluated: 3,
+  },
+  kpis: [],
+  biggest_movements: [],
+  recent_abnormal: [],
+  recent_runs: [],
+  findings_open: 0,
+  findings_in_progress: 0,
+  findings_resolved: 0,
+  recent_findings: [],
+  monitoring_note:
+    'Detection runs when it is triggered — this platform has no scheduler in this version.',
+}
+
 const BATCH = {
   target_date: '2026-08-28',
   results: [
@@ -218,6 +261,7 @@ function stubFetch(permissions: string[]) {
       return jsonResponse({ user: USER, memberships: [membership(permissions)] })
     }
     if (url.includes('/detection/overview')) return jsonResponse(OVERVIEW)
+    if (url.includes('/monitoring')) return jsonResponse(MONITORING)
     if (url.includes('/run-detection/batch')) {
       batchCalls.push(JSON.parse(String(init?.body ?? '{}')))
       return jsonResponse(BATCH)

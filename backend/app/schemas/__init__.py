@@ -857,6 +857,14 @@ class BatchDetectionRequest(ApiModel):
     kpi_ids: list[str] = Field(default_factory=list, max_length=25)
     target_date: date
     persist: bool = True
+    force_rerun: bool = Field(
+        default=False,
+        description=(
+            "Execute again even though this date already has a completed Agent Run. "
+            "The earlier run and its stored results are left untouched; a re-run is "
+            "recorded as a new Agent Run so both readings of the day remain on file."
+        ),
+    )
 
 
 class AgentRunOut(ApiModel):
@@ -982,6 +990,270 @@ class ManualAnalysisRequest(ApiModel):
     target_date: date
     lookback_days: int = Field(default=30, ge=2, le=365)
     top_k: int | None = Field(default=None, ge=1, le=50)
+
+
+# ---------------------------------------------------------------------------
+# Explainability: the structured explanation of one result or one node
+# ---------------------------------------------------------------------------
+class ExplanationSectionOut(ApiModel):
+    """One labelled section. Headings are fixed by the server, not the client."""
+
+    heading: str
+    body: str
+
+
+class ExplanationCitationOut(ApiModel):
+    """An approved document the explanation drew on.
+
+    Present only for a caller holding ``document.read`` and only for documents
+    their own scopes admit -- the retrieval layer applies both before any content
+    is read, so a restricted document is never named here.
+    """
+
+    label: str
+    title: str | None = None
+    snippet: str | None = None
+    document_id: str | None = None
+    document_key: str | None = None
+    document_version: int | None = None
+    document_status: str | None = None
+    #: Why this document bears on the date in question ("effective on", "most
+    #: recent before", and so on). The retrieval layer's own word, not a guess.
+    standing: str | None = None
+    effective_from: str | None = None
+    effective_to: str | None = None
+    score: float | None = None
+
+
+class ExplanationConfidenceOut(ApiModel):
+    """A three-level judgement with every reason that produced it.
+
+    Deliberately not a probability: nothing in this platform estimates one, so a
+    number here would be invented precision.
+    """
+
+    level: str
+    reasons: list[str] = Field(default_factory=list)
+
+
+class ExplanationOut(ApiModel):
+    """A structured explanation, assembled from stored evidence.
+
+    ``model_written`` is the honest label on the prose. False means these are the
+    platform's own words over the same governed figures -- which is what ships
+    when no language model is configured, and what a reader still gets when a
+    configured model fails. The figures are identical either way.
+    """
+
+    subject: str
+    scope: str
+    order: list[str]
+    sections: list[ExplanationSectionOut]
+    text: str
+    citations: list[ExplanationCitationOut] = Field(default_factory=list)
+    confidence: ExplanationConfidenceOut
+    limitations: list[str] = Field(default_factory=list)
+    model_written: bool = False
+    model: str | None = None
+    #: Present only for a caller entitled to the underlying statistics. This is the
+    #: same material the model was given, exposed so a reader can check the prose
+    #: against the numbers rather than taking it on trust.
+    facts: dict[str, Any] | None = None
+
+
+class ResultExplainRequest(ApiModel):
+    """Explain one stored result.
+
+    No figures in the request. The KPI and date identify a stored detection run
+    and every number comes from it, so a caller cannot supply a movement and have
+    the platform explain one that was never measured.
+    """
+
+    kpi_id: str = Field(min_length=1, max_length=80)
+    target_date: date
+    #: Set false to skip the language model and take the deterministic assembly.
+    #: Useful for a caller that wants the same explanation reproducibly.
+    use_model: bool = True
+
+
+class NodeExplainRequest(ApiModel):
+    """Explain one node of an investigation: the whole movement, or one part.
+
+    ``dimension`` and ``entity`` are re-resolved against the KPI version's
+    approved dimensions and the caller's row scope before anything is explained.
+    """
+
+    kpi_id: str = Field(min_length=1, max_length=80)
+    target_date: date
+    dimension: str | None = Field(default=None, max_length=120)
+    entity: str | None = Field(default=None, max_length=200)
+    path: list[EntityStep] = Field(default_factory=list, max_length=4)
+    use_model: bool = True
+
+
+# ---------------------------------------------------------------------------
+# Investigation findings: the human conclusion beside the measurement
+# ---------------------------------------------------------------------------
+class FindingCreate(ApiModel):
+    """A note written against one movement, or one part of one.
+
+    ``status`` is the state of the *investigation*, never of the KPI: nothing here
+    can change a detection verdict, and there is no field that could be mistaken
+    for one.
+    """
+
+    kpi_id: str = Field(min_length=1, max_length=80)
+    target_date: date
+    title: str = Field(min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=8000)
+    status: str = Field(default="OPEN")
+    dimension: str | None = Field(default=None, max_length=120)
+    entity: str | None = Field(default=None, max_length=200)
+    path: list[EntityStep] = Field(default_factory=list, max_length=4)
+
+
+class FindingUpdate(ApiModel):
+    """Change a note's text or where its investigation stands.
+
+    Every field is optional and an omitted field is left alone, so updating a
+    status cannot silently blank a note.
+    """
+
+    title: str | None = Field(default=None, min_length=1, max_length=200)
+    note: str | None = Field(default=None, max_length=8000)
+    status: str | None = None
+
+
+class FindingOut(ApiModel):
+    id: str
+    kpi_key: str
+    kpi_name: str
+    target_date: date
+    title: str
+    note: str | None
+    status: str
+    dimension: str | None
+    entity: str | None
+    path: list[dict[str, str]] = Field(default_factory=list)
+    #: How this finding's anchor reads in a list that mixes several nodes.
+    scope_label: str
+    detection_run_id: str | None = None
+    created_by_email: str | None = None
+    updated_by_email: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    #: Written when the status actually became RESOLVED and cleared when it stops
+    #: being RESOLVED. A timestamp that is present is one that means something.
+    resolved_at: datetime | None = None
+
+
+# ---------------------------------------------------------------------------
+# Monitoring dashboard: one read for the whole overview
+# ---------------------------------------------------------------------------
+class MonitoringCountsOut(ApiModel):
+    """The verdict tally for the window.
+
+    ``unrecognised`` exists because a stored row may carry a status from an
+    earlier schema. Folding those into one of the three real verdicts would
+    misreport them, and dropping them would make the tiles fail to sum -- so they
+    are counted, named and visible.
+    """
+
+    kpis_monitored: int
+    evaluated: int
+    normal: int
+    abnormal: int
+    low_confidence: int
+    unrecognised: int
+    unrecognised_statuses: list[str] = Field(default_factory=list)
+    #: KPIs with an active version that were not evaluated in the window at all.
+    not_evaluated: int
+
+
+class MonitoringMovementOut(ApiModel):
+    """One KPI's largest stored movement in the window."""
+
+    detection_run_id: str
+    kpi_id: str
+    kpi_key: str
+    kpi_name: str
+    target_date: date
+    status: str
+    actual_value: float | None
+    expected_value: float | None
+    deviation_absolute: float | None
+    deviation_pct: float | None
+    unit: str | None = None
+    currency: str | None = None
+    headline: str | None = None
+    #: Whether a breakdown has been stored for this movement. The dashboard uses it
+    #: to say "investigate" versus "review investigation" honestly.
+    #:
+    #: Null -- not False -- for a caller without ``investigation.read``. Whether
+    #: anyone has analysed a movement is itself investigation information, and
+    #: "you may not see this" must not be rendered as "nobody has looked".
+    has_contribution: bool | None = None
+    open_findings: int | None = None
+
+
+class MonitoringRunOut(ApiModel):
+    """One stored evaluation, most recent first."""
+
+    detection_run_id: str
+    agent_run_id: str | None = None
+    kpi_id: str
+    kpi_key: str
+    kpi_name: str
+    target_date: date
+    status: str
+    deviation_pct: float | None
+    executed_at: datetime
+
+
+class MonitoringKpiOut(ApiModel):
+    """One monitored KPI and its latest stored verdict, if it has one."""
+
+    kpi_id: str
+    kpi_key: str
+    kpi_name: str
+    lifecycle_status: str
+    active_version: int | None = None
+    latest_status: str | None = None
+    latest_target_date: date | None = None
+    latest_deviation_pct: float | None = None
+    latest_executed_at: datetime | None = None
+    evaluated_in_window: int = 0
+
+
+class MonitoringOut(ApiModel):
+    """Everything the monitoring dashboard needs, in one governed read.
+
+    Every figure is a count or a copy of a stored row. Nothing here is projected,
+    forecast or interpolated, and a window with no runs returns zeros rather than
+    a shape the screen has to guess at.
+    """
+
+    window_days: int
+    window_from: date | None
+    window_to: date | None
+    #: Null when no evaluation has ever been stored for this company. This is what
+    #: the screen must show instead of implying continuous monitoring.
+    last_evaluated_at: datetime | None = None
+    counts: MonitoringCountsOut
+    kpis: list[MonitoringKpiOut] = Field(default_factory=list)
+    biggest_movements: list[MonitoringMovementOut] = Field(default_factory=list)
+    recent_abnormal: list[MonitoringMovementOut] = Field(default_factory=list)
+    recent_runs: list[MonitoringRunOut] = Field(default_factory=list)
+    #: The investigation tallies, and null for a caller without
+    #: ``investigation.read``. A zero would assert that nobody has written a
+    #: finding, which is a different claim from "this is not yours to see".
+    findings_open: int | None = None
+    findings_in_progress: int | None = None
+    findings_resolved: int | None = None
+    recent_findings: list[FindingOut] = Field(default_factory=list)
+    #: Said plainly, because the platform has no scheduler in this version and a
+    #: dashboard that implies one is lying about what it is showing.
+    monitoring_note: str
 
 
 # ---------------------------------------------------------------------------

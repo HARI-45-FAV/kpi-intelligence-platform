@@ -285,8 +285,10 @@ def test_a_total_is_offered_the_finer_levels_and_a_distinct_count_is_not(grained
     assert by_name["region"]["is_default"] is True
     # The hierarchy is what makes a drill-down guided rather than a free jump
     # between dimensions: one step is offered from each level, and the last is a
-    # leaf.
-    assert by_name["region"]["hierarchy"] == ["sector"]
+    # leaf. Region declares two candidates, finest first -- ``sector`` for a source
+    # that can read the two tables together, ``channel`` for one that cannot --
+    # and ``next_dimensions`` offers only the ones actually available.
+    assert by_name["region"]["hierarchy"] == ["sector", "channel"]
     assert by_name["sector"]["hierarchy"] == ["product"]
     assert by_name["product"]["hierarchy"] == []
     # A dimension outside the hierarchy is still offered, and still leads nowhere:

@@ -1203,8 +1203,8 @@ function KpiDrawer({
               <DefinitionRow term="Dimensions">
                 <div className="flex flex-wrap gap-1">
                   {dimensions.map((d, index) => (
-                    <span key={`${d.dimension_name}-${d.source_column}-${index}`} className="chip" title={d.monitoring_note}>
-                      {d.dimension_name}
+                    <span key={`${d.name}-${d.column}-${index}`} className="chip" title={d.monitoring_note}>
+                      {d.name}
                     </span>
                   ))}
                 </div>

@@ -47,6 +47,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { api } from '../api/client'
 import type {
   ContributionResponse,
@@ -105,6 +106,18 @@ function isoToday(): string {
   return new Date().toISOString().slice(0, 10)
 }
 
+/**
+ * A date from the URL, or today.
+ *
+ * The Result page and the monitoring dashboard link straight to the movement they
+ * are showing, so the deep link has to be honoured. It is also untrusted input,
+ * which is why the shape is checked here: a junk `?date=` becomes today rather
+ * than a request the server has to reject.
+ */
+function isoFromParam(value: string | null): string {
+  return value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : isoToday()
+}
+
 /** How a KPI verdict reads. The same words the detection surface uses. */
 const STATUS_MEANING: Record<string, string> = {
   NORMAL: 'In line with comparable history.',
@@ -114,7 +127,32 @@ const STATUS_MEANING: Record<string, string> = {
 }
 
 const TOP_K_CHOICES = [5, 10, 20, 50]
-const LOOKBACK_CHOICES = [14, 30, 60, 90]
+/**
+ * Trend windows offered for a single entity.
+ *
+ * Seven is first and is the default: "how has this entity been running for the
+ * past week" is the question a reader actually asks after a movement, and a
+ * seven-point line is readable at a glance where ninety points are a texture.
+ * The longer windows stay because a weekly KPI needs more than seven days before
+ * it has three comparable ones, and the server -- not this list -- decides what
+ * is enough history to judge.
+ */
+const LOOKBACK_CHOICES = [7, 14, 30, 60, 90]
+const DEFAULT_LOOKBACK = 7
+
+/** The two entry points, described once so the tabs and the copy cannot disagree. */
+const MODES = [
+  {
+    id: 'movement' as const,
+    label: 'Movement investigation',
+    caption: 'Split a stored movement across the business',
+  },
+  {
+    id: 'manual' as const,
+    label: 'Manual analysis',
+    caption: 'Review one dimension or one entity directly',
+  },
+]
 
 /* --------------------------------------------------------------- share bar */
 
@@ -146,6 +184,222 @@ function ShareBar({
         className={`h-full rounded-full ${withMovement ? 'bg-accent/70' : 'bg-slate-400/60'}`}
         style={{ width: `${width}%` }}
       />
+    </div>
+  )
+}
+
+/* --------------------------------------------------------------- trend chart */
+
+/**
+ * An entity's measured value over the requested window, drawn as one line.
+ *
+ * Every point is a value the server read from the KPI's own registered source for
+ * one day — this draws them and nothing else. There is no smoothing, no
+ * interpolation across a day that returned nothing, and no trend line fitted in
+ * the browser: a gap in the data is drawn as a gap, because a line joined through
+ * a missing day would assert a measurement nobody took.
+ *
+ * The dashed baseline is the server's expectation for this entity (its `expected`,
+ * or the median of the earlier days when the engine did not judge it), labelled
+ * with whatever comparison basis the server named. It is here because "is this
+ * high?" is unanswerable from a line alone, and drawing the answer beside the line
+ * beats asking a reader to hold a number in their head.
+ *
+ * The final point is the date under investigation and is drawn larger so it can be
+ * found without counting. Nothing here is coloured by direction: whether "below the
+ * usual" is good or bad depends on the KPI, and a red dot would answer that
+ * question for every KPI at once. The verdict is the badge above, in the engine's
+ * own three words.
+ */
+function TrendChart({
+  points,
+  unit,
+  currency,
+  baseline,
+  baselineLabel,
+}: {
+  points: Array<{ date: string; value: number | null }>
+  unit?: string | null
+  currency?: string | null
+  baseline?: number | null
+  baselineLabel?: string | null
+}) {
+  const measured = points.filter((point) => point.value !== null)
+  if (measured.length === 0) return null
+
+  const width = 760
+  const height = 236
+  const padLeft = 10
+  const padRight = 10
+  const padTop = 38
+  const padBottom = 34
+  const plotWidth = width - padLeft - padRight
+  const plotHeight = height - padTop - padBottom
+
+  const values = measured.map((point) => point.value as number)
+  const candidates = baseline === null || baseline === undefined ? values : [...values, baseline]
+  const rawMin = Math.min(...candidates)
+  const rawMax = Math.max(...candidates)
+  // A flat series still needs a band to sit in, or every point lands on one pixel
+  // row and the chart says "no data" when it means "no change".
+  const span = rawMax - rawMin || Math.abs(rawMax) || 1
+  const min = rawMin - span * 0.18
+  const max = rawMax + span * 0.18
+
+  const xOf = (index: number) =>
+    points.length <= 1 ? padLeft + plotWidth / 2 : padLeft + (index * plotWidth) / (points.length - 1)
+  const yOf = (value: number) => padTop + plotHeight - ((value - min) / (max - min)) * plotHeight
+
+  // Consecutive runs of measured days. Each run is its own path, so a missing day
+  // breaks the line instead of being bridged.
+  const runs: Array<Array<{ x: number; y: number }>> = []
+  let run: Array<{ x: number; y: number }> = []
+  points.forEach((point, index) => {
+    if (point.value === null) {
+      if (run.length > 0) runs.push(run)
+      run = []
+      return
+    }
+    run.push({ x: xOf(index), y: yOf(point.value) })
+  })
+  if (run.length > 0) runs.push(run)
+
+  const baselineY =
+    baseline === null || baseline === undefined ? null : yOf(baseline)
+  const lastIndex = points.reduce(
+    (found, point, index) => (point.value !== null ? index : found),
+    -1,
+  )
+
+  // Only the ends and the middle are labelled when the window is long; a
+  // ninety-day window with every date printed is a grey smear.
+  const labelStride = Math.max(1, Math.ceil(points.length / 7))
+
+  return (
+    <div className="px-4 pb-3 pt-4">
+      <svg
+        viewBox={`0 0 ${width} ${height}`}
+        className="h-56 w-full"
+        role="img"
+        aria-label={`Measured value for each of the last ${points.length} day(s)`}
+      >
+        <defs>
+          <linearGradient id="trend-fill" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--primary-blue)" stopOpacity="0.22" />
+            <stop offset="100%" stopColor="var(--primary-blue)" stopOpacity="0.01" />
+          </linearGradient>
+        </defs>
+
+        {/* Four gridlines, unlabelled: they steady the eye without turning the
+            panel into a spreadsheet. The numbers are on the points themselves. */}
+        <g className="text-ink-700" stroke="currentColor" strokeWidth="1">
+          {[0, 0.25, 0.5, 0.75, 1].map((fraction) => (
+            <line
+              key={fraction}
+              x1={padLeft}
+              x2={width - padRight}
+              y1={padTop + plotHeight * fraction}
+              y2={padTop + plotHeight * fraction}
+              strokeDasharray={fraction === 1 ? undefined : '3 6'}
+              strokeOpacity={fraction === 1 ? 0.9 : 0.55}
+            />
+          ))}
+        </g>
+
+        {baselineY !== null && (
+          <>
+            <line
+              x1={padLeft}
+              x2={width - padRight}
+              y1={baselineY}
+              y2={baselineY}
+              className="stroke-slate-400"
+              strokeWidth="1.5"
+              strokeDasharray="6 5"
+              strokeOpacity="0.85"
+            />
+            <text
+              x={width - padRight}
+              y={Math.max(12, baselineY - 7)}
+              textAnchor="end"
+              className="fill-slate-500"
+              fontSize="11"
+            >
+              {baselineLabel ?? 'Usual'} · {kpiValue(baseline, unit, currency)}
+            </text>
+          </>
+        )}
+
+        {runs.map((segment, index) => (
+          <g key={`run-${index}`}>
+            {segment.length > 1 && (
+              <path
+                d={
+                  `M ${segment[0].x} ${padTop + plotHeight} ` +
+                  segment.map((point) => `L ${point.x} ${point.y}`).join(' ') +
+                  ` L ${segment[segment.length - 1].x} ${padTop + plotHeight} Z`
+                }
+                fill="url(#trend-fill)"
+                stroke="none"
+              />
+            )}
+            <path
+              d={segment.map((point, i) => `${i === 0 ? 'M' : 'L'} ${point.x} ${point.y}`).join(' ')}
+              className="stroke-accent"
+              strokeWidth="2.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              fill="none"
+            />
+          </g>
+        ))}
+
+        {points.map((point, index) => {
+          if (point.value === null) return null
+          const isLast = index === lastIndex
+          return (
+            <g key={point.date}>
+              <circle
+                cx={xOf(index)}
+                cy={yOf(point.value)}
+                r={isLast ? 5 : 3.5}
+                className="fill-accent"
+                fillOpacity={isLast ? 1 : 0.55}
+                stroke="var(--surface)"
+                strokeWidth="2"
+              />
+              {(isLast || points.length <= 10) && (
+                <text
+                  x={xOf(index)}
+                  y={Math.max(14, yOf(point.value) - 12)}
+                  textAnchor={index === 0 ? 'start' : index === points.length - 1 ? 'end' : 'middle'}
+                  className={isLast ? 'fill-slate-700 font-semibold' : 'fill-slate-500'}
+                  fontSize={isLast ? 12 : 11}
+                >
+                  {kpiValue(point.value, unit, currency)}
+                </text>
+              )}
+            </g>
+          )
+        })}
+
+        {points.map((point, index) => {
+          const isLast = index === points.length - 1
+          if (!isLast && index % labelStride !== 0) return null
+          return (
+            <text
+              key={`label-${point.date}`}
+              x={xOf(index)}
+              y={height - 10}
+              textAnchor={index === 0 ? 'start' : isLast ? 'end' : 'middle'}
+              className={isLast ? 'fill-slate-600 font-medium' : 'fill-slate-500'}
+              fontSize="11"
+            >
+              {formatDate(point.date)}
+            </text>
+          )
+        })}
+      </svg>
     </div>
   )
 }
@@ -183,8 +437,8 @@ function ContributorRow({
       ? Math.sign(contributor.change) === movementSign
       : true
 
-  const body = (
-    <>
+  return (
+    <div className="border-b border-ink-800/80 px-4 py-3 last:border-0">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <span className="text-sm font-medium text-slate-200">{contributor.label}</span>
         <span className="text-sm tabular-nums text-slate-300">
@@ -212,26 +466,20 @@ function ContributorRow({
           <span>{contributor.reference_count} comparable day(s)</span>
         )}
         {contributor.note && <span className="text-amber-300">{contributor.note}</span>}
+        {/*
+          Its own control rather than the whole row, so the drill has an accessible
+          name that says what it does. A row-sized button announces itself as every
+          figure in the row read aloud, and gives a reader no way to look at a
+          contributor without also being an inch from re-querying it.
+        */}
         {onDrill && drillLabel && (
-          <span className="font-medium text-accent">Break down by {drillLabel} →</span>
+          <button type="button" className="btn btn-xs btn-ghost ml-auto" onClick={onDrill}>
+            Break down by {drillLabel}
+          </button>
         )}
       </div>
-    </>
+    </div>
   )
-
-  if (onDrill && drillLabel) {
-    return (
-      <button
-        type="button"
-        className="row-link block"
-        onClick={onDrill}
-        title={`Break down ${contributor.label} by ${drillLabel}`}
-      >
-        {body}
-      </button>
-    )
-  }
-  return <div className="border-b border-ink-800/80 px-4 py-3 last:border-0">{body}</div>
 }
 
 /**
@@ -245,7 +493,16 @@ function ContributorRow({
  */
 function MovementSummary({ result }: { result: ContributionResult }) {
   return (
-    <Panel title="KPI movement">
+    <Panel
+      title="KPI movement"
+      actions={
+        <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+          {formatKpiName(result.kpi)} · {formatDate(result.target_date)}
+          {/* The only verdict on this screen, on the only thing that has one. */}
+          <StatusBadge status={result.status} />
+        </span>
+      }
+    >
       <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <Metric
           label="Actual"
@@ -258,17 +515,22 @@ function MovementSummary({ result }: { result: ContributionResult }) {
           hint={result.comparison ?? undefined}
         />
         <Metric
-          label="Variance"
+          label="Movement"
           value={signedValue(result.movement, result.unit, result.currency)}
           tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
           hint="The whole that the parts below are measured against."
         />
-        <Metric
-          label="Variance %"
-          value={signedPct(result.movement_pct)}
-          tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
-          hint="Against what was expected."
-        />
+        {/* Only when the server sent it. It is nullable, and a browser dividing the
+            movement by the expectation would be a second answer to a question the
+            server has already answered. */}
+        {result.movement_pct !== null && (
+          <Metric
+            label="Movement %"
+            value={signedPct(result.movement_pct)}
+            tone={result.status === 'ABNORMAL' ? 'bad' : 'default'}
+            hint="Against what was expected."
+          />
+        )}
       </div>
     </Panel>
   )
@@ -281,7 +543,7 @@ function TechnicalDetails({ response }: { response: ContributionResponse }) {
   return (
     <details className="mt-4 rounded-md border border-ink-800 bg-ink-850/60 px-3 py-2">
       <summary className="cursor-pointer text-[11px] font-medium uppercase tracking-wider text-slate-500">
-        In-depth results
+        Technical details
       </summary>
       <dl className="mt-2 space-y-1.5 text-[11px] text-slate-400">
         <div>
@@ -404,10 +666,26 @@ function ContributionView({
         title="Where did the movement come from?"
         bodyClassName="p-0"
         actions={
-          <span className="text-[11px] text-slate-500">
-            By {result.dimension} · {contributors.length} of {result.ranked_count} shown
-            {result.explained_pct !== null &&
-              ` · they account for ${formatNumber(Math.abs(result.explained_pct))}% of the movement`}
+          /*
+            Three separate facts, so each reads as itself: which breakdown this is,
+            how much of the ranking is on screen, and how much of the movement the
+            rows add up to. Run together in one sentence they became a single string
+            that could only be read whole.
+          */
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+            <span>By {result.dimension}</span>
+            <span className="text-slate-600">·</span>
+            <span>
+              {contributors.length} of {result.ranked_count} shown
+            </span>
+            {result.explained_pct !== null && (
+              <>
+                <span className="text-slate-600">·</span>
+                <span>
+                  they account for {formatNumber(Math.abs(result.explained_pct))}% of the movement
+                </span>
+              </>
+            )}
           </span>
         }
       >
@@ -474,12 +752,17 @@ function EntityView({
     reference_dates?: string[]
   }
 }) {
-  const peak = result.points.reduce(
-    (max, point) => Math.max(max, Math.abs(point.value ?? 0)),
-    0,
-  )
   const judged = result.status !== null
   const abnormal = result.status === 'ABNORMAL'
+  // First and last *measured* days in the window. Reported rather than judged: it
+  // says which way the entity has moved over the window, which is a different
+  // question from whether the selected day is abnormal.
+  const measuredPoints = result.points.filter((point) => point.value !== null)
+  const trendChange =
+    measuredPoints.length >= 2
+      ? (measuredPoints[measuredPoints.length - 1].value as number) -
+        (measuredPoints[0].value as number)
+      : null
   const direction =
     result.direction === 'UP'
       ? 'Above expectation'
@@ -495,9 +778,10 @@ function EntityView({
   return (
     <div className="space-y-4">
       <Panel
-        title={`${result.dimension}: ${result.entity}`}
+        title={`${result.entity} over ${result.observed_days} day${result.observed_days === 1 ? '' : 's'}`}
         actions={
           <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            <span className="chip">{result.dimension}</span>
             {formatKpiName(result.kpi)}
             {result.target_date && ` · ${formatDate(result.target_date)}`}
             {/* One status, on the thing it was asked about. */}
@@ -577,30 +861,99 @@ function EntityView({
         </Alert>
       ))}
 
-      <Panel title={`Recent trend · ${result.observed_days} day(s)`} bodyClassName="p-0">
-        <div className="max-h-96 overflow-y-auto">
-          {result.points.map((point) => (
-            <div
-              key={point.date}
-              className="flex items-center gap-3 border-b border-ink-800/80 px-4 py-2 last:border-0"
-            >
-              <span className="w-24 shrink-0 text-[11px] text-slate-500">
-                {formatDate(point.date)}
-              </span>
-              <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink-800">
-                {point.value !== null && peak > 0 && (
-                  <div
-                    className="h-full rounded-full bg-accent/60"
-                    style={{ width: `${Math.max(2, (Math.abs(point.value) / peak) * 100)}%` }}
-                  />
-                )}
-              </div>
-              <span className="w-28 shrink-0 text-right text-sm tabular-nums text-slate-300">
-                {kpiValue(point.value, result.unit, result.currency)}
-              </span>
+      {/*
+        The window, drawn. The chart answers "how has this been running?"; the rows
+        under it answer "what exactly was it on Tuesday?" — two different questions,
+        and a chart alone cannot be read to the precision a business decision needs.
+        Both come from the same server-supplied points, so they cannot disagree.
+      */}
+      <Panel
+        title="Actual value trend"
+        bodyClassName="p-0"
+        actions={
+          <span className="flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-500">
+            <span>
+              {result.observed_days} measured day{result.observed_days === 1 ? '' : 's'} of{' '}
+              {result.points.length}
+            </span>
+            {trendChange !== null && (
+              <>
+                <span className="text-slate-600">·</span>
+                <span>
+                  {signedValue(trendChange, result.unit, result.currency)} vs the start of the window
+                </span>
+              </>
+            )}
+          </span>
+        }
+      >
+        {result.points.length === 0 ? (
+          <EmptyState
+            title="No days to draw"
+            description="This entity returned no measured days in the requested window."
+          />
+        ) : (
+          <>
+            <TrendChart
+              points={result.points}
+              unit={result.unit}
+              currency={result.currency}
+              baseline={result.expected ?? result.typical}
+              baselineLabel={comparison ? 'Expected' : 'Usual'}
+            />
+            <div className="max-h-64 overflow-y-auto border-t border-ink-800/80">
+              <table className="min-w-full border-separate border-spacing-0">
+                <thead>
+                  <tr>
+                    <th className="table-head">Date</th>
+                    <th className="table-head text-right">Actual value</th>
+                    <th className="table-head text-right">Day on day</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {result.points.map((point, index) => {
+                    // Against the previous *measured* day, so a gap does not silently
+                    // become a two-day change presented as a one-day one.
+                    const earlier = result.points
+                      .slice(0, index)
+                      .filter((item) => item.value !== null)
+                      .pop()
+                    const step =
+                      point.value !== null && earlier?.value !== null && earlier !== undefined
+                        ? point.value - (earlier.value as number)
+                        : null
+                    const isTarget = point.date === result.target_date
+                    return (
+                      <tr
+                        key={point.date}
+                        className={`border-b border-ink-800/60 last:border-0 ${isTarget ? 'bg-accent-dim/50' : ''}`}
+                      >
+                        <td className="table-cell whitespace-nowrap text-slate-600">
+                          {formatDate(point.date)}
+                          {isTarget && (
+                            <span className="ml-2 text-[10px] uppercase tracking-wider text-slate-500">
+                              Selected
+                            </span>
+                          )}
+                        </td>
+                        <td
+                          className={`table-cell text-right tabular-nums ${isTarget ? 'font-semibold text-slate-800' : 'text-slate-700'}`}
+                        >
+                          {point.value === null
+                            ? 'Not measured'
+                            : kpiValue(point.value, result.unit, result.currency)}
+                        </td>
+                        <td className="table-cell text-right tabular-nums text-slate-500">
+                          {step === null ? '—' : signedValue(step, result.unit, result.currency)}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
             </div>
-          ))}
-        </div>
+          </>
+        )}
       </Panel>
 
       {evidence && (
@@ -653,31 +1006,44 @@ function EntityView({
  * offered rather than being asked to trust that it is. When the answer is no, the
  * only thing on offer is the instruction to run the analysis first — because until
  * it has, the movement this screen splits does not exist.
+ *
+ * The unavailable case is deliberately the loudest thing on the screen. "No agent
+ * run for this date" is not a failure the reader caused and not a transient error
+ * to retry; it is a different state of the world, with one thing to do about it, and
+ * a reader who misses that sentence spends their time wondering why the button does
+ * nothing. The available case stays quiet: the badge and the run state are already
+ * in the page header, so only the sentence that explains the verdict is repeated.
  */
 function RunStatus({ gate, loading }: { gate: InvestigationEntitiesResponse | null; loading: boolean }) {
   if (loading) {
     return <Spinner label="Checking whether this date has been analysed…" />
   }
-  if (!gate) return null
+  // Until the gate has actually answered, there is nothing to report. The check is
+  // on the *type* rather than on truthiness because a partial payload -- `{}` from
+  // an endpoint that answered without the field -- is neither "available" nor
+  // "unavailable", and treating it as unavailable rendered an amber box with no
+  // sentence in it: a warning about nothing, before the question had been asked.
+  if (typeof gate?.run_available !== 'boolean') return null
   if (!gate.run_available) {
     return (
       <Alert tone="warn">
-        <span className="font-medium">{gate.message}</span>
+        <div className="space-y-1">
+          <div className="text-sm font-semibold">Investigation unavailable for this date</div>
+          <p className="text-xs leading-relaxed">{gate.message}</p>
+          <p className="text-[11px] leading-relaxed opacity-90">
+            No agent run has been completed for {formatDate(gate.target_date)}, so there is no stored
+            movement to apportion and no measured entity to trend. Run the KPI analysis for this
+            date from the dashboard, then return here.
+          </p>
+        </div>
       </Alert>
     )
   }
+  if (!gate.kpi_status) return null
   return (
-    <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
-      <span>
-        Analysis: <span className="font-medium text-slate-300">{gate.run_state ?? 'Recorded'}</span>
-      </span>
-      <span className="flex items-center gap-1.5">
-        KPI status: <StatusBadge status={gate.kpi_status ?? undefined} />
-      </span>
-      {gate.kpi_status && (
-        <span className="text-slate-500">{STATUS_MEANING[gate.kpi_status] ?? ''}</span>
-      )}
-    </div>
+    <p className="text-xs leading-relaxed text-slate-500">
+      {STATUS_MEANING[gate.kpi_status] ?? ''}
+    </p>
   )
 }
 
@@ -786,6 +1152,70 @@ function EntityPicker({
   )
 }
 
+/* ------------------------------------------------------------ hierarchy trail */
+
+/**
+ * The drill order this KPI declared, from the KPI down.
+ *
+ * Walked from the default dimension through each level's own `hierarchy` — which
+ * the server populates from `next_dimensions` — so the chain shown is the one a
+ * drill will actually follow. It is not written into this client: a company split
+ * by Branch → Service sees Branch → Service here, and one split by
+ * Region → Sector → Product sees that, from the same code.
+ *
+ * `current` is highlighted when the reader is standing on that level, which is what
+ * makes this a position indicator rather than decoration.
+ */
+function HierarchyTrail({
+  kpiLabel,
+  dimensions,
+  current,
+}: {
+  kpiLabel: string
+  dimensions: InvestigationDimension[]
+  current?: string | null
+}) {
+  const chain = useMemo(() => {
+    const byName = new Map(dimensions.map((item) => [item.name, item]))
+    const start = dimensions.find((item) => item.is_default) ?? dimensions[0]
+    if (!start) return [] as string[]
+    const ordered: string[] = []
+    let cursor: InvestigationDimension | undefined = start
+    // Guarded against a hierarchy that loops back on itself: a registration is
+    // company-authored data, and a cycle would hang the render rather than draw a
+    // chain nobody can follow anyway.
+    while (cursor && !ordered.includes(cursor.name)) {
+      ordered.push(cursor.name)
+      const next: string | undefined = cursor.hierarchy?.[0]
+      cursor = next ? byName.get(next) : undefined
+    }
+    return ordered
+  }, [dimensions])
+
+  if (chain.length === 0) return null
+
+  return (
+    <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+      <span className="uppercase tracking-[0.16em] text-slate-500">Drill order</span>
+      <span className="chip">{kpiLabel}</span>
+      {chain.map((name) => (
+        <span key={name} className="flex items-center gap-1.5">
+          <span className="text-slate-400">→</span>
+          <span
+            className={
+              name === current
+                ? 'chip border-accent/50 bg-accent-dim font-semibold text-slate-800'
+                : 'chip'
+            }
+          >
+            {name}
+          </span>
+        </span>
+      ))}
+    </div>
+  )
+}
+
 /* ---------------------------------------------------------------------- page */
 
 type Mode = 'movement' | 'manual'
@@ -793,23 +1223,40 @@ type Mode = 'movement' | 'manual'
 export default function Investigation() {
   const { companyId, can } = useAuth()
   const [mode, setMode] = useState<Mode>('movement')
-  const [kpiId, setKpiId] = useState('')
-  const [date, setDate] = useState(isoToday())
+  // Seeded from the URL so "investigate this movement" lands on that movement.
+  // The effect below still fills in the company's first KPI when no link supplied
+  // one, so the plain /investigation entry point behaves exactly as before.
+  const [searchParams] = useSearchParams()
+  const [kpiId, setKpiId] = useState(() => searchParams.get('kpi') ?? '')
+  const [date, setDate] = useState(() => isoFromParam(searchParams.get('date')))
   const [topK, setTopK] = useState(10)
 
-  /** The drill path: the ancestors already chosen, deepest last. */
-  const [path, setPath] = useState<EntityStep[]>([])
-  /** The dimension being broken down — null means "this KPI's default". */
-  const [dimension, setDimension] = useState<string | null>(null)
+  /**
+   * One analysed level per entry, shallowest first, and which of them is on screen.
+   *
+   * This replaces a `contribution` object held alongside a separate `path` and
+   * `dimension`: three pieces of state describing one thing, which is how the
+   * breadcrumb came to be wrong. Climbing had to *recompute* the dimension it was
+   * returning to from the KPI's hierarchy, and derived the level below the one it
+   * was climbing to -- so every intermediate crumb refetched the level the reader
+   * was already on. A level that has been analysed is remembered instead, so going
+   * back is navigation rather than a second request, and the dimension it returns
+   * to is the one that was actually analysed there.
+   */
+  const [trail, setTrail] = useState<ContributionResponse[]>([])
+  const [level, setLevel] = useState(0)
 
   const [manualDimension, setManualDimension] = useState('')
   const [manualEntity, setManualEntity] = useState('')
-  const [lookback, setLookback] = useState(30)
+  const [lookback, setLookback] = useState(DEFAULT_LOOKBACK)
   const [manualModalOpen, setManualModalOpen] = useState(false)
 
-  const [contribution, setContribution] = useState<ContributionResponse | null>(null)
   const [manual, setManual] = useState<ManualAnalysisResponse | null>(null)
   const action = useAction()
+
+  /** The level on screen, and the coordinates it was analysed at. Both derived. */
+  const contribution = trail[level] ?? null
+  const path: EntityStep[] = contribution?.result.path ?? []
 
   const allowed = can('investigation.read')
 
@@ -851,18 +1298,48 @@ export default function Investigation() {
     { enabled: Boolean(companyId && kpiId) && allowed },
   )
 
-  const dimensionList: InvestigationDimension[] = dimensions.data?.dimensions ?? []
+  const dimensionList: InvestigationDimension[] = useMemo(() => {
+    const served = dimensions.data?.dimensions ?? []
+    if (served.length > 0) return served
+    // Fallback, and only a fallback: the approved breakdowns carried by the KPI's
+    // own contract, which is a server-issued document rather than a list written
+    // into this client. It duplicates no governance -- `allowed: false` is honoured
+    // here and `resolve_dimension` re-validates every dimension server-side, so a
+    // breakdown offered from here still cannot be queried unless the KPI approved
+    // it. `hierarchy: []` because the contract declares none: one honest level, and
+    // no drill offered that would lead nowhere.
+    return (contract?.dimensions ?? [])
+      .filter((item) => item.allowed)
+      .map((item) => ({
+        name: item.name,
+        is_default: item.is_default_breakdown,
+        hierarchy: [],
+        approx_cardinality: item.approx_cardinality ?? null,
+        notes: item.monitoring_note || null,
+      }))
+  }, [dimensions.data, contract])
 
   const currentDimension = useMemo(() => {
-    const active = contribution?.result.dimension ?? dimension
+    const active = contribution?.result.dimension
     if (!active) return dimensionList.find((item) => item.is_default) ?? dimensionList[0] ?? null
     return dimensionList.find((item) => item.name === active) ?? null
-  }, [contribution, dimension, dimensionList])
+  }, [contribution, dimensionList])
 
-  const noDimensions = !dimensions.loading && dimensionList.length === 0
+  // "This KPI has no approved breakdown" is a conclusion, so it waits for the
+  // answer that supports it. Keying off `!loading` asserted it during the very
+  // first render -- before the request had been made, when the list is empty
+  // because nothing has been fetched yet -- which flashed the warning and disabled
+  // the button on every visit to the page.
+  const noDimensions = dimensions.data !== null && dimensionList.length === 0
   const defaultDimension = dimensionList.find((item) => item.is_default) ?? dimensionList[0] ?? null
 
-  const nextDimension = currentDimension?.hierarchy[0] ?? null
+  // Where a drill may go next, taken from the analysed result rather than from the
+  // client's copy of the hierarchy. The server already filtered its own suggestions
+  // to dimensions this KPI approved *and* this reader may query, so a button built
+  // from `next_dimensions` cannot lead somewhere the next request would refuse --
+  // which the client-side hierarchy could, and did for a contract-derived fallback
+  // that carries no hierarchy at all.
+  const nextDimension = contribution?.result.next_dimensions?.[0] ?? null
 
   // The gate, and the entity list behind it. One request answers both: whether
   // detection stored a result for this date -- which is the only thing that makes
@@ -886,16 +1363,41 @@ export default function Investigation() {
   const runAvailable = gate.data?.run_available ?? null
   const blocked = runAvailable === false
 
+  /**
+   * The entities the selector may offer: the ones the source returned for this KPI,
+   * this dimension and this date, already scope-filtered by the server.
+   *
+   * Empty whenever the date has no stored run, so the control cannot offer a
+   * selection that the analysis endpoint would then refuse.
+   */
+  const entityOptions: InvestigationEntity[] = useMemo(
+    () => (blocked ? [] : gate.data?.entities ?? []),
+    [blocked, gate.data],
+  )
+
   // Changing the KPI abandons a path built for a different one: a Region value
   // from another KPI's registration is not a valid narrowing here.
   useEffect(() => {
-    setPath([])
-    setDimension(null)
-    setContribution(null)
+    setTrail([])
+    setLevel(0)
     setManual(null)
     setManualDimension('')
     setManualEntity('')
   }, [kpiId])
+
+  /**
+   * A result belongs to the date it was analysed for.
+   *
+   * Without this, moving the date field left the previous day's breakdown on screen
+   * under the new day's heading — every figure real, and every one of them attached
+   * to the wrong date. The selections are deliberately kept: the same dimension and
+   * the same entity on a different day is exactly the comparison a reader is making.
+   */
+  useEffect(() => {
+    setTrail([])
+    setLevel(0)
+    setManual(null)
+  }, [date])
 
   /**
    * What the Copilot is told about this screen: coordinates only.
@@ -927,9 +1429,11 @@ export default function Investigation() {
         }),
       )
       if (response) {
-        setContribution(response)
-        setPath(nextPath)
-        setDimension(response.result.dimension)
+        // The analysed level lands at its own depth, and anything deeper is
+        // discarded: a breakdown of last drill's child is not a breakdown of this
+        // one. Ancestors are kept, which is what makes climbing free.
+        setTrail((current) => [...current.slice(0, nextPath.length), response])
+        setLevel(nextPath.length)
       }
     },
     [action, companyId, kpiId, date, noDimensions, topK],
@@ -962,11 +1466,18 @@ export default function Investigation() {
     [action, companyId, kpiId, manualDimension, manualEntity, date, lookback, noDimensions, topK],
   )
 
-  /** Choose one of the measured entities and analyse that entity alone (§13). */
+  /**
+   * Choose one of the measured entities and analyse that entity alone (§13).
+   *
+   * The result lands in the page rather than in a dialog. A trend chart, a verdict
+   * and the day-by-day values are the answer to the question, not a detail view of
+   * it, and a modal put them behind a dismissal that also threw away the reader's
+   * place in the list. The dialog is still available on demand for a full-width
+   * read.
+   */
   const investigateEntity = useCallback(
     (item: InvestigationEntity) => {
       setManualEntity(item.entity)
-      setManualModalOpen(true)
       void runManual(item.entity)
     },
     [runManual],
@@ -992,19 +1503,12 @@ export default function Investigation() {
     [contribution, nextDimension, runContribution],
   )
 
-  /** Climb back to a shallower level of the same path. */
+  /** Climb back to a shallower level of the same path — already analysed, so no refetch. */
   const climb = useCallback(
     (depth: number) => {
-      if (!contribution) return
-      const trimmed = contribution.result.path.slice(0, depth)
-      const back =
-        depth === 0
-          ? null
-          : (dimensionList.find((item) => item.name === trimmed[depth - 1].dimension)
-              ?.hierarchy[0] ?? null)
-      void runContribution(trimmed, back)
+      if (depth < trail.length) setLevel(depth)
     },
-    [contribution, dimensionList, runContribution],
+    [trail.length],
   )
 
   if (!allowed) {
@@ -1019,32 +1523,78 @@ export default function Investigation() {
   }
 
   return (
-    <div className="space-y-4">
-      <Panel
-        title="Investigation"
-        actions={
-          <div className="segmented-switch">
-            {(['movement', 'manual'] as const).map((option) => (
-              <button
-                key={option}
-                type="button"
-                className={`segmented-option ${mode === option ? 'segmented-option-active' : ''}`}
-                onClick={() => setMode(option)}
-              >
-                {option === 'movement' ? 'From a movement' : 'Manual analysis'}
-              </button>
-            ))}
+    <div className="space-y-5">
+      {/*
+        The page's own header, above the workspace rather than inside a panel's
+        title bar. The two entry points are the primary navigation of this screen --
+        they decide what every control below it means -- so they are a tab strip at
+        the top, not two small buttons in a panel's top-right corner where they read
+        as an afterthought.
+      */}
+      <div className="flex flex-col gap-4">
+        <div className="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+          <div>
+            <p className="text-xs uppercase tracking-[0.18em] text-slate-500">Investigation</p>
+            <h1 className="mt-1 text-2xl font-semibold text-slate-800">
+              {contract ? formatKpiName(contract.name) : 'Decision workspace'}
+            </h1>
+            <p className="mt-1 text-xs text-slate-500">
+              {contract
+                ? `Contract v${contract.version} · ${formatDate(date)}`
+                : 'Choose a KPI and a date the platform has already analysed.'}
+            </p>
           </div>
-        }
-      >
-        <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.18em] text-slate-500">
-          <span>{mode === 'movement' ? 'Movement view' : 'Manual view'}</span>
-          <span className="text-slate-600">•</span>
-          <span>{mode === 'movement' ? 'Stored result' : 'Direct review'}</span>
+          {gate.data?.run_available && (
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-2 text-xs text-slate-500">
+              <span className="flex items-center gap-1.5">
+                KPI status: <StatusBadge status={gate.data.kpi_status ?? undefined} />
+              </span>
+              <span>
+                Analysis:{' '}
+                <span className="font-medium text-slate-700">{gate.data.run_state ?? 'Recorded'}</span>
+              </span>
+            </div>
+          )}
         </div>
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <Field label="KPI" required>
+        {/*
+            A group of toggle buttons, not an ARIA tablist: the two modes swap the
+            controls inside the scope panel below rather than swapping one labelled
+            panel, so `aria-pressed` describes what actually happens and keeps each
+            control a plain button for anything reading the page.
+          */}
+        <div
+          className="segmented-switch grid grid-cols-1 gap-1 sm:grid-cols-2"
+          role="group"
+          aria-label="Investigation entry point"
+        >
+          {MODES.map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              aria-pressed={mode === option.id}
+              className={`segmented-option flex-col items-start px-4 py-3 text-left ${mode === option.id ? 'segmented-option-active' : ''}`}
+              onClick={() => setMode(option.id)}
+            >
+              <span className="text-sm font-semibold">{option.label}</span>
+              <span className="mt-0.5 text-[11px] font-normal opacity-80">{option.caption}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <Panel
+        title="Scope"
+        actions={
+          <HierarchyTrail
+            kpiLabel={contract ? formatKpiName(contract.name) : 'KPI'}
+            dimensions={dimensionList}
+            current={contribution?.result.dimension ?? manualDimension ?? currentDimension?.name}
+          />
+        }
+      >
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+          <Field label="KPI" required hint="From this company's registry">
             <select
               className="field"
               value={kpiId}
@@ -1058,33 +1608,83 @@ export default function Investigation() {
             </select>
           </Field>
 
-          <Field label="Date" required>
+          <Field label="Run date" required hint="A date already analysed">
             <input
               type="date"
               className="field"
               value={date}
+              max={isoToday()}
               onChange={(event) => setDate(event.target.value)}
             />
           </Field>
 
           {mode === 'manual' && (
-            <Field label="Dimension" hint="Approved only">
+            <Field
+              label="Dimension"
+              hint={
+                currentDimension?.approx_cardinality
+                  ? `~${formatNumber(currentDimension.approx_cardinality)} values`
+                  : 'Approved breakdowns only'
+              }
+            >
               <select
                 className="field"
                 value={manualDimension}
-                onChange={(event) => setManualDimension(event.target.value)}
+                onChange={(event) => {
+                  setManualDimension(event.target.value)
+                  // A different dimension has different values, so the entity
+                  // chosen under the previous one is no longer a valid selection.
+                  setManualEntity('')
+                }}
               >
-                <option value="">This KPI's default</option>
+                <option value="">
+                  {defaultDimension ? `${defaultDimension.name} (default)` : "This KPI's default"}
+                </option>
                 {dimensionList.map((item) => (
                   <option key={item.name} value={item.name}>
                     {item.name}
+                    {item.is_default ? ' (default)' : ''}
                   </option>
                 ))}
               </select>
             </Field>
           )}
 
-          <Field label="Top contributors" hint="Results shown">
+          {/*
+            The entity, suggested from the values the source actually returned for
+            this date. It stays a typed field backed by a datalist rather than a
+            closed <select>: the suggestion list removes the spelling test for the
+            ordinary case, and typing still works when the picker has nothing to
+            offer — an entity present in the source but outside the top slice, or a
+            date whose entity list has not answered yet.
+          */}
+          {mode === 'manual' && (
+            <Field
+              label="Entity"
+              hint={
+                entityOptions.length > 0
+                  ? `${entityOptions.length} measured on this date`
+                  : 'Optional — leave blank to rank the dimension'
+              }
+            >
+              <input
+                className="field"
+                list="investigation-entity-options"
+                value={manualEntity}
+                placeholder="A value of the dimension above"
+                onChange={(event) => setManualEntity(event.target.value)}
+              />
+              <datalist id="investigation-entity-options">
+                {entityOptions.map((item) => (
+                  <option key={item.entity} value={item.entity}>
+                    {item.label}
+                  </option>
+                ))}
+              </datalist>
+            </Field>
+          )}
+
+          <Field label="Top contributors" hint="Rows shown in a ranking">
             <select
               className="field"
               value={topK}
@@ -1098,8 +1698,10 @@ export default function Investigation() {
             </select>
           </Field>
 
+          {/* Only meaningful for one entity: it is the length of that entity's trend
+              window, and a ranking of contributors has no window to set. */}
           {mode === 'manual' && manualEntity.trim() !== '' && (
-            <Field label="Lookback">
+            <Field label="Trend window" hint="Days of history to chart">
               <select
                 className="field"
                 value={lookback}
@@ -1107,7 +1709,7 @@ export default function Investigation() {
               >
                 {LOOKBACK_CHOICES.map((value) => (
                   <option key={value} value={value}>
-                    {value} days
+                    Last {value} days
                   </option>
                 ))}
               </select>
@@ -1125,28 +1727,32 @@ export default function Investigation() {
           <RunStatus gate={gate.data} loading={gate.loading} />
         </div>
 
-        <div className="mt-4 flex flex-wrap items-center gap-3">
+        <div className="mt-4 flex flex-wrap items-center gap-3 border-t border-ink-800/70 pt-4">
           <button
             type="button"
             className="btn btn-primary"
             disabled={!kpiId || action.pending || noDimensions || blocked}
             onClick={() => {
               if (mode === 'movement') void runContribution([], null)
-              else {
-                setManualModalOpen(true)
-                void runManual()
-              }
+              else void runManual()
             }}
           >
-            {action.pending ? 'Analysing…' : mode === 'movement' ? 'Explain' : 'Run'}
+            {action.pending ? 'Analysing…' : mode === 'movement' ? 'Explain the movement' : 'Run'}
           </button>
           {action.pending && <Spinner label="Reading the KPI's registered source…" />}
+          {/*
+            Which breakdown the run will use, named before it runs and in the same
+            words the result carries afterwards ("By region"), so the answer is not
+            the first place the reader learns what was split. It gives way to the
+            result's own heading once there is one, rather than repeating it.
+          */}
+          {!action.pending && mode === 'movement' && defaultDimension && !contribution && (
+            <span className="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+              <span className="chip">By {defaultDimension.name}</span>
+              <span>first, then down this KPI's own hierarchy.</span>
+            </span>
+          )}
         </div>
-        {defaultDimension && mode === 'movement' && !contribution && (
-          <div className="mt-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">
-            Default: <span className="font-medium text-slate-200">{defaultDimension.name}</span>
-          </div>
-        )}
 
         {contracts.error && (
           <div className="mt-3">
@@ -1219,20 +1825,60 @@ export default function Investigation() {
         />
       )}
 
+      {/*
+        The manual result, in the page. Rendered inline so the trend, the verdict and
+        the day-by-day values are readable alongside the picker that chose the
+        entity; the dialog below shows the identical content full-width for a reader
+        who wants it larger, and nothing is computed twice to do it.
+      */}
       {mode === 'manual' && manual && !manualModalOpen && (
-        <Panel
-          title="Latest result"
-          actions={
-            <button type="button" className="btn btn-xs btn-ghost" onClick={() => setManualModalOpen(true)}>
-              View details
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2 text-[11px] uppercase tracking-[0.16em] text-slate-500">
+              <span>{manual.mode === 'contribution' ? 'Contribution ranking' : 'Entity analysis'}</span>
+              <span className="text-slate-400">•</span>
+              <span>{manual.result.dimension}</span>
+            </div>
+            <button
+              type="button"
+              className="btn btn-xs btn-ghost"
+              onClick={() => setManualModalOpen(true)}
+            >
+              Expand
             </button>
-          }
-        >
-          <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500">
-            <span>{manual.result.dimension}</span>
-            <span className="text-slate-600">•</span>
-            <span>{manual.mode === 'contribution' ? 'Contribution view' : 'Entity view'}</span>
           </div>
+          {manual.mode === 'contribution' ? (
+            <ContributionView
+              response={manual}
+              nextDimension={nextDimension}
+              onDrill={drill}
+              onBreadcrumb={climb}
+            />
+          ) : (
+            <EntityView result={manual.result} evidence={manual.evidence} />
+          )}
+        </div>
+      )}
+
+      {mode === 'manual' && blocked && !action.pending && (
+        <Panel>
+          <EmptyState
+            title="Nothing to investigate on this date"
+            description="No agent run has been completed for this date, so there is no entity to trend and no dimension to rank. Run the KPI analysis for this date first."
+          />
+        </Panel>
+      )}
+
+      {mode === 'manual' && !manual && !blocked && !action.pending && gate.data && (
+        <Panel>
+          <EmptyState
+            title="Nothing analysed yet"
+            description={
+              entityOptions.length > 0
+                ? 'Pick an entity above and analyse it, or rank the dimension’s contributors.'
+                : 'Run the analysis to rank this dimension’s contributors.'
+            }
+          />
         </Panel>
       )}
 

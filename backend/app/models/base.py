@@ -428,6 +428,30 @@ class BucketConfigSource(StrEnum):
     LLM_EXTRACTION = "LLM_EXTRACTION"
 
 
+class FindingStatus(StrEnum):
+    """Where a person's investigation note stands.
+
+    Deliberately about the *investigation*, never about the KPI. A detection
+    verdict is the engine's and has three values of its own; this is the human
+    workflow beside it, and conflating the two would let a reader close an
+    anomaly by editing a note.
+    """
+
+    OPEN = "OPEN"
+    IN_PROGRESS = "IN_PROGRESS"
+    RESOLVED = "RESOLVED"
+
+
+#: Any status may be reached from any other: an investigation that was resolved
+#: and then reopened is a normal thing to happen, and refusing it would push
+#: people into writing a second note that contradicts the first.
+FINDING_TRANSITIONS: dict[FindingStatus, tuple[FindingStatus, ...]] = {
+    FindingStatus.OPEN: (FindingStatus.IN_PROGRESS, FindingStatus.RESOLVED),
+    FindingStatus.IN_PROGRESS: (FindingStatus.OPEN, FindingStatus.RESOLVED),
+    FindingStatus.RESOLVED: (FindingStatus.OPEN, FindingStatus.IN_PROGRESS),
+}
+
+
 BUCKET_CONFIG_TRANSITIONS: dict[BucketConfigStatus, tuple[BucketConfigStatus, ...]] = {
     BucketConfigStatus.DRAFT: (BucketConfigStatus.PROPOSED, BucketConfigStatus.ARCHIVED),
     # A reviewer who fixes what the extraction got wrong moves it to DRAFT and

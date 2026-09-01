@@ -42,8 +42,9 @@ from dataclasses import dataclass, field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.connectors import registry
 from app.models.kpi import KpiVersion
-from app.models.source import SourceTable
+from app.models.source import DataSource, SourceTable
 
 
 @dataclass(frozen=True)
@@ -112,7 +113,13 @@ _ANCHOR_DIMENSIONS: tuple[MappedDimension, ...] = (
         dimension_name="region",
         source_table="orders",
         source_column="region",
-        hierarchy=["sector"],
+        # Two candidate next levels, finest first. ``sector`` is a level of detail
+        # *within* a region and is the better descent when the source can be read
+        # with a join; ``channel`` is the fallback for a source that cannot, so a
+        # guided drill-down still has somewhere to go instead of stopping at the
+        # first level. Whichever of the two is unavailable is dropped by
+        # ``contribution.next_dimensions`` rather than offered.
+        hierarchy=["sector", "channel"],
         is_default_breakdown=True,
         approx_cardinality=4,
         notes="Where the activity was recorded.",
@@ -197,14 +204,32 @@ def _sibling_tables(session: Session, anchor: SourceTable) -> set[str]:
     return {str(name).lower() for name in names}
 
 
+def _can_read_two_tables_at_once(session: Session, anchor: SourceTable) -> bool:
+    """Whether this source can match the finer table to the KPI's own table.
+
+    A source reached over REST returns one table per request. Both tables are
+    readable; neither can be joined to the other in a single pass, which is
+    precisely what apportioning a KPI across a finer grain requires --
+    :mod:`app.services.kpi_breakdown` refuses the breakdown outright for such a
+    source. Asking here means the dimension is never *offered*, so a reader is not
+    handed a drill-down that fails the moment they click it.
+    """
+
+    source = session.get(DataSource, anchor.data_source_id)
+    if source is None:
+        return False
+    return registry.supports_multi_table_reads(source.source_type)
+
+
 def dimensions_for(session: Session, version: KpiVersion) -> list[MappedDimension]:
     """The declared breakdowns for this KPI version, most useful first.
 
     Empty unless every condition holds: the KPI is measured on the table this map
     describes, and -- for a dimension on a finer-grained table -- that table is
-    actually registered on the same source and the KPI's measure can be
-    apportioned. A dimension is never offered that a drill-down would then fail
-    on, which is the whole reason for the checks.
+    actually registered on the same source, the source can read the two tables
+    together, and the KPI's measure can be apportioned. A dimension is never
+    offered that a drill-down would then fail on, which is the whole reason for the
+    checks.
     """
 
     table_id = version.primary_source_table_id
@@ -216,6 +241,7 @@ def dimensions_for(session: Session, version: KpiVersion) -> list[MappedDimensio
 
     registered = _sibling_tables(session, anchor)
     apportionable = _can_apportion(version)
+    joinable = _can_read_two_tables_at_once(session, anchor)
 
     out: list[MappedDimension] = []
     for dimension in _ANCHOR_DIMENSIONS:
@@ -223,7 +249,7 @@ def dimensions_for(session: Session, version: KpiVersion) -> list[MappedDimensio
         if on_anchor:
             out.append(dimension)
             continue
-        if not apportionable:
+        if not apportionable or not joinable:
             continue
         if dimension.source_table.lower() not in registered:
             continue

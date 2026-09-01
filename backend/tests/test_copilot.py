@@ -677,7 +677,7 @@ def test_the_orchestration_layer_never_names_a_model_or_provider():
     transport is what turns a swappable provider into a hardcoded one.
     """
     roots = (Path("app/copilot"), Path("app/api/v1"), Path("app/services"), Path("app/models"))
-    forbidden = ("qwen", "vllm", "openai", "anthropic", "llama", "gpt-", "ollama")
+    forbidden = ("qwen", "vllm", "openai", "anthropic", "llama", "gpt-", "ollama", "gemini")
 
     checked = 0
     for root in roots:

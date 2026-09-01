@@ -540,10 +540,18 @@ export interface KpiContract {
   timezone?: string | null
   calendar?: Record<string, any> | null
   source: Record<string, any>
+  /**
+   * The approved breakdowns, in the shape `export_contract` serialises them.
+   *
+   * `name`/`table`/`column`, not the ORM's `dimension_name`/`source_column`: the
+   * contract is a published document with its own field names, and the two were
+   * out of step here — the registry panel read `dimension_name` off every row and
+   * rendered a column of empty chips because the key does not exist on the wire.
+   */
   dimensions: Array<{
-    dimension_name: string
-    source_table?: string | null
-    source_column: string
+    name: string
+    table?: string | null
+    column: string
     allowed: boolean
     is_default_breakdown: boolean
     approx_cardinality?: number | null
@@ -943,11 +951,39 @@ export interface ResultHistoryItem {
   explanation_status: string
   explanation_generated_at?: string | null
   email_status: string
+  /**
+   * The dimensions a finding was recorded against for this KPI and date.
+   *
+   * A detection run measures the KPI's own total and carries no dimension, so
+   * this is the dimensional *reading* of the result rather than what the engine
+   * measured. Present only for callers holding investigation access.
+   */
+  dimensions?: string[]
+  entities?: string[]
+}
+
+/** The values the stored results can be narrowed by. Server-issued. */
+export interface ResultFilterOptions {
+  kpis: Array<{ kpi_key: string; kpi_name: string }>
+  dates: string[]
+  statuses: string[]
+  /** Empty unless the caller may read findings. */
+  dimensions: string[]
 }
 
 export interface ResultHistoryResponse {
   summary: ResultSummary
   items: ResultHistoryItem[]
+  /** What the server actually applied, so the screen never claims a filter it did not get. */
+  filters?: {
+    status: string | null
+    kpi_key: string | null
+    target_date: string | null
+    dimension: string | null
+  }
+  options?: ResultFilterOptions
+  /** The company's full stored count, so a narrowed page never reads as data loss. */
+  total_stored?: number
 }
 
 export interface DetectionBatchResponse {
@@ -957,6 +993,19 @@ export interface DetectionBatchResponse {
   results: DetectionRunResponse[]
   skipped: Array<{ kpi_id: string; reason: string }>
   counts: { evaluated: number; skipped: number }
+  /**
+   * True when this date already had a completed Agent Run and the results came
+   * back from storage instead of being measured again. The envelope is otherwise
+   * identical to an execution's, so a caller renders one shape and branches only
+   * on this flag.
+   */
+  already_completed?: boolean
+  /** False on a replay: nothing read the company's source on this request. */
+  executed?: boolean
+  /** The run a `force_rerun` execution superseded, when there was one. */
+  rerun_of_agent_run_id?: string | null
+  /** The server's own sentence for a replayed date. Shown verbatim. */
+  message?: string | null
 }
 
 export interface AgentRunSummary {
@@ -1353,3 +1402,282 @@ export interface BucketConfigPreview {
 }
 
 
+/* ------------------------------------------------------- stored detection run */
+
+/**
+ * The technical record behind one stored verdict.
+ *
+ * Returned only to a caller holding `kpi.read` — the server attaches it or does
+ * not, and the screen must handle its absence rather than assume it. Every field
+ * is a value the engine wrote at evaluation time, which is what lets the Result
+ * page show *why* a KPI was flagged without recomputing anything: the numbers on
+ * the page are the numbers the verdict was reached with.
+ */
+export interface DetectionEvidence {
+  kpi_version: number
+  kpi_version_id: string
+  source?: Record<string, unknown>
+  bucket: {
+    applied: string
+    all_applied: string[]
+    decisions: Array<{
+      bucket: string
+      role: string
+      reference_count: number
+      note: string
+    }>
+    config_id?: string | null
+    config_key?: string | null
+    config_version?: number | null
+    signature?: Record<string, unknown>
+  }
+  /** The comparable periods the expectation was built from, with their values. */
+  reference: {
+    count: number
+    points: Array<{ date: string; value: number | null }>
+  }
+  statistics: {
+    median: number | null
+    mad: number | null
+    dispersion: number | null
+    dispersion_basis: string | null
+    modified_z_score: number | null
+    z_threshold: number | null
+    z_threshold_note: string | null
+    statistically_significant: boolean
+  }
+  tolerance: {
+    relative_pct: number | null
+    absolute: number | null
+    breached: boolean
+    relative_floor_pct: number | null
+    movement_is_material: boolean
+  }
+  year_over_year: { applied: boolean; factor: number | null }
+  method: string | null
+  reason: string | null
+  notes: string[]
+  query_count?: number | null
+  duration_ms?: number | null
+}
+
+/** One stored result: the business answer, plus the evidence if entitled. */
+export interface DetectionRunDetail {
+  result: DetectionResult
+  run_id: string
+  executed_at: string
+  evidence?: DetectionEvidence
+}
+
+/* ---------------------------------------------------------- AI explainability */
+
+/** One labelled section. The headings are fixed server-side, never by the client. */
+export interface ExplanationSection {
+  heading: string
+  body: string
+}
+
+/**
+ * An approved document the explanation drew on.
+ *
+ * Present only for a reader holding `document.read`, and only for documents their
+ * own scopes admit — the server filters before any content is read, so a
+ * restricted document is never named here and the screen need not re-check.
+ */
+export interface ExplanationCitation {
+  label: string
+  title?: string | null
+  snippet?: string | null
+  document_id?: string | null
+  document_key?: string | null
+  document_version?: number | null
+  document_status?: string | null
+  standing?: string | null
+  effective_from?: string | null
+  effective_to?: string | null
+  score?: number | null
+}
+
+/** A three-level judgement with the reasons that produced it — never a probability. */
+export interface ExplanationConfidence {
+  level: string
+  reasons: string[]
+}
+
+/**
+ * A structured explanation assembled from stored evidence.
+ *
+ * `model_written` is the honest label on the prose: false means these are the
+ * platform's own words over the same governed figures, which is what ships when
+ * no language model is configured and what a reader still gets when a configured
+ * one fails. The figures are identical either way, so the screen shows the label
+ * rather than hiding the difference.
+ *
+ * `facts` is the material the explanation was built from, attached only for a
+ * reader entitled to the statistics. It is there so the prose can be checked
+ * against the numbers instead of taken on trust.
+ */
+export interface Explanation {
+  subject: string
+  scope: string
+  order: string[]
+  sections: ExplanationSection[]
+  text: string
+  citations: ExplanationCitation[]
+  confidence: ExplanationConfidence
+  limitations: string[]
+  model_written: boolean
+  model?: string | null
+  facts?: Record<string, unknown> | null
+}
+
+export interface ExplanationResponse {
+  explanation: Explanation
+}
+
+/* -------------------------------------------------- investigation findings */
+
+/**
+ * A person's written conclusion about a movement.
+ *
+ * Anchored to a KPI and date, and optionally to one node of a drill-down. The
+ * status is the state of the *investigation*, never of the KPI: nothing here can
+ * change a detection verdict. `resolved_at` is written when the status actually
+ * became RESOLVED and cleared when it stops being — so a timestamp that is
+ * present is one that means something.
+ */
+export interface Finding {
+  id: string
+  kpi_key: string
+  kpi_name: string
+  target_date: string
+  title: string
+  note: string | null
+  status: string
+  dimension: string | null
+  entity: string | null
+  path: Array<{ dimension: string; value: string }>
+  scope_label: string
+  detection_run_id?: string | null
+  created_by_email?: string | null
+  updated_by_email?: string | null
+  created_at: string
+  updated_at: string
+  resolved_at?: string | null
+}
+
+export interface FindingsResponse {
+  findings: Finding[]
+  counts: Record<string, number>
+  /** The statuses the server will accept, so the client offers no transition it would refuse. */
+  statuses: string[]
+  filters?: {
+    kpi_key: string | null
+    target_date: string | null
+    status: string | null
+  }
+}
+
+export interface FindingResponse {
+  finding: Finding
+}
+
+/* ------------------------------------------------------ monitoring dashboard */
+
+/**
+ * The verdict tally for the window.
+ *
+ * `unrecognised` exists because a stored row may carry a status from an earlier
+ * schema. The tiles are meant to sum to `evaluated`, so such a row is counted and
+ * named rather than folded into one of the three real verdicts or dropped.
+ */
+export interface MonitoringCounts {
+  kpis_monitored: number
+  evaluated: number
+  normal: number
+  abnormal: number
+  low_confidence: number
+  unrecognised: number
+  unrecognised_statuses: string[]
+  /** KPIs with an active version that were not evaluated in the window at all. */
+  not_evaluated: number
+}
+
+/** One KPI's largest stored movement in the window. */
+export interface MonitoringMovement {
+  detection_run_id: string
+  kpi_id: string
+  kpi_key: string
+  kpi_name: string
+  target_date: string
+  status: string
+  actual_value: number | null
+  expected_value: number | null
+  deviation_absolute: number | null
+  deviation_pct: number | null
+  unit?: string | null
+  currency?: string | null
+  headline?: string | null
+  /**
+   * Whether a breakdown is already stored — "investigate" versus "review".
+   *
+   * `null` means the reader lacks `investigation.read`, not that no breakdown
+   * exists. The screen must show nothing in that case rather than "not analysed".
+   */
+  has_contribution: boolean | null
+  open_findings: number | null
+}
+
+export interface MonitoringRun {
+  detection_run_id: string
+  agent_run_id?: string | null
+  kpi_id: string
+  kpi_key: string
+  kpi_name: string
+  target_date: string
+  status: string
+  deviation_pct: number | null
+  executed_at: string
+}
+
+export interface MonitoringKpi {
+  kpi_id: string
+  kpi_key: string
+  kpi_name: string
+  lifecycle_status: string
+  active_version?: number | null
+  latest_status?: string | null
+  latest_target_date?: string | null
+  latest_deviation_pct?: number | null
+  latest_executed_at?: string | null
+  evaluated_in_window: number
+}
+
+/**
+ * Everything the monitoring dashboard needs, in one governed read.
+ *
+ * Every figure is a count or a copy of a stored row — nothing projected,
+ * forecast or interpolated. `window_from`/`window_to` are the earliest and latest
+ * *stored* dates inside the window rather than its boundaries, so a window with
+ * no runs reads as empty instead of as a range in which nothing was found.
+ * `monitoring_note` is shown on the screen, not merely available to it: the
+ * platform has no scheduler in this version and a dashboard implying one would
+ * misrepresent what it is displaying.
+ */
+export interface MonitoringResponse {
+  window_days: number
+  window_from: string | null
+  window_to: string | null
+  last_evaluated_at: string | null
+  counts: MonitoringCounts
+  kpis: MonitoringKpi[]
+  biggest_movements: MonitoringMovement[]
+  recent_abnormal: MonitoringMovement[]
+  recent_runs: MonitoringRun[]
+  /** Null for a reader without `investigation.read` — not zero, which would claim nobody has looked. */
+  findings_open: number | null
+  findings_in_progress: number | null
+  findings_resolved: number | null
+  recent_findings: Finding[]
+  monitoring_note: string
+}
