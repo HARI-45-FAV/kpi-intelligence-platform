@@ -10,11 +10,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 from app.connectors.base import DataSourceConnector
 from app.connectors.postgres import PostgreSQLConnector
 from app.connectors.sqlite import SQLiteConnector
 from app.connectors.supabase_rest import SupabaseRestConnector
+from app.connectors.upload import UploadedFileConnector
 from app.connectors.warehouse import BigQueryConnector, SnowflakeConnector
 from app.core.errors import ConnectorError, ValidationFailure
 from app.core.security import decrypt_secret
@@ -136,6 +138,27 @@ CONNECTOR_CATALOG: tuple[ConnectorDescriptor, ...] = (
         ),
         supports_multi_table_reads=True,
         notes="Local file source. Used by the automated test suite.",
+    ),
+    ConnectorDescriptor(
+        source_type=DataSourceType.UPLOAD,
+        label="CSV or Excel upload",
+        implemented=True,
+        supports_profiling=True,
+        # No form fields: the file *is* the connection. Registration happens through
+        # the upload endpoint, which parses the sheet, reports what it inferred and
+        # only then creates the source -- so there is nothing here for a user to
+        # type, and offering a path box would invite them to point the platform at a
+        # server file it has no business reading.
+        fields=(),
+        # Several sheets of one workbook become several tables in one database, so a
+        # KPI at order grain may be broken down along an order-line sheet.
+        supports_multi_table_reads=True,
+        notes=(
+            "Upload a .csv, .tsv or .xlsx file. The platform infers a type per column, "
+            "reports what it had to assume, and loads the rows into a database it owns — "
+            "after which the upload is profiled, grain-checked and queried exactly like a "
+            "connected database. Re-uploading replaces the rows and records the load."
+        ),
     ),
     ConnectorDescriptor(
         source_type=DataSourceType.SNOWFLAKE,
@@ -294,10 +317,33 @@ def _build_sqlite(source: DataSource) -> DataSourceConnector:
     return SQLiteConnector(path, schema=source.schema_name)
 
 
+def _build_upload(source: DataSource) -> DataSourceConnector:
+    """The database an uploaded file was loaded into.
+
+    The path is stored by the upload endpoint and is never accepted from a caller:
+    it names a file inside the platform's own storage directory, and letting a
+    request supply it would turn a data-source form into a way to read arbitrary
+    files off the server.
+    """
+
+    path = (source.options or {}).get("storage_path")
+    if not path:
+        raise ValidationFailure(
+            "This uploaded source has no loaded file. Upload the spreadsheet again."
+        )
+    if not Path(path).exists():
+        raise ConnectorError(
+            f"The loaded data for '{source.name}' is no longer on disk. Re-upload the "
+            "file to restore it; the KPIs and governance built on it are unaffected."
+        )
+    return UploadedFileConnector(path)
+
+
 _FACTORIES: dict[str, Callable[[DataSource], DataSourceConnector]] = {
     DataSourceType.SUPABASE: _build_supabase,
     DataSourceType.POSTGRESQL: _build_postgres,
     DataSourceType.SQLITE: _build_sqlite,
+    DataSourceType.UPLOAD: _build_upload,
     DataSourceType.SNOWFLAKE: lambda _source: SnowflakeConnector(),
     DataSourceType.BIGQUERY: lambda _source: BigQueryConnector(),
 }

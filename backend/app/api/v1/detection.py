@@ -24,6 +24,7 @@ governance surface rather than the dashboard.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import date
@@ -1286,6 +1287,78 @@ def _assert_kpi_key(session: Session, access: AccessContext, kpi_key: str | None
         )
 
 
+_NOT_ALNUM = re.compile(r"[^0-9a-z]+")
+
+
+def _fold(text: str) -> str:
+    """Compare measure names the way a reader would, not byte for byte.
+
+    A document writes "Net Revenue"; the company registered ``net_revenue``. Those
+    are the same measure, and matching them is a normalisation problem, not a
+    judgement -- so it is done here in code rather than asked of the model.
+    """
+
+    return _NOT_ALNUM.sub(" ", (text or "").casefold()).strip()
+
+
+def _kpi_label_index(session: Session, company_id: str) -> dict[str, set[str]]:
+    """Every registered measure, reachable by either its key or its display name.
+
+    Values are sets because two measures can normalise to the same words. That is
+    ambiguity rather than a match, and the caller reports it instead of picking
+    one.
+    """
+
+    index: dict[str, set[str]] = {}
+    rows = session.execute(
+        select(KpiDefinition.kpi_key, KpiDefinition.name).where(
+            KpiDefinition.company_id == company_id
+        )
+    ).all()
+    for kpi_key, name in rows:
+        for candidate in (kpi_key, name):
+            token = _fold(candidate or "")
+            if token:
+                index.setdefault(token, set()).add(kpi_key)
+    return index
+
+
+def _resolve_override_kpi(
+    index: dict[str, set[str]], label: str
+) -> tuple[str | None, str | None]:
+    """The registered key a document's measure name refers to, or why it does not.
+
+    An unmatched name is not an error: a handbook may discuss a measure this
+    company has not registered, or may not use the name the platform knows it by.
+    The override is skipped and the reason reported, and that measure keeps the
+    company-wide policy -- which is the correct behaviour, not a degraded one.
+    """
+
+    token = _fold(label)
+    if not token:
+        return None, "the override named no measure"
+    matches = index.get(token)
+    if not matches:
+        return None, (
+            f"'{label}' does not match any measure registered in this company, so no "
+            "configuration was scoped to it"
+        )
+    if len(matches) > 1:
+        listed = ", ".join(sorted(matches))
+        return None, (
+            f"'{label}' matches more than one registered measure ({listed}), so it is "
+            "ambiguous and nothing was scoped to it"
+        )
+    return next(iter(matches)), None
+
+
+def _override_config_key(base: str, kpi_key: str) -> str:
+    """A derived key that stays inside the column and the documented key format."""
+
+    suffix = _NOT_ALNUM.sub("-", kpi_key.casefold()).strip("-") or "kpi"
+    return f"{base[:40]}-{suffix}"[:80]
+
+
 def _transition(row: CompanyBucketConfig, target: BucketConfigStatus) -> None:
     allowed = BUCKET_CONFIG_TRANSITIONS.get(row.status, ())
     if target not in allowed:
@@ -1753,6 +1826,87 @@ async def extract_bucket_config_endpoint(
     session.add(row)
     session.flush()
 
+    # --- per-measure overrides ---------------------------------------------
+    # The document may single out a measure and give it a pattern of its own.
+    # Each such measure gets its own row scoped to its key; the engine already
+    # prefers a KPI-scoped configuration over the company-wide one, so this adds
+    # rows rather than a code path. A request that was already scoped to one KPI
+    # is not fanned out -- the caller has said which measure this is for.
+    override_rows: list[CompanyBucketConfig] = []
+    override_details: list[dict] = []
+    override_skipped: list[str] = []
+    if draft.overrides and payload.kpi_key:
+        override_skipped.append(
+            "This extraction was requested for one measure, so per-measure overrides "
+            "in the document were not stored separately: "
+            + ", ".join(f"'{item.label}'" for item in draft.overrides)
+        )
+    elif draft.overrides:
+        index = _kpi_label_index(session, access.company.id)
+        for override in draft.overrides:
+            resolved, reason = _resolve_override_kpi(index, override.label)
+            if resolved is None:
+                override_skipped.append(reason or override.label)
+                continue
+            override_landed = (
+                BucketConfigStatus.NEEDS_REVIEW
+                if override.needs_review
+                else BucketConfigStatus.PROPOSED
+            )
+            override_key = _override_config_key(payload.config_key, resolved)
+            override_row = CompanyBucketConfig(
+                company_id=access.company.id,
+                config_key=override_key,
+                name=f"{payload.name} ({override.label})"[:200],
+                description=(
+                    f"Drafted from '{document.title}'."
+                    if document is not None
+                    else "Drafted from supplied text."
+                )
+                + f" Applies to {resolved} only; every other measure uses "
+                f"'{payload.config_key}'.",
+                kpi_key=resolved,
+                status=override_landed,
+                version=_next_version(session, access.company.id, override_key),
+                buckets=override.config.as_dict(),
+                lookback_days=override.config.lookback_days,
+                min_reference_points=override.config.min_reference_points,
+                max_reference_points=override.config.max_reference_points,
+                source=BucketConfigSource.LLM_EXTRACTION,
+                source_document_id=document.id if document is not None else None,
+                source_document_version_id=document_version_id,
+                extraction_model=draft.model,
+                extraction_notes="\n".join(
+                    [
+                        f"Scoped to {resolved}, from the document's name for it: "
+                        f"'{override.label}'.",
+                        *override.review_reasons,
+                        *override.notes,
+                    ]
+                )
+                or None,
+                proposed_by_user_id=access.user.id,
+            )
+            session.add(override_row)
+            override_rows.append(override_row)
+            override_details.append(
+                {
+                    "kpi_key": resolved,
+                    "kpi_label": override.label,
+                    "config_key": override_key,
+                    "status": str(override_landed),
+                    "enabled_slots": [
+                        str(bucket) for bucket in override.config.enabled_buckets
+                    ],
+                    "needs_review": override.needs_review,
+                    "review_reasons": override.review_reasons,
+                }
+            )
+        if override_rows:
+            session.flush()
+            for row_out, detail in zip(override_rows, override_details):
+                detail["config_id"] = row_out.id
+
     audit.record(
         session,
         access=access,
@@ -1764,6 +1918,14 @@ async def extract_bucket_config_endpoint(
             f"Drafted comparison configuration '{row.config_key}' v{row.version} from "
             + (f"'{document.title}'" if document is not None else "supplied text")
             + f" using {draft.model or 'the configured model'}; stored as {landed}."
+            + (
+                f" {len(override_rows)} measure-specific configuration(s) were drafted "
+                "alongside it: "
+                + ", ".join(f"{r.config_key} ({r.kpi_key})" for r in override_rows)
+                + "."
+                if override_rows
+                else ""
+            )
         ),
         details={
             "model": draft.model,
@@ -1777,6 +1939,8 @@ async def extract_bucket_config_endpoint(
             "review_reasons": draft.review_reasons,
             "retrieval": draft.retrieval,
             "warnings": list(draft.config.warnings),
+            "kpi_overrides": override_details,
+            "kpi_overrides_skipped": override_skipped,
         },
         request=request,
     )
@@ -1786,10 +1950,20 @@ async def extract_bucket_config_endpoint(
         "needs_review": draft.needs_review,
         "review_reasons": draft.review_reasons,
         "warnings": list(draft.config.warnings),
+        "kpi_overrides": [_config_out(item) for item in override_rows],
+        "kpi_overrides_skipped": override_skipped,
         "note": (
             "A model proposed which past days are comparable. Every number -- actual, "
             "expected, median, deviation, status -- is computed by the engine, and this "
             "draft changes nothing until it is approved."
+            + (
+                f" {len(override_rows)} measure(s) were given their own configuration "
+                "because the document states a different pattern for them; each is "
+                "approved separately, and any measure without one uses this "
+                "company-wide policy."
+                if override_rows
+                else ""
+            )
             + (
                 " This extraction is incomplete: read the reasons, fix what is missing, "
                 "then propose it."

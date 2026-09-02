@@ -1,12 +1,14 @@
 /**
- * The Result page: one stored evaluation, and why it says what it says.
+ * The Result page: one stored evaluation, why it says what it says, and what it
+ * suggests someone consider doing about it.
  *
- * Five sections, in the order a reader needs them — OVERVIEW, WHY FLAGGED,
- * CONTRIBUTORS, EVIDENCE, AI EXPLANATION. The discipline of the page is that
- * every figure on it was written by the detection engine at evaluation time and
- * read back here. Nothing is recomputed in the browser: no median, no z-score, no
- * threshold comparison, no verdict. If a number is on this page, a stored column
- * holds it, and the same page shown tomorrow will show the same answer.
+ * Six sections, in the order a reader needs them — OVERVIEW, WHY FLAGGED,
+ * CONTRIBUTORS, RECOMMENDED NEXT ACTIONS, EVIDENCE, AI EXPLANATION. The discipline
+ * of the page is that every figure on it was written by the detection engine at
+ * evaluation time and read back here. Nothing is recomputed in the browser: no
+ * median, no z-score, no threshold comparison, no verdict. If a number is on this
+ * page, a stored column holds it, and the same page shown tomorrow will show the
+ * same answer.
  *
  * Two consequences worth stating, because both are visible:
  *
@@ -19,6 +21,13 @@
  *    contributors section reads the company's own source for the date, so it runs
  *    when someone asks. Nothing on this page analyses every part of the business
  *    on load.
+ *
+ * The recommendations section sits directly after the contributors because that is
+ * the order the reasoning runs in: what moved, which part of the business accounts
+ * for most of it, and only then what to consider doing. It is derived on read from
+ * the same stored rows, so a breakdown run here sharpens it from the KPI as a whole
+ * to a named area — which is why `runBreakdown` bumps its refresh token rather than
+ * leaving two panels disagreeing about what is known.
  *
  * The AI explanation is an action on this page rather than a chat window beside
  * it: it explains *this* result, from this result's stored evidence.
@@ -37,6 +46,7 @@ import type {
 } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
 import ExplanationCard, { ExplainButton } from '../components/Explanation'
+import Recommendations from '../components/Recommendations'
 import {
   formatCompact,
   formatCurrency,
@@ -48,6 +58,7 @@ import {
 } from '../components/format'
 import { Alert, EmptyState, Panel, Spinner, StatusBadge } from '../components/ui'
 import { useAction, useResource } from '../components/useResource'
+import { useCopilotScreen } from '../copilot/CopilotProvider'
 
 /** A measurement in the KPI's own unit. The unit is read from the run, never guessed. */
 function measure(
@@ -446,6 +457,13 @@ export default function ResultDetail() {
   const [contribution, setContribution] = useState<ContributionResponse | null>(null)
   const breakdown = useAction()
 
+  // Bumped when a breakdown is stored. The recommendation set is derived on read
+  // from whatever breakdown exists, so a fresh contribution changes the answer —
+  // from "no part of the business is named" to a named area — and the panel has to
+  // ask again to show it. A counter rather than the contribution object itself,
+  // because what changed is the *server's* evidence, not this page's state.
+  const [recommendationToken, setRecommendationToken] = useState(0)
+
   const [explanation, setExplanation] = useState<Explanation | null>(null)
   const explaining = useAction()
 
@@ -472,7 +490,10 @@ export default function ResultDetail() {
         top_k: 8,
       }),
     )
-    if (response) setContribution(response)
+    if (response) {
+      setContribution(response)
+      setRecommendationToken((token) => token + 1)
+    }
   }, [breakdown, companyId, result])
 
   const explainResult = useCallback(async () => {
@@ -493,6 +514,21 @@ export default function ResultDetail() {
         : '/investigation',
     [result],
   )
+
+  // What the Copilot drawer inherits while this page is open, so a question asked
+  // from the sidebar is already about the movement on screen and the reader never
+  // retypes its coordinates. `kpi_result` is the panel that anchors an answer to a
+  // stored evaluation, which is exactly what this page is showing.
+  //
+  // No figures are published. The actual, the expected and the deviation are all
+  // rendered above, and none of them is sent: the server re-reads them from the run
+  // it stored, so the Copilot cannot be told a number by a screen.
+  useCopilotScreen({
+    panel: 'kpi_result',
+    kpiId: result?.kpi_key ?? null,
+    selectedDate: result?.target_date ?? null,
+    label: result ? formatKpiName(result.kpi) : null,
+  })
 
   if (!mayView) {
     return (
@@ -696,6 +732,20 @@ export default function ResultDetail() {
           </div>
         )}
       </Panel>
+
+      {/* ------------------------------------------- RECOMMENDED NEXT ACTIONS */}
+      {/* Directly after the contributors, because that is the order the reasoning
+          runs in — and reusing this page's own breakdown action rather than a
+          second implementation of it, so the two panels can never be looking at
+          different evidence. */}
+      <Recommendations
+        companyId={companyId ?? ''}
+        runId={runId}
+        enabled={Boolean(companyId && runId)}
+        refreshToken={recommendationToken}
+        onRunBreakdown={mayInvestigate ? runBreakdown : undefined}
+        breakdownPending={breakdown.pending}
+      />
 
       {/* ----------------------------------------------------------- EVIDENCE */}
       <Panel title="Evidence">

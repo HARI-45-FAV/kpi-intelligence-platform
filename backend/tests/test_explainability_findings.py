@@ -304,6 +304,138 @@ def test_monitoring_surfaces_the_abnormal_movement(tenant) -> None:
     assert [item["kpi_key"] for item in biggest] == ["revenue"]
 
 
+def test_monitoring_headline_is_assembled_from_the_stored_run(tenant) -> None:
+    """A finding is a sentence about a row, and every part of it is in the row.
+
+    The headline panel is the one place on the dashboard that produces prose, so
+    it is also the one place where a fabricated cause could hide. This checks the
+    sentence against the run it describes: the KPI's own name, the run's own date,
+    and the deviation the engine stored -- and, because nothing has broken this
+    movement down yet, no contributor at all.
+    """
+
+    body = (
+        tenant["admin"]
+        .get(f"{tenant['base']}/monitoring", params={"findings_window_days": 90})
+        .json()
+    )
+
+    assert body["findings_window_days"] == 90
+    assert body["findings_window_options"] == [7, 14, 30, 90]
+    assert body["findings_window_from"] == COMPANY_A_TARGET.isoformat()
+    assert body["findings_window_to"] == COMPANY_A_TARGET.isoformat()
+
+    headlines = body["headlines"]
+    assert len(headlines) == 1, "one stored abnormal movement, so one headline"
+    assert body["headline_total"] == 1
+    entry = headlines[0]
+
+    assert entry["kpi_key"] == "revenue"
+    assert entry["status"] == "ABNORMAL", "only an abnormal verdict is news"
+    assert entry["target_date"] == COMPANY_A_TARGET.isoformat()
+    assert entry["detection_run_id"], "a headline a reader cannot open is a dead end"
+
+    # The sentence's figures are the run's figures.
+    sentence = entry["headline"]
+    assert "Revenue" in sentence, "the KPI is named as a reader knows it"
+    assert COMPANY_A_TARGET.strftime("%d %b") in sentence
+    assert f"{abs(entry['deviation_pct']):,.1f}%" in sentence
+    assert entry["direction"] in {"above", "below"}
+    assert entry["direction"] in sentence
+
+    # Nothing has apportioned this movement, so the headline nominates nobody and
+    # says why rather than leaving a gap a reader would fill.
+    assert entry["contributor_entity"] is None
+    assert entry["contributor_share_pct"] is None
+    assert entry["contributor_note"] == "No breakdown has been run for this movement yet."
+    assert entry["can_investigate"] is True
+
+
+def test_monitoring_headlines_never_claim_a_cause(tenant) -> None:
+    """The same rule the explanation service obeys, obeyed by the headline panel."""
+
+    body = (
+        tenant["admin"]
+        .get(f"{tenant['base']}/monitoring", params={"findings_window_days": 90})
+        .json()
+    )
+    assert body["headlines"], "this test is vacuous without a headline to read"
+    for entry in body["headlines"]:
+        blob = f"{entry['headline']} {entry['contributor_note'] or ''}".lower()
+        for word in CAUSAL_WORDS:
+            assert word not in blob, f"the headline claims causation: {word!r}"
+
+
+def test_monitoring_headline_window_moves_independently_of_the_tiles(tenant) -> None:
+    """Two windows, one query, and neither disturbs the other's arithmetic.
+
+    A single day of tiles beside a quarter of headlines: the tiles must count only
+    their own day, and the headline list must still reach back a quarter. The
+    failure this guards against is the widened scan leaking into the tallies, which
+    would silently overstate how much has been evaluated.
+    """
+
+    body = (
+        tenant["admin"]
+        .get(
+            f"{tenant['base']}/monitoring",
+            params={"window_days": 1, "findings_window_days": 90},
+        )
+        .json()
+    )
+
+    assert body["window_days"] == 1
+    assert body["counts"]["evaluated"] == 0, (
+        "the seeded run is older than one day, so the tiles must not count it"
+    )
+    assert body["biggest_movements"] == []
+    assert body["window_from"] is None and body["window_to"] is None
+
+    assert len(body["headlines"]) == 1, "the headline period is its own period"
+    assert body["headline_total"] == 1
+
+
+def test_monitoring_refuses_a_findings_window_it_does_not_offer(tenant) -> None:
+    """An unoffered period is refused, not rounded to the nearest one.
+
+    Rounding would leave the screen describing a period the server did not use,
+    which is the kind of quiet disagreement a reader has no way to notice.
+    """
+
+    response = tenant["admin"].get(
+        f"{tenant['base']}/monitoring", params={"findings_window_days": 45}
+    )
+    assert response.status_code == 422, response.text
+    assert "findings_window_days" in response.text
+
+
+def test_monitoring_withholds_the_apportionment_from_a_viewer(tenant) -> None:
+    """A viewer sees that a KPI moved, and not whose share of it moved.
+
+    The contributor fields are the investigation layer inside the headline panel,
+    so they arrive as nulls -- and the note names entitlement as the reason. Saying
+    "no breakdown has been run" to a reader who simply may not see one would be a
+    disclosure dressed as an absence, and would often be false.
+    """
+
+    body = (
+        tenant["viewer"]
+        .get(f"{tenant['base']}/monitoring", params={"findings_window_days": 90})
+        .json()
+    )
+
+    assert body["headlines"], "the movement itself is analytics.read, and stays"
+    for entry in body["headlines"]:
+        assert entry["contributor_entity"] is None
+        assert entry["contributor_dimension"] is None
+        assert entry["contributor_share_pct"] is None
+        assert entry["contributor_is_sufficient"] is None
+        assert entry["contributor_note"] == "Contributor analysis is not visible to your role."
+        assert entry["can_investigate"] is False, (
+            "a route into a surface this reader may not use is not offered"
+        )
+
+
 def test_monitoring_withholds_the_investigation_layer_from_a_viewer(tenant) -> None:
     """analytics.read buys the verdicts, not other people's investigations.
 
@@ -943,6 +1075,42 @@ def test_monitoring_counts_open_findings_on_the_movement(tenant) -> None:
     tenant["admin"].delete(f"{tenant['base']}/investigation/findings/{finding['id']}")
 
 
+def test_monitoring_headline_names_the_contributor_a_breakdown_found(tenant) -> None:
+    """Once a breakdown exists, the headline reports it -- as a share, not a cause.
+
+    This runs late in the file on purpose: by now the node-explanation tests have
+    stored a real ``ContributionRun`` for the same movement, so the panel has an
+    apportionment to report rather than one this test invented. What is pinned is
+    that the sentence *changes* when evidence arrives, and that it changes into
+    "accounts for" or "is the largest contributor" -- never into a cause.
+    """
+
+    body = (
+        tenant["admin"]
+        .get(f"{tenant['base']}/monitoring", params={"findings_window_days": 90})
+        .json()
+    )
+    entry = next(item for item in body["headlines"] if item["kpi_key"] == "revenue")
+
+    assert entry["contributor_entity"], "a stored breakdown named a leader"
+    assert entry["contributor_dimension"] == "region"
+    assert entry["contributor_note"] is None, "there is nothing to excuse now"
+    assert entry["contributor_entity"] in entry["headline"]
+
+    sentence = entry["headline"].lower()
+    if entry["contributor_is_sufficient"]:
+        assert "accounting for most of it" in sentence
+    else:
+        assert "no single area accounts for most of it" in sentence
+        assert "largest contributor" in sentence
+    for word in CAUSAL_WORDS:
+        assert word not in sentence, f"the headline claims causation: {word!r}"
+
+    # The share is the stored one, printed to one decimal place, not recomputed.
+    if entry["contributor_share_pct"] is not None:
+        assert f"{abs(entry['contributor_share_pct']):,.1f}%" in entry["headline"]
+
+
 def test_audit_scrub_keeps_identifiers_and_still_hides_secrets() -> None:
     """The trail must name the KPI it is about, and never name a credential.
 
@@ -974,3 +1142,215 @@ def test_audit_scrub_keeps_identifiers_and_still_hides_secrets() -> None:
     for field in ("password", "api_key", "secret_key", "access_token", "connection_uri"):
         assert cleaned[field] == "[redacted]", f"{field} reached the audit trail"
     assert cleaned["nested"]["db_password"] == "[redacted]"
+
+
+# ---------------------------------------------------------------------------
+# Audit visibility: the trail is only accountable if it can be read
+# ---------------------------------------------------------------------------
+def test_audit_filters_narrow_and_never_widen(tenant) -> None:
+    """Every filter is additive on top of a company-scoped query.
+
+    The risk a filter carries is not that it returns too little -- a reader notices
+    that -- but that some combination returns a row from outside the company. So the
+    company scope is re-asserted under each filter rather than assumed from the
+    unfiltered case.
+    """
+
+    base = tenant["base"]
+    everything = tenant["admin"].get(f"{base}/audit", params={"limit": 500})
+    assert everything.status_code == 200, everything.text
+    rows = everything.json()
+    assert rows, "the fixture's own provisioning must have left a trail"
+
+    by_action = tenant["admin"].get(
+        f"{base}/audit", params={"action": "detection.executed", "limit": 500}
+    ).json()
+    assert by_action, "detection ran in this fixture, so its action must be filterable"
+    assert {row["action"] for row in by_action} == {"detection.executed"}
+
+    actor = rows[0]["actor_email"]
+    by_actor = tenant["admin"].get(
+        f"{base}/audit", params={"actor_email": actor, "limit": 500}
+    ).json()
+    assert by_actor
+    assert {row["actor_email"] for row in by_actor} == {actor}
+
+    by_outcome = tenant["admin"].get(
+        f"{base}/audit", params={"outcome": "SUCCESS", "limit": 500}
+    ).json()
+    assert by_outcome
+    assert {row["outcome"] for row in by_outcome} == {"SUCCESS"}
+
+    # Two filters at once narrow to the intersection, not to the union.
+    both = tenant["admin"].get(
+        f"{base}/audit",
+        params={"action": "detection.executed", "outcome": "SUCCESS", "limit": 500},
+    ).json()
+    assert all(
+        row["action"] == "detection.executed" and row["outcome"] == "SUCCESS" for row in both
+    )
+    assert len(both) <= len(by_action)
+
+
+def test_audit_date_bounds_are_inclusive_of_the_whole_day(tenant) -> None:
+    """An upper bound of "the 28th" includes the 28th.
+
+    An exclusive upper bound would silently drop the most recent day's entries --
+    the ones a reader is most likely to be looking for -- and look like an empty
+    result rather than a bug.
+    """
+
+    base = tenant["base"]
+    rows = tenant["admin"].get(f"{base}/audit", params={"limit": 500}).json()
+    newest = rows[0]["occurred_at"][:10]
+
+    same_day = tenant["admin"].get(
+        f"{base}/audit", params={"since": newest, "until": newest, "limit": 500}
+    )
+    assert same_day.status_code == 200, same_day.text
+    found = same_day.json()
+    assert found, "the newest entry's own date must return that entry"
+    assert all(row["occurred_at"][:10] == newest for row in found)
+
+    # A window that ended before anything happened is empty rather than unfiltered.
+    empty = tenant["admin"].get(
+        f"{base}/audit", params={"until": "2000-01-01", "limit": 500}
+    ).json()
+    assert empty == []
+
+
+def test_audit_search_reads_the_resource_and_summary_not_the_details(tenant) -> None:
+    """``q`` may probe what a reader can already see, and nothing else.
+
+    ``details`` is the one column that can hold a value the reader is not otherwise
+    entitled to; a substring filter over it would let them confirm a guess without
+    ever being shown the row.
+    """
+
+    base = tenant["base"]
+    hits = tenant["admin"].get(f"{base}/audit", params={"q": "revenue", "limit": 500})
+    assert hits.status_code == 200, hits.text
+    for row in hits.json():
+        haystack = " ".join(
+            filter(None, [row["resource_label"], row["summary"], row["resource_id"]])
+        ).lower()
+        assert "revenue" in haystack, (
+            "a match must be visible in the resource or the summary, not only in details"
+        )
+
+    nonsense = tenant["admin"].get(
+        f"{base}/audit", params={"q": "zzz-no-such-resource-zzz", "limit": 500}
+    ).json()
+    assert nonsense == []
+
+
+def test_audit_options_offer_only_values_that_return_something(tenant) -> None:
+    """The filter controls are server-issued, so no control is a dead end.
+
+    The listing is capped, so options derived from the page a reader received would
+    omit the action they came to look for. These are DISTINCT reads over the
+    company's own entries: every value offered matches at least one row.
+    """
+
+    base = tenant["base"]
+    body = tenant["admin"].get(f"{base}/audit/options")
+    assert body.status_code == 200, body.text
+    payload = body.json()
+    options = payload["options"]
+
+    assert options["actions"], "this company has a trail, so it has actions"
+    assert "detection.executed" in options["actions"]
+    assert options["actors"] and all("@" in value for value in options["actors"])
+    assert options["outcomes"]
+    assert payload["total"] == payload["total_unfiltered"], (
+        "with no filters applied, the matching count is the whole trail"
+    )
+
+    # Every offered value returns at least one row. This is the property that makes
+    # the control honest, and it is checked rather than assumed.
+    for action in options["actions"][:8]:
+        rows = tenant["admin"].get(
+            f"{base}/audit", params={"action": action, "limit": 1}
+        ).json()
+        assert rows, f"the trail offered {action} as a filter but it matches nothing"
+
+
+def test_audit_total_counts_matches_under_the_same_filters(tenant) -> None:
+    """The count and the page must be produced by one set of conditions.
+
+    Two code paths applying "the same" filters is how a screen comes to report
+    "showing 100 of 12". Here the count is asked for under a filter and checked
+    against the rows that filter actually returns.
+    """
+
+    base = tenant["base"]
+    params = {"action": "detection.executed"}
+    counted = tenant["admin"].get(f"{base}/audit/options", params=params).json()
+    listed = tenant["admin"].get(f"{base}/audit", params={**params, "limit": 500}).json()
+
+    assert counted["total"] == len(listed)
+    assert counted["total_unfiltered"] >= counted["total"]
+
+    # An impossible filter counts zero without claiming the trail is empty, which is
+    # what lets a screen tell "nothing matches" apart from "nothing recorded".
+    none = tenant["admin"].get(
+        f"{base}/audit/options", params={"action": "no.such.action"}
+    ).json()
+    assert none["total"] == 0
+    assert none["total_unfiltered"] > 0
+
+
+def test_audit_visibility_is_company_scoped_and_permissioned(tenant) -> None:
+    """A neighbour's trail and its filter options are both out of reach.
+
+    Asserted on the options endpoint too, and not only on the listing: a distinct
+    list of actors is a list of people's email addresses, so an options endpoint
+    that forgot the company scope would leak a staff directory without ever
+    returning an audit row.
+    """
+
+    base = tenant["base"]
+    neighbour_base = tenant["neighbour_base"]
+
+    ours = {
+        row["id"] for row in tenant["admin"].get(f"{base}/audit", params={"limit": 500}).json()
+    }
+    theirs = {
+        row["id"]
+        for row in tenant["neighbour"]
+        .get(f"{neighbour_base}/audit", params={"limit": 500})
+        .json()
+    }
+    assert ours and theirs
+    assert ours.isdisjoint(theirs)
+
+    our_actors = set(tenant["admin"].get(f"{base}/audit/options").json()["options"]["actors"])
+    their_actors = set(
+        tenant["neighbour"].get(f"{neighbour_base}/audit/options").json()["options"]["actors"]
+    )
+    assert our_actors and their_actors
+    assert our_actors.isdisjoint(their_actors), (
+        "an options list must not name the neighbour's staff"
+    )
+
+    # Reading the trail is its own permission. A VIEWER holds analytics.read and is
+    # refused both surfaces, not just the listing.
+    for path in ("/audit", "/audit/options"):
+        refused = tenant["viewer"].get(f"{base}{path}")
+        assert refused.status_code == 403, f"{path} answered a role without audit.read"
+
+
+def test_audit_pagination_walks_the_trail_without_repeating_a_row(tenant) -> None:
+    """Offset paging over a newest-first order visits each entry once."""
+
+    base = tenant["base"]
+    everything = tenant["admin"].get(f"{base}/audit", params={"limit": 500}).json()
+    assert len(everything) > 3, "this fixture's trail must be long enough to page"
+
+    first = tenant["admin"].get(f"{base}/audit", params={"limit": 3, "offset": 0}).json()
+    second = tenant["admin"].get(f"{base}/audit", params={"limit": 3, "offset": 3}).json()
+
+    assert [row["id"] for row in first] == [row["id"] for row in everything[:3]]
+    assert {row["id"] for row in first}.isdisjoint({row["id"] for row in second})
+    # Newest first, so each page's timestamps are not older than the previous page's.
+    assert first[0]["occurred_at"] >= first[-1]["occurred_at"]

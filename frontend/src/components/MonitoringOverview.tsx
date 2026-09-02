@@ -21,13 +21,37 @@
  *
  * Every movement row is a way in: the result it came from, and the investigation
  * that would explain it.
+ *
+ * The findings panel reads the same way. Its lines are headlines the server
+ * assembled from stored detection runs — abnormal verdicts the engine reached and
+ * wrote down — over a period this panel selects for itself, separately from the
+ * tally window above it. Nothing on it is generated to fill the space: a quiet
+ * fortnight says so, and a movement no one has broken down names no cause and
+ * says why instead.
+ *
+ * Any of those rows can be opened into a Copilot summary. That summary is not
+ * composed here and not composed by a model from what is on screen: the row's own
+ * detection run is sent back to the server, which re-reads the stored evaluation,
+ * whatever breakdown exists and the approved documents this reader may see, and
+ * returns the labelled sections and the recommended actions it assembled from
+ * them. This screen supplies the coordinates and nothing else — which is why the
+ * summary is rendered by the same two components the Result page uses rather than
+ * by anything local to monitoring.
  */
 
-import { useMemo, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { api } from '../api/client'
-import type { MonitoringMovement, MonitoringResponse } from '../api/types'
+import { api, describeError } from '../api/client'
+import type {
+  Explanation,
+  ExplanationResponse,
+  MonitoringHeadline,
+  MonitoringMovement,
+  MonitoringResponse,
+} from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import ExplanationCard, { ExplainButton } from '../components/Explanation'
+import Recommendations from '../components/Recommendations'
 import {
   formatCompact,
   formatCurrency,
@@ -45,7 +69,24 @@ const WINDOWS = [
   { days: 365, label: '12 months' },
 ] as const
 
-function movementValue(row: MonitoringMovement, value: number | null): string {
+/**
+ * The findings panel's own periods, which are not the tally window's.
+ *
+ * A reader asking "what happened lately" works in weeks; a reader checking
+ * coverage works in quarters. These four are the values the server accepts —
+ * it rejects anything else — so the buttons and the API agree by construction.
+ */
+const FINDING_WINDOWS = [
+  { days: 7, label: '7 days' },
+  { days: 14, label: '14 days' },
+  { days: 30, label: '1 month' },
+  { days: 90, label: '3 months' },
+] as const
+
+function movementValue(
+  row: { unit?: string | null; currency?: string | null },
+  value: number | null | undefined,
+): string {
   if (value === null || value === undefined) return '—'
   if (row.currency) return formatCurrency(value, row.currency, true)
   if (row.unit === 'currency') return formatCurrency(value, 'INR', true)
@@ -55,6 +96,179 @@ function movementValue(row: MonitoringMovement, value: number | null): string {
 function signed(value: number | null | undefined): string {
   if (value === null || value === undefined || Number.isNaN(value)) return '—'
   return `${value >= 0 ? '+' : ''}${value.toFixed(1)}%`
+}
+
+/**
+ * The way into the existing investigation workflow for one movement.
+ *
+ * The Investigation Center reads the KPI and the date off the query string and
+ * runs its own contribution analysis from there — this is a deep link into that
+ * workflow, not a second implementation of it.
+ */
+function investigationHref(kpiKey: string, targetDate: string): string {
+  return `/investigation?kpi=${encodeURIComponent(kpiKey)}&date=${targetDate}`
+}
+
+/**
+ * What a stored breakdown found, or nothing at all.
+ *
+ * `contributor_is_sufficient === false` is a real answer — a breakdown ran and no
+ * single entity explained the movement — so the chip says "largest of several"
+ * rather than presenting the leader as the cause. Absent fields render nothing:
+ * "not analysed" and "not shown to you" are indistinguishable from here, and
+ * neither is worth asserting.
+ */
+function ContributorChip({
+  dimension,
+  entity,
+  sharePct,
+  sufficient,
+}: {
+  dimension?: string | null
+  entity?: string | null
+  sharePct?: number | null
+  sufficient?: boolean | null
+}) {
+  if (!entity) return null
+  return (
+    <span className="chip" title={dimension ? `Breakdown by ${dimension}` : undefined}>
+      {entity}
+      {sharePct !== null && sharePct !== undefined ? ` · ${sharePct.toFixed(0)}%` : ''}
+      {sufficient === false ? ' · largest of several' : ''}
+    </span>
+  )
+}
+
+/**
+ * The coordinates a summary needs. Deliberately the narrowest shape that both row
+ * types satisfy — an id to key the open row on, and the KPI and date the server
+ * resolves the stored run from. No figures: nothing the screen is displaying is
+ * sent back, so the summary cannot be built from a number this component rendered.
+ */
+interface SummarisableRow {
+  detection_run_id: string
+  kpi_key: string
+  target_date: string
+}
+
+interface RowSummary {
+  /** True for the one row whose summary is open, if any. */
+  isOpen: (slot: string, runId: string) => boolean
+  pending: boolean
+  error: string | null
+  explanation: Explanation | null
+  toggle: (slot: string, row: SummarisableRow) => void
+}
+
+/**
+ * One row's Copilot summary, fetched on demand.
+ *
+ * One at a time, and only when asked. Both halves of that matter: a movement list
+ * is eight rows deep, and summarising all of them on load would mean eight
+ * retrievals and eight model calls for a reader who wanted one — while keeping two
+ * open at once invites reading a sentence about one movement under another's
+ * heading.
+ *
+ * `slot` is why the open row is not identified by its run id. One detection run
+ * legitimately appears more than once on this screen — as a movement, and again as
+ * the headline that movement earned — and on the run id alone the headline's button
+ * would read as "already open", close the movement's panel and open nothing. The
+ * panel a row was rendered in is the missing half of its identity.
+ *
+ * The in-flight guard is the reason for the ref. Two quick clicks start two
+ * requests, and without a check on arrival the slower one wins the screen: the
+ * answer for the row the reader has already navigated away from would render under
+ * the row they are now looking at. Every state write below is gated on the request
+ * still being the open one, the error included — a failure belongs to the row that
+ * caused it.
+ */
+function useRowSummary(companyId: string | null | undefined): RowSummary {
+  const [openFor, setOpenFor] = useState<string | null>(null)
+  const [explanation, setExplanation] = useState<Explanation | null>(null)
+  const [pending, setPending] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const openRef = useRef<string | null>(null)
+
+  const toggle = useCallback(
+    (slot: string, row: SummarisableRow) => {
+      const target = `${slot}:${row.detection_run_id}`
+      if (openRef.current === target) {
+        openRef.current = null
+        setOpenFor(null)
+        return
+      }
+      openRef.current = target
+      setOpenFor(target)
+      setExplanation(null)
+      setError(null)
+      setPending(true)
+      void api
+        .post<ExplanationResponse>(`/companies/${companyId}/results/explain`, {
+          // The KPI and the date, which is all this endpoint accepts. It finds the
+          // stored run itself and every figure in the answer comes from that row.
+          kpi_id: row.kpi_key,
+          target_date: row.target_date,
+        })
+        .then((response) => {
+          if (openRef.current !== target) return
+          setExplanation(response.explanation)
+          setPending(false)
+        })
+        .catch((err: unknown) => {
+          if (openRef.current !== target) return
+          setError(describeError(err))
+          setPending(false)
+        })
+    },
+    [companyId],
+  )
+
+  const isOpen = useCallback(
+    (slot: string, runId: string) => openFor === `${slot}:${runId}`,
+    [openFor],
+  )
+
+  return { isOpen, pending, error, explanation, toggle }
+}
+
+/**
+ * The expanded summary under one row: what the movement means, and what to consider
+ * doing about it.
+ *
+ * Both halves are server-assembled and rendered by the components the Result page
+ * uses, so a sentence a reader sees here is the same sentence they would see there.
+ * The recommendation panel is given no breakdown runner: monitoring is not where a
+ * breakdown is run, and the row's own Investigate link is the way to that. It will
+ * therefore state that its advice is aimed at the KPI as a whole rather than offer
+ * a button that does not belong on this screen.
+ */
+function RowSummaryPanel({
+  companyId,
+  runId,
+  summary,
+  subject,
+}: {
+  companyId: string
+  runId: string
+  summary: RowSummary
+  subject: string
+}) {
+  return (
+    <div className="mt-3 space-y-3 rounded-[18px] border border-white/95 bg-white/45 p-3.5">
+      <ExplanationCard
+        explanation={summary.explanation}
+        error={summary.error}
+        pending={summary.pending}
+        emptyHint={`Reading the stored evaluation of ${subject}…`}
+      />
+      {/* Only once the explanation has landed. Asking for both at the same instant
+          would put two spinners in a row and give the reader nothing to read while
+          either resolves; the explanation is the half that answers "what happened". */}
+      {summary.explanation && (
+        <Recommendations companyId={companyId} runId={runId} />
+      )}
+    </div>
+  )
 }
 
 function Tile({
@@ -82,56 +296,169 @@ function Tile({
  *
  * The primary click is the Result page, because a movement without its verdict's
  * evidence is only a number. The secondary link is the Investigation Center, and
- * it is offered only to a reader who may actually use it.
+ * it is offered only to a reader who may actually use it — the server says so per
+ * row via `can_investigate`, with the reader's own permission as the fallback for
+ * a payload that predates the field. The third way in stays on this screen: the
+ * Copilot summary, which expands underneath.
  */
 function MovementRow({
   row,
   mayInvestigate,
   showExecuted,
+  companyId,
+  summary,
+  slot,
 }: {
   row: MonitoringMovement
   mayInvestigate: boolean
   showExecuted?: string | null
+  companyId: string
+  summary: RowSummary
+  /** Which panel this row is rendered in. See `useRowSummary`. */
+  slot: string
 }) {
+  const canInvestigate = row.can_investigate ?? mayInvestigate
+  const summaryOpen = summary.isOpen(slot, row.detection_run_id)
   return (
-    <li className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-4 py-2.5 hover:bg-white/40">
-      <Link
-        to={`/results/${row.detection_run_id}`}
-        className="min-w-[10rem] flex-1 text-sm font-medium text-slate-100 hover:underline"
-      >
-        {formatKpiName(row.kpi_name)}
-      </Link>
-      <span className="text-xs text-slate-500">{formatDate(row.target_date)}</span>
-      <span className="tabular-nums text-sm text-slate-200">
-        {movementValue(row, row.actual_value)}
-      </span>
-      <span className="text-[11px] text-slate-500">
-        vs {movementValue(row, row.expected_value)}
-      </span>
-      <span
-        className={`tabular-nums text-sm font-medium ${
-          row.status === 'ABNORMAL' ? 'text-rose-300' : 'text-slate-300'
-        }`}
-      >
-        {signed(row.deviation_pct)}
-      </span>
-      <StatusBadge status={row.status} />
-      {showExecuted && (
-        <span className="text-[11px] text-slate-600">{formatRelative(showExecuted)}</span>
-      )}
-      {/* Null means "not disclosed to you", so nothing is said either way. */}
-      {row.open_findings !== null && row.open_findings > 0 && (
-        <span className="chip">
-          {row.open_findings} open note{row.open_findings === 1 ? '' : 's'}
-        </span>
-      )}
-      {mayInvestigate && (
+    <li className="px-4 py-2.5 hover:bg-white/40">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
         <Link
-          to={`/investigation?kpi=${encodeURIComponent(row.kpi_key)}&date=${row.target_date}`}
-          className="btn btn-xs btn-ghost"
+          to={`/results/${row.detection_run_id}`}
+          className="min-w-[10rem] flex-1 text-sm font-medium text-slate-100 hover:underline"
         >
-          {row.has_contribution ? 'Review investigation' : 'Investigate'}
+          {formatKpiName(row.kpi_name)}
         </Link>
+        <span className="text-xs text-slate-500">{formatDate(row.target_date)}</span>
+        <span className="tabular-nums text-sm text-slate-200">
+          {movementValue(row, row.actual_value)}
+        </span>
+        <span className="text-[11px] text-slate-500">
+          vs {movementValue(row, row.expected_value)}
+        </span>
+        <span
+          className={`tabular-nums text-sm font-medium ${
+            row.status === 'ABNORMAL' ? 'text-rose-300' : 'text-slate-300'
+          }`}
+        >
+          {signed(row.deviation_pct)}
+        </span>
+        <StatusBadge status={row.status} />
+        {showExecuted && (
+          <span className="text-[11px] text-slate-600">{formatRelative(showExecuted)}</span>
+        )}
+        {/* What an investigation already concluded, copied from its stored breakdown. */}
+        <ContributorChip
+          dimension={row.contributor_dimension}
+          entity={row.contributor_entity}
+          sharePct={row.contributor_share_pct}
+          sufficient={row.contributor_is_sufficient}
+        />
+        {/* Null means "not disclosed to you", so nothing is said either way. */}
+        {row.open_findings !== null && row.open_findings > 0 && (
+          <span className="chip">
+            {row.open_findings} open note{row.open_findings === 1 ? '' : 's'}
+          </span>
+        )}
+        <ExplainButton
+          tone="ghost"
+          label={summaryOpen ? 'Hide Copilot summary' : 'Copilot summary'}
+          pending={summaryOpen && summary.pending}
+          onClick={() => summary.toggle(slot, row)}
+          title="Assembled by the server from this movement's stored evaluation, any recorded breakdown and approved documents you may see"
+        />
+        {canInvestigate && (
+          <Link to={investigationHref(row.kpi_key, row.target_date)} className="btn btn-xs btn-ghost">
+            {row.has_contribution ? 'Review investigation' : 'Investigate'}
+          </Link>
+        )}
+      </div>
+      {summaryOpen && (
+        <RowSummaryPanel
+          companyId={companyId}
+          runId={row.detection_run_id}
+          summary={summary}
+          subject={`${formatKpiName(row.kpi_name)} on ${formatDate(row.target_date)}`}
+        />
+      )}
+    </li>
+  )
+}
+
+/**
+ * One finding, as a business reader would hear it.
+ *
+ * The sentence arrives from the server already written — assembled there from the
+ * KPI's own name, the run's own date and figures the detection engine computed —
+ * so this component chooses a layout and nothing else. It does not compose the
+ * claim, and it never fills a missing cause: where no breakdown named a
+ * contributor, `contributor_note` says why and that is what shows.
+ */
+function HeadlineRow({
+  row,
+  companyId,
+  summary,
+}: {
+  row: MonitoringHeadline
+  companyId: string
+  summary: RowSummary
+}) {
+  const summaryOpen = summary.isOpen('headline', row.detection_run_id)
+  return (
+    <li className="px-4 py-3 hover:bg-white/40">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+        <Link
+          to={`/results/${row.detection_run_id}`}
+          className="text-sm font-medium leading-snug text-slate-100 hover:underline"
+        >
+          {row.headline}
+        </Link>
+        <StatusBadge status={row.status} />
+      </div>
+      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-500">
+        <span>{formatKpiName(row.kpi_name)}</span>
+        <span>{formatDate(row.target_date)}</span>
+        <span className="tabular-nums">
+          {movementValue(row, row.actual_value)} vs {movementValue(row, row.expected_value)}
+        </span>
+        <span
+          className={`tabular-nums font-medium ${
+            row.status === 'ABNORMAL' ? 'text-rose-300' : 'text-slate-400'
+          }`}
+        >
+          {signed(row.deviation_pct)}
+        </span>
+        <ContributorChip
+          dimension={row.contributor_dimension}
+          entity={row.contributor_entity}
+          sharePct={row.contributor_share_pct}
+          sufficient={row.contributor_is_sufficient}
+        />
+        {row.contributor_note && <span className="italic">{row.contributor_note}</span>}
+        <span className="ml-auto flex flex-wrap items-center gap-2">
+          <ExplainButton
+            tone="ghost"
+            label={summaryOpen ? 'Hide Copilot summary' : 'Copilot summary'}
+            pending={summaryOpen && summary.pending}
+            onClick={() => summary.toggle('headline', row)}
+            title="Assembled by the server from this movement's stored evaluation, any recorded breakdown and approved documents you may see"
+          />
+          {row.can_investigate && (
+            <Link
+              to={investigationHref(row.kpi_key, row.target_date)}
+              className="btn btn-xs btn-ghost"
+            >
+              {row.contributor_entity ? 'Review investigation' : 'Investigate'}
+            </Link>
+          )}
+        </span>
+      </div>
+      {summaryOpen && (
+        <RowSummaryPanel
+          companyId={companyId}
+          runId={row.detection_run_id}
+          summary={summary}
+          subject={`${formatKpiName(row.kpi_name)} on ${formatDate(row.target_date)}`}
+        />
       )}
     </li>
   )
@@ -143,11 +470,21 @@ export default function MonitoringOverview() {
   const mayInvestigate = can('investigation.read')
 
   const [windowDays, setWindowDays] = useState<number>(90)
+  // The findings panel's period is separate state: widening the tally window to a
+  // year should not silently turn "what happened this week" into a year of news.
+  const [findingsWindowDays, setFindingsWindowDays] = useState<number>(7)
+
+  // One summary across the whole screen, so opening a headline closes whichever
+  // movement was open. Declared here rather than per row because "one at a time"
+  // is a property of the screen, and a hook per row could not enforce it.
+  const summary = useRowSummary(companyId)
 
   const monitoring = useResource<MonitoringResponse>(
     () =>
-      api.get(`/companies/${companyId}/monitoring`, { query: { window_days: windowDays } }),
-    [companyId, windowDays],
+      api.get(`/companies/${companyId}/monitoring`, {
+        query: { window_days: windowDays, findings_window_days: findingsWindowDays },
+      }),
+    [companyId, windowDays, findingsWindowDays],
     { enabled: Boolean(companyId) && mayView },
   )
 
@@ -188,6 +525,15 @@ export default function MonitoringOverview() {
   const recentRuns = data.recent_runs ?? []
   const monitoredKpis = data.kpis ?? []
   const recentFindings = data.recent_findings ?? []
+  const headlines = data.headlines ?? []
+  // Offer only the periods this server accepts. It validates the parameter and
+  // rejects anything else, so a button it would refuse should not exist.
+  const serverWindows = data.findings_window_options ?? []
+  const findingWindowOptions =
+    serverWindows.length > 0
+      ? FINDING_WINDOWS.filter((option) => serverWindows.includes(option.days))
+      : [...FINDING_WINDOWS]
+  const headlineTotal = data.headline_total ?? headlines.length
 
   return (
     <div className="space-y-4">
@@ -308,6 +654,9 @@ export default function MonitoringOverview() {
                   key={row.detection_run_id}
                   row={row}
                   mayInvestigate={mayInvestigate}
+                  companyId={companyId ?? ''}
+                  summary={summary}
+                  slot="movement"
                 />
               ))}
             </ul>
@@ -333,6 +682,9 @@ export default function MonitoringOverview() {
                   key={row.detection_run_id}
                   row={row}
                   mayInvestigate={mayInvestigate}
+                  companyId={companyId ?? ''}
+                  summary={summary}
+                  slot="abnormal"
                 />
               ))}
             </ul>
@@ -416,8 +768,67 @@ export default function MonitoringOverview() {
         </Panel>
       </div>
 
+      {/* Findings, as headlines, over their own period.
+          Every line here is derived from a stored detection run — an abnormal
+          verdict the engine reached and wrote down. Nothing is generated for the
+          panel, so an empty period is reported as empty rather than filled. */}
+      <Panel
+        title="Recent findings"
+        bodyClassName=""
+        actions={
+          <div className="glass-nav w-fit rounded-[14px] p-1">
+            {findingWindowOptions.map((option) => (
+              <button
+                key={option.days}
+                type="button"
+                onClick={() => setFindingsWindowDays(option.days)}
+                className={`nav-pill px-2.5 py-1.5 text-xs ${
+                  findingsWindowDays === option.days ? 'nav-pill-active' : ''
+                }`}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        }
+      >
+        {headlines.length === 0 ? (
+          <EmptyState
+            title={`Nothing abnormal was recorded in the last ${findingsWindowDays} days`}
+            description="A finding appears here once a stored detection run has flagged a movement as abnormal in this period."
+          />
+        ) : (
+          <>
+            <p className="px-4 pt-3 text-[11px] text-slate-500">
+              {headlineTotal} abnormal movement{headlineTotal === 1 ? '' : 's'} in the last{' '}
+              {data.findings_window_days ?? findingsWindowDays} days
+              {data.findings_window_from && data.findings_window_to
+                ? ` · ${formatDate(data.findings_window_from)} to ${formatDate(
+                    data.findings_window_to,
+                  )}`
+                : ''}
+              {headlineTotal > headlines.length
+                ? ` · showing the ${headlines.length} largest`
+                : ''}
+            </p>
+            <ul className="divide-y divide-ink-800">
+              {headlines.map((row) => (
+                <HeadlineRow
+                  key={row.detection_run_id}
+                  row={row}
+                  companyId={companyId ?? ''}
+                  summary={summary}
+                />
+              ))}
+            </ul>
+          </>
+        )}
+      </Panel>
+
+      {/* People's own notes, kept separate from the derived headlines above: one is
+          what the engine measured, the other is what a colleague wrote. */}
       {mayInvestigate && recentFindings.length > 0 && (
-        <Panel title="Recent findings" bodyClassName="">
+        <Panel title="Investigation notes" bodyClassName="">
           <ul className="divide-y divide-ink-800">
             {recentFindings.map((finding) => (
               <li
@@ -426,9 +837,7 @@ export default function MonitoringOverview() {
               >
                 <span className="chip">{finding.status.replace(/_/g, ' ')}</span>
                 <Link
-                  to={`/investigation?kpi=${encodeURIComponent(finding.kpi_key)}&date=${
-                    finding.target_date
-                  }`}
+                  to={investigationHref(finding.kpi_key, finding.target_date)}
                   className="text-sm font-medium text-slate-200 hover:underline"
                 >
                   {finding.title}

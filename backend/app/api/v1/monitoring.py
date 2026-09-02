@@ -21,6 +21,13 @@ dashboard say something untrue:
   the deviation the engine already stored, and a KPI whose run has no deviation is
   absent from that list rather than ranked at zero.
 
+The headline panel follows the same rule one step further. Its sentences are
+assembled in ``headline()`` from the KPI's own name, the run's own date and the
+figures the engine computed, with a contributor named only where a stored
+breakdown named one -- so a headline is reproducible, and no model is involved in
+deciding what this company's results say. Where no contributor is known, the panel
+says why rather than leaving a gap a reader would fill in.
+
 Gated on ``analytics.read`` -- the permission that lets somebody see a result at
 all -- and scoped, like every read here, to the company resolved from the request
 rather than the one named in the path.
@@ -44,11 +51,13 @@ from sqlalchemy import func, select
 
 from app.core.clock import utcnow
 from app.core.deps import AccessContext, SessionDep, require_permissions
+from app.core.errors import ValidationFailure
 from app.models.base import DetectionStatus, FindingStatus
 from app.models.detection import ContributionRun, DetectionRun
 from app.models.investigation import InvestigationFinding
 from app.models.kpi import KpiDefinition
 from app.schemas import MonitoringOut
+from app.services.explanation import kpi_label
 
 router = APIRouter(tags=["monitoring"])
 
@@ -70,6 +79,15 @@ _KNOWN_STATUSES = tuple(str(status) for status in DetectionStatus)
 #: to the Result page, not a substitute for the result history.
 _LIST_LIMIT = 8
 _RUN_LIMIT = 12
+_HEADLINE_LIMIT = 10
+
+#: The periods the headline panel offers, and the one it opens on. Fixed rather
+#: than free-form because each is a period a business reader recognises -- a week,
+#: a fortnight, a month, a quarter -- and "the last 53 days" is not. Sent to the
+#: client in the response so the set of offered windows is decided here, in one
+#: place, rather than being hardcoded again on the screen.
+FINDINGS_WINDOW_OPTIONS: tuple[int, ...] = (7, 14, 30, 90)
+FINDINGS_WINDOW_DEFAULT = 7
 
 
 def _movement_rank(run: DetectionRun) -> float:
@@ -87,6 +105,47 @@ def _movement_rank(run: DetectionRun) -> float:
     return 0.0
 
 
+def _direction(run: DetectionRun) -> str | None:
+    """"above" or "below", from the sign the engine already stored.
+
+    Read off ``deviation_absolute`` first: it keeps its sign even where the
+    expectation was zero and the percentage is therefore absent.
+    """
+
+    for value in (run.deviation_absolute, run.deviation_pct):
+        if value is not None and value != 0:
+            return "above" if value > 0 else "below"
+    return None
+
+
+def _date_label(target: date, today: date) -> str:
+    """"28 Aug", or "28 Aug 2025" once the year stops being obvious.
+
+    A headline in a 7-day window does not need a year and reads worse with one; a
+    90-day window can cross a new year, where omitting it would be ambiguous.
+    """
+
+    return target.strftime("%d %b") if target.year == today.year else target.strftime("%d %b %Y")
+
+
+def _movement_phrase(run: DetectionRun) -> str:
+    """The movement in words, from the figures the engine stored.
+
+    Never computed here beyond taking an absolute value and rounding for display:
+    the percentage and the absolute deviation are both read straight off the row,
+    and a run carrying neither is described as having moved abnormally rather than
+    being given a number it does not have.
+    """
+
+    direction = _direction(run)
+    suffix = f" {direction} expectation" if direction else " against expectation"
+    if run.deviation_pct is not None:
+        return f"{abs(run.deviation_pct):,.1f}%{suffix}"
+    if run.deviation_absolute is not None:
+        return f"{abs(run.deviation_absolute):,.0f}{suffix}"
+    return "abnormally"
+
+
 @router.get(
     "/companies/{company_id}/monitoring",
     response_model=MonitoringOut,
@@ -97,6 +156,14 @@ def monitoring_dashboard(
     session: SessionDep,
     access: AccessContext = Depends(require_permissions("analytics.read")),
     window_days: int = Query(default=90, ge=1, le=730),
+    findings_window_days: int = Query(
+        default=FINDINGS_WINDOW_DEFAULT,
+        description=(
+            "Period the headline panel covers. One of 7, 14, 30 or 90 days; any "
+            "other value is refused rather than rounded, so the screen and the "
+            "server never disagree about what a headline list describes."
+        ),
+    ),
 ) -> MonitoringOut:
     """One call for the monitoring screen.
 
@@ -105,11 +172,22 @@ def monitoring_dashboard(
     are the earliest and latest *stored* target dates inside it, not the requested
     boundaries, so an empty window reads as empty instead of as a range in which
     nothing happened to be found.
+
+    ``findings_window_days`` is separate and deliberately narrower. The tiles
+    describe a long period because a count over a quarter is useful; a headline
+    list over a quarter is not a list of news. The two windows move independently.
     """
+
+    if findings_window_days not in FINDINGS_WINDOW_OPTIONS:
+        raise ValidationFailure(
+            f"findings_window_days must be one of {', '.join(str(o) for o in FINDINGS_WINDOW_OPTIONS)}. "
+            f"Received {findings_window_days}."
+        )
 
     company_id_scoped = access.company.id
     today = utcnow().date()
     window_start = today - timedelta(days=window_days - 1)
+    findings_start = today - timedelta(days=findings_window_days - 1)
 
     # Whether this caller may see the investigation layer at all. Everything below
     # that touches a finding or a stored breakdown is behind this flag, so a reader
@@ -131,17 +209,24 @@ def monitoring_dashboard(
     # volumes here are one company's runs over one window, and one pass keeps the
     # tallies, the lists and the "latest per KPI" map guaranteed consistent with
     # each other.
-    runs = list(
+    #
+    # The scan covers whichever of the two windows reaches further back, because
+    # they move independently -- a caller can ask for a quarter of headlines beside
+    # a week of tiles. The tallies below then use only the tile window, so widening
+    # the scan cannot change a single count.
+    scan_start = min(window_start, findings_start)
+    scanned = list(
         session.scalars(
             select(DetectionRun)
             .where(
                 DetectionRun.company_id == company_id_scoped,
-                DetectionRun.target_date >= window_start,
+                DetectionRun.target_date >= scan_start,
                 DetectionRun.target_date <= today,
             )
             .order_by(DetectionRun.target_date.desc(), DetectionRun.executed_at.desc())
         )
     )
+    runs = [run for run in scanned if run.target_date >= window_start]
 
     tally = {name: 0 for name in _KNOWN_STATUSES}
     unrecognised = 0
@@ -170,17 +255,29 @@ def monitoring_dashboard(
     # the screen must not print the second when it means the first.
     analysed_runs: set[str] = set()
     open_by_run: dict[str, int] = {}
+    leader_by_run: dict[str, ContributionRun] = {}
     if may_investigate:
-        analysed_runs = {
-            row
-            for row in session.scalars(
-                select(ContributionRun.detection_run_id).where(
-                    ContributionRun.company_id == company_id_scoped,
-                    ContributionRun.detection_run_id.is_not(None),
-                )
+        # One pass over the stored breakdowns, giving both facts the dashboard
+        # needs: which movements have been analysed at all, and what the analysis
+        # concluded led each one.
+        #
+        # Ordered shallowest-then-newest, and taken with setdefault, so the row kept
+        # per movement is the *top-level* apportionment. A drill-down is a narrower
+        # question -- "within Depot North, which product?" -- and its leader is not
+        # the leader of the movement.
+        for contribution in session.scalars(
+            select(ContributionRun)
+            .where(
+                ContributionRun.company_id == company_id_scoped,
+                ContributionRun.detection_run_id.is_not(None),
             )
-            if row
-        }
+            .order_by(ContributionRun.depth.asc(), ContributionRun.executed_at.desc())
+        ):
+            run_id = contribution.detection_run_id
+            if not run_id:
+                continue
+            analysed_runs.add(run_id)
+            leader_by_run.setdefault(run_id, contribution)
         for run_id, count in session.execute(
             select(InvestigationFinding.detection_run_id, func.count())
             .where(
@@ -192,6 +289,36 @@ def monitoring_dashboard(
         ):
             if run_id:
                 open_by_run[run_id] = int(count)
+
+    def contributor(run_id: str) -> dict:
+        """The leading contributor as the investigation stored it, or nulls.
+
+        Every value is copied. Nothing is ranked, summed or apportioned here: this
+        endpoint reports what the contribution service concluded, and a movement
+        nobody has analysed gets nulls and a reason rather than a nominee.
+        """
+
+        if not may_investigate:
+            return {
+                "contributor_dimension": None,
+                "contributor_entity": None,
+                "contributor_share_pct": None,
+                "contributor_is_sufficient": None,
+            }
+        found = leader_by_run.get(run_id)
+        if found is None or not found.leader_entity:
+            return {
+                "contributor_dimension": None,
+                "contributor_entity": None,
+                "contributor_share_pct": None,
+                "contributor_is_sufficient": None,
+            }
+        return {
+            "contributor_dimension": found.dimension,
+            "contributor_entity": found.leader_entity,
+            "contributor_share_pct": found.leader_share_pct,
+            "contributor_is_sufficient": found.leader_is_sufficient,
+        }
 
     def movement(run: DetectionRun) -> dict:
         definition = by_key.get(run.kpi_key)
@@ -211,7 +338,113 @@ def monitoring_dashboard(
             "headline": run.headline,
             "has_contribution": (run.id in analysed_runs) if may_investigate else None,
             "open_findings": open_by_run.get(run.id, 0) if may_investigate else None,
+            # Carried so the movement rows can offer the Investigation action and,
+            # where an investigation has already run, name what it found -- without
+            # the screen making a second call per row.
+            "can_investigate": may_investigate,
+            **contributor(run.id),
         }
+
+    def headline(run: DetectionRun) -> dict:
+        """One abnormal movement, as a sentence, from stored values only.
+
+        The sentence is assembled from three things the platform already holds: the
+        KPI's own name, the run's own date, and the movement the engine computed.
+        A contributor is named only where a stored breakdown named one, and how
+        strongly it is named follows the breakdown's own judgement:
+        ``leader_is_sufficient`` is the difference between "accounts for most of it"
+        and "no single area accounts for most of it".
+
+        **A share is a size, not a cause.** The platform measures where a movement
+        sits; nothing in it establishes why. So no branch of this function says
+        "drove", "caused" or "because of" -- the verb is "accounts for" throughout,
+        the same wording the explanation service uses, and a headline can therefore
+        never assert more than the breakdown measured. That is why this wording lives
+        in code rather than in a prompt.
+        """
+
+        definition = by_key.get(run.kpi_key)
+        found = contributor(run.id)
+        when = _date_label(run.target_date, today)
+        phrase = _movement_phrase(run)
+        entity = found["contributor_entity"]
+        share = found["contributor_share_pct"]
+        # Magnitude only: the movement's own direction is already in `phrase`, and a
+        # signed share here would read as a second, contradictory direction.
+        share_text = f" ({abs(share):,.1f}% of the movement)" if share is not None else ""
+        # The reader's name for the KPI, not the developer's: a headline reading
+        # "net_revenue moved 12% below expectation" puts a column name in front of a
+        # business audience. `kpi_key` is untouched and is still what links filter on.
+        label = kpi_label(run.kpi_name)
+
+        if entity and found["contributor_is_sufficient"]:
+            text = (
+                f"{label} moved {phrase} on {when}, with {entity} accounting for most "
+                f"of it{share_text}."
+            )
+        elif entity:
+            # The breakdown ran and found no single sufficient area. Saying so is the
+            # finding; naming the largest without it would imply one.
+            text = (
+                f"{label} moved {phrase} on {when}; no single area accounts for most of "
+                f"it, and {entity} is the largest contributor{share_text}."
+            )
+        else:
+            text = f"{label} moved {phrase} on {when}."
+
+        # Why no contributor is named, said plainly. A blank space where a cause
+        # should be invites the reader to supply one; this says who could supply it.
+        note: str | None = None
+        if not entity:
+            if not may_investigate:
+                note = "Contributor analysis is not visible to your role."
+            elif run.id in analysed_runs:
+                note = (
+                    "A breakdown has been run and did not find a single leading "
+                    "contributor."
+                )
+            else:
+                note = "No breakdown has been run for this movement yet."
+
+        return {
+            "detection_run_id": run.id,
+            "kpi_id": definition.id if definition else run.kpi_definition_id,
+            "kpi_key": run.kpi_key,
+            "kpi_name": run.kpi_name,
+            "target_date": run.target_date,
+            "status": run.status,
+            "headline": text,
+            "deviation_pct": run.deviation_pct,
+            "deviation_absolute": run.deviation_absolute,
+            "actual_value": run.actual_value,
+            "expected_value": run.expected_value,
+            "unit": run.unit,
+            "currency": run.currency,
+            "direction": _direction(run),
+            "contributor_note": note,
+            "can_investigate": may_investigate,
+            **found,
+        }
+
+    # The headline panel: abnormal movements in the selected period, largest first,
+    # then most recent. Ranked by size rather than recency because the panel answers
+    # "what mattered", and a reader scanning a fortnight wants the biggest thing in
+    # it at the top.
+    #
+    # Restricted to ABNORMAL on purpose. A NORMAL verdict is not news, and a
+    # LOW_CONFIDENCE one is the engine saying it could not reach a verdict -- putting
+    # either in a headline list would assert something the run does not.
+    findings_runs = [
+        run
+        for run in scanned
+        if run.target_date >= findings_start and run.status == str(DetectionStatus.ABNORMAL)
+    ]
+    findings_dates = [run.target_date for run in findings_runs]
+    headline_runs = sorted(
+        findings_runs,
+        key=lambda item: (_movement_rank(item), item.target_date),
+        reverse=True,
+    )[:_HEADLINE_LIMIT]
 
     # Biggest movements: one row per KPI, so a single volatile KPI cannot fill the
     # list with its own history and hide a second KPI that also moved.
@@ -312,6 +545,12 @@ def monitoring_dashboard(
                 :_RUN_LIMIT
             ]
         ],
+        findings_window_days=findings_window_days,
+        findings_window_options=list(FINDINGS_WINDOW_OPTIONS),
+        findings_window_from=min(findings_dates) if findings_dates else None,
+        findings_window_to=max(findings_dates) if findings_dates else None,
+        headlines=[headline(run) for run in headline_runs],
+        headline_total=len(findings_runs),
         findings_open=finding_tally[str(FindingStatus.OPEN)] if may_investigate else None,
         findings_in_progress=(
             finding_tally[str(FindingStatus.IN_PROGRESS)] if may_investigate else None

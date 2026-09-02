@@ -46,17 +46,36 @@ DELIVERED = (
     "comparison policy, producing an actual, an expected value, a deviation and a "
     "NORMAL / ABNORMAL / LOW_CONFIDENCE verdict",
     "comparison policy extracted from company documentation and approved before use",
+    "contribution analysis: deterministic apportionment of a measured movement across "
+    "a KPI's approved dimensions, ranked by share, with the unattributed remainder "
+    "stated -- a share, never a cause",
+    "guided investigation: drill-down through a KPI's own approved hierarchy, on "
+    "request, over movements already measured",
+    "deterministic narrative explanation of a stored result and of one investigation "
+    "node, composed from stored figures only",
+    "recommended next actions derived from a stored result: target area, business "
+    "lever, action to review, a qualitative impact band, an owning role and a "
+    "monitoring window -- derived on read, never stored, and never a causal claim, a "
+    "currency figure or a guaranteed outcome",
+    "recorded reader feedback on a recommendation, which by design moves no threshold "
+    "and no verdict",
+    "a post-run summary mail rendered from the run's own stored results, sent once "
+    "per run",
     "audit trail and execution telemetry",
 )
 
 NOT_AVAILABLE = (
     "forecasting",
-    "KPI alerting or notification",
-    "contribution or driver attribution analysis",
-    "dimensional or root-cause analysis of a detected deviation",
-    "automated investigation runs",
-    "narrative generation over computed results",
-    "recommendations",
+    "threshold-based KPI alerting, routing or escalation rules, and any history of them",
+    "causal inference -- which part of the business a movement sits in is measured; why "
+    "it moved is not",
+    "quantified financial impact of a movement or of a recommended action, because no "
+    "counterfactual is measured",
+    "automated or scheduled investigation runs -- a breakdown happens because a person "
+    "asked for one",
+    "monitoring below the KPI level: nothing beneath a KPI carries a status",
+    "feedback learning -- recorded feedback never moves a threshold, a verdict or a "
+    "recommendation",
 )
 
 

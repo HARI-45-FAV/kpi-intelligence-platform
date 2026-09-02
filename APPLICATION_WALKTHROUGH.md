@@ -6,9 +6,14 @@
 > the difference is called out.
 
 **Document status:** current as of the `frontend` branch.
-**Verified test state at the time of writing:** backend **167 tests, all passing**;
-frontend **47 tests — 37 passing, 10 failing**, all ten pre-existing failures inside
-`frontend/src/investigation-business-view.test.tsx`.
+**Verified state at the time of writing:** backend **260 tests**; frontend **87 tests
+across 12 files, all passing**, plus a clean `tsc -b --noEmit` and a clean
+`npm run build`. `backend/verify_no_llm.py` passes with the provider SDK poisoned in
+`sys.modules`, and `backend/scripts/verify_recommendations_live.py` walks seven
+scenarios over real HTTP.
+
+**In a hurry?** [README.md](README.md) is the two-minute version. This document is
+the long one.
 
 ---
 
@@ -34,8 +39,9 @@ frontend **47 tests — 37 passing, 10 failing**, all ten pre-existing failures 
 
 **BusinessIntelligence.ai is a governed KPI intelligence platform: it connects to a
 company's own business data, learns what each KPI officially means, and then answers
-one question per KPI per day — *did this number behave normally?* — and when the answer
-is no, it shows which part of the business the movement came from.**
+one chain of questions per KPI per day — did this number behave normally? which part
+of the business accounts for the movement? and what should someone consider doing
+about it, and who owns it?**
 
 ### Explained without any technical words
 
@@ -51,9 +57,11 @@ spreadsheet does not know:
 - Your finance team and your marketing team **define "revenue" differently** — one
   subtracts refunds, the other doesn't. They argue about whose dashboard is right.
 - Even if the number *is* unusual, nobody can tell you **which region, category or store**
-  caused it without a day of manual spreadsheet work.
+  it came from without a day of manual spreadsheet work.
+- And even once you know, the meeting still ends with the real question unanswered:
+  **so what do we actually do on Monday, and whose job is it?**
 
-This application fixes exactly those four problems:
+This application fixes exactly those five problems:
 
 1. It compares yesterday to **the right yesterdays** — comparable Fridays, comparable
    weeks of the month, the same season last year — and it learns which comparison to use
@@ -66,6 +74,10 @@ This application fixes exactly those four problems:
 4. When something *is* abnormal, one click breaks the movement down and tells you
    *"South region accounts for 61% of this movement"* — arithmetic done on the server
    from real rows, never a guess.
+5. And then it turns that evidence into **a suggested next action with a named owner**:
+   which business lever to review, in which area, at what potential impact, with what to
+   monitor afterwards — all assembled from stored rows, and framed as a recommendation
+   for review rather than a claim about cause.
 
 And it does all of this **without pretending to be magic**. There is no black-box model
 deciding your business is broken. The maths is deterministic: the same data always
@@ -81,6 +93,7 @@ dates it was compared against.
 | Every team defines the same KPI differently | KPIs are versioned contracts with an approval lifecycle, not free-text SQL |
 | Anomaly tools are unexplainable, so nobody trusts them | Robust median + MAD + modified z-score — no training, no model weights, fully reproducible |
 | "Why did it move?" takes a human a day of spreadsheet work | Contribution analysis apportions a stored movement across the KPI's approved dimensions |
+| A finding lands in a meeting with no owner and no next step | Every abnormal result carries a suggested action: lever → action → potential impact band → owner → confidence → monitoring plan, derived from stored rows |
 | BI tools leak data across tenants and roles | Every request re-derives company scope and permissions from the database; row scope and denied columns are enforced per role |
 | AI assistants hallucinate business numbers | The Copilot is off by default, cannot compute, and may only call 18 read-only tools over already-governed data |
 
@@ -95,6 +108,9 @@ dates it was compared against.
 - **Explainability by construction**, not as a feature bolted on afterwards.
 - **Contribution without causation.** The platform says "accounts for" and "associated
   with" — never "caused by" — because a share is not a cause.
+- **An answer that reaches an owner.** Evidence → lever → action → potential impact →
+  owner → confidence → monitoring plan, on every abnormal result, with the abstention
+  path taken seriously: too little evidence produces collection steps, not advice.
 - **Tenant and role safety as a design property**: platform metadata and tenant business
   data are kept in physically separate databases.
 
@@ -108,19 +124,28 @@ dates it was compared against.
 | **Manager / Regional Manager** | Same screens, narrowed to their own rows by role scope | Dashboard, Monitoring, Investigation |
 | **Viewer** | Read-only consumption | Dashboard, Results |
 
-### What the platform deliberately does *not* do
+### The four lines it holds on purpose
 
-This list is as important as the feature list — it is what keeps the product honest, and
-it is enforced in code, not just documented:
+Every product draws a line somewhere. These four are drawn in code and covered by
+tests, because they are what makes the rest of the output defensible in a room where
+someone's budget depends on it:
 
-- No **forecasting** and no prediction of future values.
-- No **causal inference** — contribution shares are explicitly not causes.
-- No **vector embeddings** or semantic search; Copilot retrieval is keyword-and-scope based.
-- No **action recommendations** ("you should discount X").
-- No **automated alerts**, emails or notifications.
-- No **feedback learning** — the engine does not drift based on what users click.
-- No **autonomous investigation** and no **continuous per-entity monitoring**: nothing runs
-  anomaly detection over every region or product on a schedule.
+- **Measurement, not prediction.** The platform judges what happened against what
+  comparable history supports. It does not forecast, so no figure on any screen is a
+  projection.
+- **Contribution, not causation.** A share says how much of a movement sits in one part
+  of the business. The wording is *"accounts for"*, and the payload is scanned by tests
+  for causal verbs, so a stronger claim cannot ship.
+- **Suggested for review, not decided.** Recommendations name a lever, an area and an
+  owner, with a qualitative impact band and the causation note attached. They promise no
+  outcome and invent no financial figure.
+- **Abstention over a confident guess.** *Not enough comparable history to judge* is a
+  first-class verdict, and a low-confidence result gets evidence-collection steps instead
+  of an action. The engine is allowed to say it does not know.
+
+Two consequences worth knowing up front: detection and investigation both run **on
+request**, so nothing scans every region on a schedule, and there is no alerting or
+notification layer — this is a surface you open, not one that pages you.
 
 ---
 
@@ -132,11 +157,11 @@ it is enforced in code, not just documented:
 | --- | --- | --- |
 | **Frontend** | React 18 single-page app, TypeScript, Vite, Tailwind | `frontend/src/` |
 | **Backend** | FastAPI application, layered as routes → services → connectors | `backend/app/` |
-| **Platform database** | The platform's *own* metadata: companies, users, roles, KPI contracts, catalog, detection runs, audit. SQLite in development, PostgreSQL in production | `backend/data/platform.db` (dev) |
-| **Tenant business databases** | The company's real business data. **Never** configured in code — registered at runtime and reached only through connectors | External (Supabase / PostgreSQL / SQLite file) |
+| **Platform database** | The platform's *own* metadata: companies, users, roles, KPI contracts, catalog, detection runs, audit. **40 tables.** SQLite in development, PostgreSQL in production | `backend/data/platform.db` (dev) |
+| **Tenant business databases** | The company's real business data. **Never** configured in code — registered at runtime and reached only through connectors | External (Supabase / PostgreSQL / SQLite file / uploaded spreadsheet) |
 | **Authentication & authorization** | Bcrypt password hashing, JWT sessions, a second in-memory-only elevated admin token, and a 25-permission RBAC model resolved per request | `backend/app/core/security.py`, `core/deps.py`, `core/permissions.py` |
 | **AI / LLM layer** | Optional, provider-independent, OpenAI-compatible chat endpoint (vLLM, Ollama, or any compatible host). **Disabled by default** | `backend/app/llm/`, `backend/app/copilot/` |
-| **External integrations** | Connector registry with 8 descriptors, 3 of them implemented | `backend/app/connectors/` |
+| **External integrations** | Connector registry with 9 descriptors, 4 of them implemented (Supabase REST, PostgreSQL, SQLite file, CSV/Excel upload) | `backend/app/connectors/` |
 
 ### The architecture diagram
 
@@ -145,7 +170,7 @@ flowchart TB
     subgraph Browser["🖥️ Browser — React SPA (Vite, port 5173)"]
         direction TB
         Shell["AppShell<br/>nav + company switcher + Copilot launcher"]
-        Pages["Dashboard · Monitoring · Results<br/>Investigation · KPI Setup"]
+        Pages["Dashboard · Monitoring · Results<br/>Result detail · Investigation · KPI Setup"]
         Gates["SignIn → Onboarding<br/>(pre-shell gates)"]
         Client["api/client.ts<br/>attaches JWT, unwraps errors"]
         Auth["AuthContext<br/>localStorage 'bi.ai.session'"]
@@ -160,13 +185,13 @@ flowchart TB
     subgraph API["⚙️ FastAPI — /api/v1"]
         direction TB
         Deps["core/deps.py<br/>JWT → User → Membership → Role → Permission → Company scope"]
-        Routes["12 route modules<br/>auth · companies · sources · analysis · documents<br/>catalog · kpis · detection · investigation · observability · copilot · meta"]
-        Services["34 services<br/>detection · kpi_validation · kpi_execution · contribution<br/>bucket_config · profiling · relationships · reconciliation · audit …"]
+        Routes["14 route modules · 119 endpoints<br/>auth · companies · sources · uploads · analysis · documents<br/>catalog · kpis · detection · monitoring · investigation<br/>recommendations · observability · copilot"]
+        Services["37 services<br/>detection · kpi_validation · kpi_execution · contribution<br/>explanation · recommendation · tabular · bucket_config<br/>profiling · relationships · reconciliation · audit …"]
         Deps --> Routes --> Services
     end
 
     subgraph Data["🗄️ Platform metadata (owned by the platform)"]
-        PDB[("32 tables<br/>SQLAlchemy 2.0 + Alembic<br/>SQLite dev / PostgreSQL prod")]
+        PDB[("40 tables<br/>SQLAlchemy 2.0 + Alembic<br/>SQLite dev / PostgreSQL prod")]
     end
 
     subgraph Conn["🔌 Connector registry (nothing else imports a concrete connector)"]
@@ -174,7 +199,8 @@ flowchart TB
         Sup["Supabase REST ✅"]
         PG["PostgreSQL ✅"]
         SL["SQLite file ✅"]
-        NI["Snowflake · BigQuery · HTTP API<br/>CSV extract · File drop ❌ metadata only"]
+        UP["CSV / Excel upload ✅"]
+        NI["Snowflake · BigQuery · HTTP API<br/>File drop ❌ metadata only"]
     end
 
     subgraph Tenant["🏢 Tenant business data (owned by the customer)"]
@@ -191,7 +217,7 @@ flowchart TB
     Services --> PDB
     Services -->|"only via registry"| Conn --> TDB
     Services -->|"evidence assembled server-side"| Orc
-    Routes -->|"JSON"| Proxy -->|"typed responses<br/>(76 types in api/types.ts)"| Client
+    Routes -->|"JSON"| Proxy -->|"typed responses<br/>(103 types in api/types.ts)"| Client
 
     style Browser fill:#0f2b46,stroke:#3d7ab8,color:#e8f2ff
     style API fill:#123a2c,stroke:#3f9d76,color:#e9fff5
@@ -299,8 +325,9 @@ flowchart LR
     L --> M["13. Run the Agent<br/>Dashboard / Monitoring"]
     M --> N["14. Read verdicts<br/>+ KPI detail modal"]
     N --> O["15. Results<br/>full stored history"]
-    O --> P["16. Investigation<br/>who accounts for the movement"]
-    P --> Q["17. Copilot<br/>ask about definitions"]
+    O --> O2["16. Open one result<br/>why · contributors ·<br/>recommended next actions"]
+    O2 --> P["17. Investigation<br/>who accounts for the movement"]
+    P --> Q["18. Copilot<br/>ask about definitions"]
 ```
 
 ### Step 1 — Arrive and sign in
@@ -427,7 +454,28 @@ are coloured by stored verdict.
 tallies for Total / Anomalies / Normal / Low confidence / KPIs, a search box, and the
 engine's stored headline sentence on each row.
 
-### Step 16 — Investigate a movement
+### Step 16 — Open one result and read what to do about it
+
+Each row links to `/results/:runId`, one stored evaluation on its own address, so a
+movement can be linked to from a dashboard or a colleague's message. Six sections in the
+order a reader needs them: **Overview**, **Why this verdict**, **Contributors**,
+**Recommended next actions**, **Evidence**, **AI explanation**.
+
+The fourth is the point of the page. From the same stored rows it assembles a target
+area, the business lever to review, a specific action, a qualitative potential-impact
+band with its basis, a named owner, the confidence rating and a monitoring plan — with
+the causation note attached to every card and an **Executive / Analyst** switch over the
+depth. Ask for a breakdown from the Contributors section and the recommendation
+**re-aims itself** at the area that breakdown found, because the panel is a reading of
+the newest stored evidence rather than a saved paragraph. Details in
+[docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md).
+
+Two behaviours worth noticing here: nothing on the page is recomputed in the browser —
+every figure is a stored column read back — and the statistical record is attached by the
+server only for a reader holding `kpi.read`, who is told the detail is withheld rather
+than shown an empty panel.
+
+### Step 17 — Investigate a movement
 
 **Investigation** has two entry points:
 
@@ -441,7 +489,7 @@ The gate comes first: if no detection run is stored for that (KPI, date), the AP
 verdict"* and *"A share is not a cause"* — the wording on screen is "accounts for" and
 "associated with".
 
-### Step 17 — Ask the Copilot
+### Step 18 — Ask the Copilot
 
 The **Copilot** button is in the header on every page. The rule the provider exists to
 enforce: *"the user never types context."* Company comes from the session, page comes from
@@ -462,6 +510,7 @@ Only real pages are documented. The routes are exactly these, from `App.tsx`:
 | `/` | `pages/Dashboard.tsx` | Index route |
 | `/monitoring` | `pages/Monitoring.tsx` | |
 | `/results` | `pages/Results.tsx` | |
+| `/results/:runId` | `pages/ResultDetail.tsx` | One stored evaluation, addressable on its own. The parameter is the detection run id |
 | `/investigation` | `pages/Investigation.tsx` | |
 | `/kpi-setup/*` | `pages/kpi-setup/KpiSetup.tsx` | 8 sub-panels behind an unlock gate |
 | `*` | — | Redirects to `/` |
@@ -588,17 +637,55 @@ Two components are **not** pages: `pages/KPIDetailDashboard.tsx` is a modal rend
   key shown as a caption only when it adds something), date, actual, expected, deviation,
   status, and an explanation sentence. Empty state: *"No stored results match this view."*
 - **Actions.** Search by KPI or status (client-side filtering over the loaded history).
+  Each row links to its own result page at `/results/:runId`.
 - **Data.** One call: `GET /companies/{companyId}/results`.
 - **Units are read, never guessed.** Each row carries `currency` and `unit` from the stored
   run, because *"guessing money by looking for 'revenue' or 'sales' in the KPI key
   mislabels every other currency KPI, and pinning the symbol to USD prints dollars for a
   company whose books are in something else."*
-- **About the explanation column.** A generated explanation is used when one exists; nothing
-  writes them today (that belongs to the Copilot, which is off by default), so in practice
-  this shows the engine's deterministic headline — *"Showing that beats the empty column
-  this page used to render on every single row."*
+- **About the explanation column.** A generated explanation is shown when one has been
+  assembled for that run (the **AI explanation** action on the result page writes it);
+  otherwise this shows the engine's own deterministic headline — *"Showing that beats the
+  empty column this page used to render on every single row."*
 
-### 4.7 — Investigation (`/investigation`)
+### 4.7 — Result detail (`/results/:runId`)
+
+- **Purpose.** *"One stored evaluation, why it says what it says, and what it suggests
+  someone consider doing about it."* Addressable on its own so a movement can be linked to
+  from a dashboard, an alert or a colleague's message.
+- **Six sections, in the order a reader needs them.** **Overview** (the five figures and
+  the comparison in words) → **Why this verdict** → **Contributors** → **Recommended next
+  actions** → **Evidence** → **AI explanation**.
+- **The recommendation panel.** Up to three cards, each carrying all eight parts: the
+  finding, the target area, the business lever to review, the action, a qualitative
+  potential-impact band with its basis, a named owner, the confidence rating and its
+  meaning, and a monitoring plan. An **Executive / Analyst** switch changes the depth, not
+  the conclusion; an expandable **Why this recommendation?** lists the stored figures each
+  card was assembled from; and the causation note is on the card, not behind a disclosure.
+  Readers with `investigation.read` can record whether a recommendation was useful and how
+  far their review got.
+- **It re-aims itself.** Running a breakdown in the Contributors section bumps the
+  recommendation panel's refresh token, *"rather than leaving two panels disagreeing about
+  what is known"* — so drilling from a region into a channel changes the target area, the
+  owner and the comparison basis of the advice.
+- **Abstention is visible.** A `NORMAL` result says no corrective action is recommended; a
+  `LOW_CONFIDENCE` one offers four evidence-collection steps and no lever, owner or action.
+- **Nothing is recomputed in the browser.** No median, no z-score, no threshold
+  comparison, no verdict — *"if a number is on this page, a stored column holds it, and the
+  same page shown tomorrow will show the same answer."*
+- **The statistics are permissioned.** The technical record reaches the client only for a
+  reader holding `kpi.read`; a reader without it still gets the verdict, the movement and
+  the comparison basis in words, *and is told plainly that the detail is withheld* rather
+  than shown an empty panel that looks like missing data.
+- **Breaking the movement down is a query, so it is a decision.** The Contributors section
+  reads the company's source for that date when someone asks. Nothing here analyses every
+  part of the business on load.
+- **Data.** `GET …/detection-runs/{run_id}`, `…/explanation`, `…/findings`,
+  `…/recommendations`, `POST …/recommendation-feedback`,
+  `POST /investigation/contribution`.
+- **Depth.** [docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md).
+
+### 4.8 — Investigation (`/investigation`)
 
 - **Purpose.** One generalised workflow, driven entirely by *"what the KPI's own
   registration approved"* — its dimensions, its hierarchy, its access policy.
@@ -627,7 +714,7 @@ Two components are **not** pages: `pages/KPIDetailDashboard.tsx` is a modal rend
 - **Where the maths happens.** *"The arithmetic all happens on the server. This file formats
   numbers and draws bars."*
 
-### 4.8 — KPI Setup (`/kpi-setup/*`) — the governed area
+### 4.9 — KPI Setup (`/kpi-setup/*`) — the governed area
 
 The gate first: `if (!adminUnlocked) return <AdminUnlock />`. Then eight sub-tabs, ordered
 as a governance narrative — *"who you are → what data you connected → the KPIs the business
@@ -649,7 +736,7 @@ was changed"*:
 *sibling* route rather than a nested one, so the **Data Sources** tab stays visually active
 while you are inside a source.
 
-### 4.9 — Copilot drawer (global)
+### 4.10 — Copilot drawer (global)
 
 - **Purpose.** *"A question-and-evidence surface, not a chat toy."*
 - **Shows.** Your question, the answer, and the evidence it was drawn from, each item
@@ -732,27 +819,31 @@ Each feature is given twice: **what it means to a user**, then **what happens in
 - **Why it exists.** A BI platform must reach the customer's data without that data — or its
   credentials — ever being written into the platform's own code or database in the clear.
 - **Behind the scenes.** `connectors/registry.py` is the only module that knows concrete
-  connectors exist: *"Nothing outside this module imports a concrete connector."* Eight
-  descriptors are published to the UI, three of which are real:
+  connectors exist: *"Nothing outside this module imports a concrete connector."* Nine
+  descriptors are published to the UI, and four of them carry a working implementation —
+  covering the two ways a company actually arrives: a live database, or a spreadsheet.
 
   | Connector | Implemented | Profiling |
   | --- | --- | --- |
   | Supabase (REST) | ✅ | ✅ |
   | PostgreSQL | ✅ | ✅ |
   | SQLite file | ✅ | ✅ |
-  | Snowflake | ❌ | — |
-  | Google BigQuery | ❌ | — |
-  | HTTP API | ❌ (metadata only) | — |
-  | CSV extract | ❌ (metadata only) | — |
-  | File drop | ❌ (metadata only) | — |
+  | CSV or Excel upload | ✅ | ✅ |
+  | Snowflake | Declared | — |
+  | Google BigQuery | Declared | — |
+  | HTTP API | Declared (metadata only) | — |
+  | CSV extract | Declared (metadata only) | — |
+  | File drop | Declared (metadata only) | — |
 
-  Each descriptor carries typed `ConnectorField`s (`text | number | password | select`, with
-  `required`, `placeholder`, `help_text`, `secret`) and an `accepts_connection_uri` flag, so
-  the **frontend renders whatever form the backend declares** rather than hardcoding one
-  form per connector. Guard rails are global:
+  A *declared* connector is a real descriptor with a real form and a real refusal: adding one
+  means writing one module against the existing interface, and nothing above the registry
+  changes. Each descriptor carries typed `ConnectorField`s (`text | number | password |
+  select`, with `required`, `placeholder`, `help_text`, `secret`) and an
+  `accepts_connection_uri` flag, so the **frontend renders whatever form the backend
+  declares** rather than hardcoding one form per connector. Guard rails are global:
   `connector_query_timeout_seconds = 30`, `connector_max_rows_returned = 5000`.
 - **Components.** `SourcesPanel.tsx` → `api/v1/sources.py` → `connectors/registry.py` →
-  `connectors/{postgres,sqlite,supabase_rest,sql,warehouse}.py`; secrets via
+  `connectors/{postgres,sqlite,supabase_rest,upload,sql,warehouse}.py`; secrets via
   `core/security.py`; rows in `data_sources`, `source_tables`, `source_columns`.
 
 ### 5.5 Credential encryption and key lifecycle
@@ -999,6 +1090,78 @@ Each feature is given twice: **what it means to a user**, then **what happens in
   `api/v1/observability.py` (`/audit`, `/telemetry`, `/telemetry/summary`, `/activity`,
   `/dashboard`) behind the `audit.read` and `telemetry.read` permissions.
 
+### 5.19 Evidence-to-action recommendations
+
+- **User view.** On any result page, a **Recommended next actions** panel: the area the
+  movement sits in, the business lever to review, a specific action, how much potential
+  impact it carries, who should own it, how confident the platform is, and what to watch
+  for the next three comparable periods. An **Executive / Analyst** switch changes the
+  depth. Up to three cards, never a ranked list of seven.
+- **Why it exists.** A verdict and a share still leave a meeting with no owner and no next
+  step. This closes the chain — and closes it conservatively, because it is the only part
+  of the platform that can put words in a manager's mouth.
+- **Behind the scenes.**
+  - **Derived on read, never stored.** No `recommendations` table, no model call, no query
+    against the company's source. `GET …/detection-runs/{id}/recommendations` assembles the
+    cards from the stored detection run and the newest stored breakdown, so the same rows
+    always produce the same words. A *persisted* recommendation would be free to disagree
+    with its own evidence the moment somebody drilled a level deeper.
+  - **One stance per result, not a set of flags** — `ACTION`, `MONITOR`, `NO_ACTION`,
+    `EVIDENCE_FIRST`, `UNREADABLE` — because a surface that could combine flags could
+    combine them into a contradiction.
+  - **Abstention is a branch, not an error path.** A `LOW_CONFIDENCE` result, or an
+    `ABNORMAL` one the existing confidence logic rates LOW, yields four
+    evidence-collection steps and **no lever, no owner and no action**. A favourable
+    movement is capped at medium priority, because the valuable action there is to learn
+    from it, not to correct it.
+  - **The vocabulary is configuration, not prose**: 17 levers, three KPI families plus a
+    generic one, seven kinds of business area plus a generic one, each with a label, a
+    functional owner, a review instruction, monitoring metrics and what *comparing like
+    with like* means there. Adding one is a dataclass entry, not an engine change.
+  - **What the company declared beats what the platform assumes.** A registered
+    *controllable* `KpiDriver` wins; otherwise the KPI family's default, labelled on the
+    card as a default; otherwise an honest `operational_review` fallback that says no
+    controllable driver has been registered. Matching is whole-word over normalised
+    tokens, never substring — *"substring matching is how 'region' finds 'sub-regional
+    adjustment' and how 'sku' finds 'risk'."*
+  - **Confidence is reused, not re-invented.** `explanation.confidence_for` is called
+    through a public wrapper; a second confidence scale would be the platform disagreeing
+    with itself in two panels of one page. Its wording changes depending on whether an
+    area has actually been named, and a monitoring metric written with `{area}` is dropped
+    rather than filled with a stand-in.
+  - **Potential impact is a band with a stated basis**, computed from the KPI's registered
+    business criticality adjusted by how concentrated the movement is — never a figure,
+    because the platform measures no counterfactual and an invented number is the fastest
+    way for a recommendation to become indefensible.
+  - **Three permission tiers on one payload.** `analytics.read` reads the advice;
+    `investigation.read` *sharpens* it to a named area, because naming a region is naming
+    part of the business; `kpi.read` additionally receives the `evidence` block. With no
+    breakdown and no entitlement, the advice degrades to the KPI as a whole and says why —
+    it does not pick a plausible region.
+  - **Enforced, not just intended.** `test_recommendations.py` scans every string in the
+    served payload for causal verbs and for guarantee vocabulary, and so does
+    `scripts/verify_recommendations_live.py`, on the wire, across seven scenarios.
+
+### 5.20 Recommendation feedback
+
+- **User view.** On each card: *Useful / Not useful / Needs review*, a review status of
+  *Not started / In review / Action taken*, and an optional note.
+- **Why it exists.** It is the one signal in the platform nothing else can derive —
+  whether a human found the advice useful, and how far their review actually got.
+- **Behind the scenes.** `recommendation_feedback` is the only table this layer writes. One
+  row per reader per recommendation key, upserted, so submitting again is a correction
+  rather than a second opinion. The key is **validated against the recommendations the run
+  actually produces**, so feedback on advice the platform never offered cannot be stored,
+  and the lever and area saved beside it are the engine's own rather than the client's.
+  Responses are read company-wide — *a manager who marked an action taken has said
+  something the next reader needs to know* — and the table is structurally unable to move a
+  verdict: no detection or contribution read touches it, and it `CASCADE`s on the run.
+  Writing needs `investigation.read`; every submission is audited as
+  `recommendation.feedback_recorded`.
+- **Keys survive reordering.** A key is `lever|area` (`order_volume|north › store`), not a
+  list position, so a recorded response stays attached to the recommendation it was given
+  about even after a deeper breakdown reorders the set.
+
 ---
 
 ## 6. Data Flow
@@ -1014,12 +1177,12 @@ User Action
   → FastAPI route  (api/v1/*.py)
   → core/deps.py   JWT → User → Membership → Role → Permission → Company scope
   → service layer  (services/*.py)
-  ├─→ Platform DB  (SQLAlchemy → 32 metadata tables)
+  ├─→ Platform DB  (SQLAlchemy → 40 metadata tables)
   └─→ Connector    (registry → tenant business DB, timeout 30s, max 5000 rows)
   → deterministic computation in the service (never in the browser, never in the model)
   → persist the run
   → response split: business_view() always, evidence() only with kpi.read
-  → typed JSON (one of 76 types in api/types.ts)
+  → typed JSON (one of 103 types in api/types.ts)
   → page formats numbers and picks colours
   → User sees Actual · Expected · Deviation · Status · comparison in words
 ```
@@ -1131,6 +1294,44 @@ sequenceDiagram
     CP-->>U: answer, with each evidence item labelled in business words
 ```
 
+### Flow E — Reading what to do about a result
+
+The only flow in the platform that **writes nothing** on the read path, and the only one
+whose output is advice rather than measurement.
+
+```
+Open /results/:runId
+  → GET …/detection-runs/{run_id}/recommendations      [analytics.read]
+  → load_scoped(DetectionRun)                          another tenant's id → 404
+  → read the stored verdict, actual, expected, deviation
+  → read the NEWEST stored ContributionRun for that (KPI, date)
+       → none, or caller lacks investigation.read → no area is named, and it says so
+  → explanation.confidence_for(...)                    the EXISTING scale, reused
+  → choose a stance
+       LOW_CONFIDENCE / ABNORMAL+LOW → EVIDENCE_FIRST  4 collection steps, no lever
+       NORMAL                        → NO_ACTION       no cards at all
+       ABNORMAL, favourable          → MONITOR         capped at medium priority
+       ABNORMAL, adverse             → ACTION
+  → lever: registered controllable KpiDriver → family default → operational_review
+  → area:  leader_entity + chain → dimension → entity role → owner, comparison hint
+  → impact band: registered criticality ± concentration, with its basis in words
+  → up to 3 cards × 8 parts, each with the causation note
+  → business_view()  always
+  → evidence()       only with kpi.read
+  → nothing persisted
+
+Then, optionally:
+POST …/recommendation-feedback                          [investigation.read]
+  → validate recommendation_key against the run's CURRENT set   unknown key → 400
+  → upsert one row per (reader, key) in recommendation_feedback
+  → audit  recommendation.feedback_recorded
+  → the verdict, the breakdown and the next reader's advice are all unchanged
+```
+
+Run a breakdown from the Contributors section and this whole flow re-runs against the
+newer `ContributionRun` — which is why the advice re-aims itself at the deeper area
+instead of two panels disagreeing about what is known.
+
 ---
 
 ## 7. How Everything Is Connected
@@ -1148,6 +1349,7 @@ The goal of this section is a complete mental model. Read the table first, then 
 | **KPI Detail modal** | `Overlay`, `StatusBadge`, `DefinitionRow` | — (reuses loaded data) | none | — | — | inherits |
 | **Monitoring** | `Panel`, `Metric`, `StatusBadge`, `Overlay`, `EmptyState` | `useResource`, `useAction` | `GET /detection/overview`, `POST /run-detection/batch` | `detection`, `observability` | `detection_runs`, `agent_runs` | `kpi.read`, `detection.run` |
 | **Results** | `StatCard`, `Panel`, `EmptyState` | `useResource` | `GET /companies/{id}/results` | `detection`, `analysis_views` | `detection_runs`, `agent_run_explanations`, `kpi_versions` | `kpi.read` |
+| **Result detail** | `Panel`, `StatusBadge`, `Recommendations`, `ExplanationCard`, `Alert`, `EmptyState` | `useResource`, `useAction` | `GET …/detection-runs/{id}`, `…/explanation`, `…/findings`, `…/recommendations`, `POST …/recommendation-feedback`, `POST /investigation/contribution` | `detection`, `explanation`, `recommendation`, `recommendation_config`, `contribution` | `detection_runs`, `contribution_runs`, `agent_run_explanations`, `kpi_materiality_rules`, `kpi_drivers`, `recommendation_feedback`, `audit_logs` | `analytics.read`; sharpened by `investigation.read`; `evidence` with `kpi.read`; feedback needs `investigation.read` |
 | **Investigation** | `ShareBar`, `ContributorRow`, `Panel`, `Drawer`, `EmptyState` | `useResource`, `useAction` | `GET /investigation/dimensions`, `GET /investigation/entities`, `POST /investigation/contribution`, `POST /investigation/analysis` | `contribution`, `investigation_map`, `kpi_breakdown`, `join_safety` | `contribution_runs`, `detection_runs`, `kpi_dimensions` | `investigation.read` |
 | **KPI Setup → Company** | `SettingRow`, `Modal`, `SectionHeader` | `useResource`, `useAction` | `GET/PATCH /companies/{id}`, `GET/PUT …/calendars`, `POST …/activate` | `audit` | `companies`, `company_calendars` | `company.manage` |
 | **KPI Setup → Data Sources** | `Panel`, `Field`, `Drawer`, `Alert`, `InfoTile` | `useResource`, `useAction` | `/data-sources*`, `/tables*`, `/data-scope`, `/analysis/*` | `discovery`, `profiling`, `relationships`, `freshness`, `reconciliation`, `source_governance` | `data_sources`, `source_tables`, `source_columns`, `selected_tables`, `source_health`, `table_profiles`, `column_profiles`, `table_grains`, `table_relationships`, `join_safety`, `source_reconciliations` | `source.manage`, `profiling.run` |
@@ -1200,6 +1402,7 @@ flowchart TB
     subgraph Measure["What actually happened"]
         AR[agent_runs] --> DR[detection_runs] --> ARE[agent_run_explanations]
         DR --> CR[contribution_runs]
+        DR --> RF[recommendation_feedback]
     end
 
     subgraph Trail["Accountability"]
@@ -1219,6 +1422,8 @@ flowchart TB
     BC -.->|"APPROVED only"| AR
     CAL -.->|"fiscal year / week start"| AR
     KDIM -.->|"approved dimensions only"| CR
+    KDR -.->|"controllable drivers"| RF
+    KMR -.->|"business criticality → impact band"| RF
     KV -.->|"every transition"| AL
     BC -.->|"every transition"| AL
 
@@ -1248,8 +1453,11 @@ the engine`. An unapproved policy is invisible to the engine, which keeps using
 
 **4. Detection is the only writer of analytical truth, and everything downstream reads it.**
 `agent_runs → detection_runs → { Dashboard cards, Monitoring overview, Results history,
-KPI detail calendar, contribution_runs, Copilot evidence }`. Investigation's 409 gate and
-the KPI detail modal's *"no recalculation"* footnote are the same rule seen from two sides.
+KPI detail calendar, contribution_runs, recommendations, Copilot evidence }`. Investigation's
+409 gate and the KPI detail modal's *"no recalculation"* footnote are the same rule seen
+from two sides — and the recommendation layer is the same rule taken to its conclusion: it
+is *derived on read* from those stored rows and persists nothing, so advice can never drift
+away from the evidence printed beside it.
 
 **5. Authorization is a chain, not a flag, and it is re-derived every request.**
 
@@ -1284,32 +1492,35 @@ Only paths that actually exist are listed.
 
 ```
 kpi-intelligence-platform/
-├── README.md                     Sprint-1 project document (see the note below)
+├── README.md                     the short, judge-readable project document
 ├── plan.txt, sprint1.txt         planning notes
 ├── hackon.txt                    hackathon brief
 ├── APPLICATION_WALKTHROUGH.md    ← this document
 ├── docs/
 │   ├── DETECTION.md              the detection engine in depth
 │   ├── INVESTIGATION.md          contribution + investigation in depth
-│   └── COPILOT.md                the governed Copilot (says 16 tools; there are 18 today)
+│   ├── RECOMMENDATIONS.md        the evidence-to-action layer in depth
+│   └── COPILOT.md                the governed, optional AI layer
 │
 ├── backend/
 │   ├── requirements.txt          FastAPI, SQLAlchemy 2, Alembic, PyJWT, bcrypt, cryptography, pytest
 │   ├── pytest.ini                test configuration
-│   ├── alembic.ini + alembic/    5 migrations: 37f11cf88d4d, 495cfc3af89a,
-│   │                             7c1f2e9a4b6d, a1d4f7b2c903, b6e2c8d5710f
+│   ├── alembic.ini + alembic/    7 migrations, ending f4a7d2e9c318
+│   │                             (recommendation feedback)
 │   ├── .env.example              every setting, documented, incl. the optional AI layer
 │   ├── verify_no_llm.py          proves the platform works with the model disabled
 │   ├── verify_ollama.py          checks a local Ollama endpoint
+│   ├── scripts/                  verify_recommendations_live.py — 7 scenarios over HTTP
 │   ├── data/                     platform.db (dev) + documents/ (uploads)
-│   ├── tests/                    the backend suite — 167 tests, all passing
+│   ├── tests/                    the backend suite — 260 tests
 │   └── app/
 │       ├── main.py               FastAPI app, startup, router mount
 │       ├── api/
 │       │   ├── router.py         mounts every v1 module under /api/v1
-│       │   └── v1/               auth · companies · sources · analysis · documents ·
-│       │                         catalog · kpis · detection · investigation ·
-│       │                         observability · copilot · meta
+│       │   └── v1/               14 modules · 119 endpoints: auth · companies ·
+│       │                         sources · uploads · analysis · documents · catalog ·
+│       │                         kpis · detection · monitoring · investigation ·
+│       │                         recommendations · observability · copilot
 │       ├── core/
 │       │   ├── config.py         Settings; refuses dev defaults outside development
 │       │   ├── deps.py           AccessContext, require_permissions, load_scoped
@@ -1319,15 +1530,17 @@ kpi-intelligence-platform/
 │       │   ├── errors.py         uniform error shape
 │       │   ├── clock.py          injectable time (so tests are not flaky)
 │       │   └── telemetry.py      execution logging
-│       ├── models/               9 modules → 32 tables + base.py (UtcDateTime,
+│       ├── models/               10 modules → 40 tables + base.py (UtcDateTime,
 │       │                         UUIDPrimaryKey, Timestamped, ~30 StrEnum vocabularies)
 │       ├── schemas/              Pydantic request/response models
-│       ├── services/             34 modules — all business logic lives here
+│       ├── services/             37 modules — all business logic lives here, incl.
+│       │                         detection · contribution · explanation ·
+│       │                         recommendation · recommendation_config · tabular
 │       ├── connectors/           base · registry · postgres · sqlite ·
-│       │                         supabase_rest · sql · warehouse
+│       │                         supabase_rest · upload · sql · warehouse
 │       ├── copilot/              context · evidence · orchestrator · prompts ·
 │       │                         retrieval · schemas · text · tools/ (18 tools)
-│       ├── llm/                  config · provider · openai_compatible
+│       ├── llm/                  config · provider · openai_compatible · gemini
 │       └── seed/bootstrap.py     idempotent roles + permissions seeding
 │
 └── frontend/
@@ -1338,15 +1551,17 @@ kpi-intelligence-platform/
     ├── index.html, public/logo.svg
     └── src/
         ├── main.tsx              React root
-        ├── App.tsx              the three gates + five routes
+        ├── App.tsx              the three gates + six destinations
         ├── index.css            Tailwind layers + glass/panel utilities
         ├── api/
         │   ├── client.ts         fetch wrapper: JWT header, error unwrapping
-        │   └── types.ts          76 exported types — the whole API contract
+        │   └── types.ts          103 exported types — the whole API contract
         ├── auth/AuthContext.tsx  session, memberships, company switch, admin unlock
         ├── components/
         │   ├── ui.tsx            20 shared components (Panel, StatusBadge, Metric,
         │   │                     Field, PasswordInput, Alert, Overlay, Drawer, Modal…)
+        │   ├── Recommendations.tsx  the evidence-to-action panel + feedback controls
+        │   ├── Explanation.tsx      the explanation card + Explain action
         │   ├── format.ts         formatNumber/Compact/Currency/Percent/Date…
         │   │                     + formatKpiName (presentation only — kpi_key is
         │   │                     still what gets sent to the API)
@@ -1358,19 +1573,20 @@ kpi-intelligence-platform/
         │   ├── SignIn.tsx, Onboarding.tsx           pre-shell gates
         │   ├── AppShell.tsx                          nav frame
         │   ├── Dashboard.tsx, Monitoring.tsx,
-        │   │   Results.tsx, Investigation.tsx        the four business surfaces
+        │   │   Results.tsx, ResultDetail.tsx,
+        │   │   Investigation.tsx                     the business surfaces
         │   ├── KPIDetailDashboard.tsx                modal, opened from Dashboard
         │   ├── Insights.tsx, Activity.tsx            ⚠ present but unrouted
         │   └── kpi-setup/                            KpiSetup.tsx + 8 panels
-        └── *.test.tsx / *.test.ts                    47 tests
+        └── *.test.tsx / *.test.ts                    87 tests across 12 files
 ```
 
-> **A note on `README.md`.** It is a Sprint-1 document and is now partly out of date: it
-> lists contribution analysis and root-cause investigation under "Deliberately absent", yet
-> `services/contribution.py`, `api/v1/investigation.py`, `docs/INVESTIGATION.md` and
-> `pages/Investigation.tsx` all exist and `GET /api/v1/meta` self-reports `sprint: 2`. Its
-> test counts (92 backend / 12 frontend) are also stale, as are DETECTION.md's and
-> COPILOT.md's (147 / 24). The verified figures today are **167 backend** and **47 frontend**.
+> **On the documentation set.** `README.md` is the short version, rewritten for a reader
+> who has two minutes; this document is the long one; and `docs/` holds one deep document
+> per engine — [DETECTION.md](docs/DETECTION.md),
+> [INVESTIGATION.md](docs/INVESTIGATION.md),
+> [RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md) and [COPILOT.md](docs/COPILOT.md). Where any
+> of them disagrees with the code, the code wins and the difference is called out in place.
 
 ---
 
@@ -1380,10 +1596,10 @@ Every decision below is stated as it appears in the code, with the reason the co
 
 ### Why React + TypeScript + Vite (and no component library)
 
-- **React 18 with `react-router-dom` 6** for a single-page app with five destinations and a
+- **React 18 with `react-router-dom` 6** for a single-page app with six destinations and a
   nested governed area (`/kpi-setup/*`), where a modal (KPI detail) and a drawer (Copilot)
   must overlay any page without leaving it.
-- **TypeScript with a hand-written contract file.** `api/types.ts` holds **76 exported
+- **TypeScript with a hand-written contract file.** `api/types.ts` holds **103 exported
   types** that mirror the backend's Pydantic schemas. Nothing is generated, which means a
   backend field rename surfaces as a compile error in `npm run typecheck` rather than as
   `undefined` in production.
@@ -1403,13 +1619,13 @@ Every decision below is stated as it appears in the code, with the reason the co
 - **FastAPI + Pydantic 2** gives request validation, response shaping and OpenAI-style
   automatic docs from the same type declarations, so `RegisterRequest.password` is *the*
   password policy rather than one of several copies.
-- **Routes are thin; services hold the logic.** 12 route modules, **34 services**. A route's
+- **Routes are thin; services hold the logic.** 14 route modules, **37 services**. A route's
   job is: resolve access, call a service, return a schema. This is why detection can be
-  exercised by 167 tests without HTTP, and why `verify_no_llm.py` can prove the platform
+  exercised by 260 tests without HTTP, and why `verify_no_llm.py` can prove the platform
   works with the model disabled.
 - **`core/deps.py` centralises authorization.** One `AccessContext`, one
   `require_permissions`, one `load_scoped`. Access rules that live in one file can be audited;
-  access rules sprinkled across 12 route modules cannot.
+  access rules sprinkled across 14 route modules cannot.
 - **`connectors/registry.py` is the only importer of concrete connectors.** *"Nothing outside
   this module imports a concrete connector."* Adding Snowflake means adding one module and
   one descriptor — no route, no service and no page changes.
@@ -1440,7 +1656,7 @@ Every decision below is stated as it appears in the code, with the reason the co
   tenant business data only ever behind connectors. The reason is stated as a warning:
   confusing them *"is the single most common way a multi-tenant BI platform leaks data across
   companies."*
-- **SQLAlchemy 2.0 declarative models, 32 tables, 5 Alembic migrations.** Shared mixins
+- **SQLAlchemy 2.0 declarative models, 40 tables, 7 Alembic migrations.** Shared mixins
   (`UUIDPrimaryKey`, `Timestamped`, `UtcDateTime`) mean every row has a UUID primary key and
   timezone-aware timestamps; ~30 `StrEnum` vocabularies keep status values from drifting into
   free strings.
@@ -1451,7 +1667,9 @@ Every decision below is stated as it appears in the code, with the reason the co
 - **Analytical results are persisted, not cached.** `agent_runs` / `detection_runs` /
   `agent_run_explanations` / `contribution_runs` are the record; every read surface projects
   them. This is what lets the KPI detail modal say *"no recalculation"* and lets Investigation
-  return 409 instead of quietly measuring something new.
+  return 409 instead of quietly measuring something new. The recommendation layer takes the
+  same rule one step further and persists **nothing** on the read path — it is a view of
+  those stored rows, so advice cannot drift from the evidence beside it.
 - **Two keys, two lifecycles.** `secret_key` signs tokens and nothing else, so rotating it
   merely signs everyone out. `credential_encryption_key` seals stored DSNs and **cannot** be
   casually rotated, because every stored secret is only readable with the key that sealed it;
@@ -1460,6 +1678,31 @@ Every decision below is stated as it appears in the code, with the reason the co
   **raises at import** if the dev secret is still in place outside
   `{development, test, testing, local}`, and force-sets `debug = False`. The app will not
   start misconfigured rather than start insecurely.
+
+### Why recommendations are derived on read rather than generated and stored
+
+- **There is no `recommendations` table and no `POST` that generates one.** A recommendation
+  is a *view* of a detection run and its newest stored breakdown. A persisted one would be
+  free to disagree with its own evidence the moment somebody drilled a level deeper, and
+  advice that no longer matches the numbers printed next to it is worse than no advice.
+- **One stance per result instead of a set of flags**, because a surface that could combine
+  flags could combine them into a contradiction — an action *and* an abstention on one card.
+- **Confidence is reused, not re-invented.** The action layer calls the same
+  `explanation.confidence_for` the explanation panel uses. A second scale on one result would
+  be the platform disagreeing with itself in two panels of one page.
+- **The vocabulary lives in configuration, not in prose.** 17 levers, 3 KPI families plus a
+  generic one, 7 kinds of business area plus a generic one — each a dataclass with a label, an
+  owner, a review instruction and monitoring metrics. Adding a lever or a kind of area
+  changes no engine code, which is what keeps the wording consistent across every KPI.
+- **Declared beats configured.** A `KpiDriver` the company registered as *controllable* wins
+  over any platform default, and the card says which of the two produced it — so a reader can
+  tell a company's own lever from a sensible guess at a glance.
+- **The feedback table cannot move a verdict.** No detection or contribution read touches
+  `recommendation_feedback`; it `CASCADE`s on the run and is audited on write. Learning from
+  reviewers is a signal for humans, deliberately not a threshold that drifts on its own.
+- **The refusals are tested, not just intended.** Every string in the served payload is
+  scanned for causal verbs and guarantee vocabulary — in `test_recommendations.py` and again
+  on the wire in `scripts/verify_recommendations_live.py`.
 
 ### How API communication works
 
@@ -1475,7 +1718,7 @@ Every decision below is stated as it appears in the code, with the reason the co
 - **Guard rails on every outbound query:** 30-second connector timeout, 5000-row ceiling, a
   cap on KPIs per detection batch, and `contribution_max_reference_dates = 12`.
 
-### How AI/ML processing works — and where it is deliberately absent
+### Where the intelligence actually comes from — and how little of it is a model
 
 - **The detection engine contains no machine learning at all.** It is robust statistics:
   median, MAD, modified z-score at 3.5, materiality as a ratio of expected with a 1.0%
@@ -1486,6 +1729,14 @@ Every decision below is stated as it appears in the code, with the reason the co
 - **Year-over-year comparison is re-based only when the relationship is stable** (≥3 points
   per era, scaling factor within `[0.5, 2.0]`), so a company that tripled in size is not
   compared naively against last year.
+- **Contribution is arithmetic, not estimation.** `part = order_value × item_value /
+  total_item_value`, applied only to a plain `SUM`; anything else is refused rather than
+  approximated. `test_investigation_grain.py` recomputes it independently in plain Python
+  and compares at `rel=1e-9`.
+- **Recommendations are a mapping, not a generation.** A stance, a lever, an area, an
+  owner, a band and a monitoring plan, each read from a stored row or a declared
+  configuration entry. No model is involved even when one is enabled, which is why the
+  advice is reproducible and why a test can scan the payload for causal verbs.
 - **The LLM is optional, off by default, and provider-independent.** `llm_enabled = False`;
   `llm_provider = "openai_compatible"` works against vLLM, Ollama or any compatible host.
   Its role is *explanation and question-answering over governed evidence*, never measurement.
@@ -1494,17 +1745,33 @@ Every decision below is stated as it appears in the code, with the reason the co
   any response, `is_placeholder` evidence badged as such, and `FORBIDDEN_PARAMETERS` enforced
   **at import time** so an unsafe tool signature crashes the boot instead of shipping.
 - **Retrieval is keyword-and-scope based, not vector-based** — a deliberate choice: `top_k = 8`
-  over ≤2 MB of scanned document text, with event relevance capped at 45 days.
-- **`PLANNED_TOOLS` names services that do not exist yet**, so the roadmap is visible in code
-  without pretending the capability is present.
+  over ≤2 MB of scanned document text, with event relevance capped at 45 days. It keeps
+  retrieval explainable and removes an index that could silently go stale.
+- **`PLANNED_TOOLS` names capabilities the Copilot does not have yet**, so the roadmap is
+  visible in code and the model can decline precisely instead of inventing an answer. A
+  name leaves that list on the same commit its real service lands.
 
 ---
 
 ## How to Demonstrate This Application
 
-A 10–12 minute demo that works for a hackathon panel, a recruiter interview, a client
+A 12–14 minute demo that works for a hackathon panel, a recruiter interview, a client
 pitch or an internal technical review. Timings assume a seeded company with at least one
-approved KPI and a few stored runs.
+approved KPI and a few stored runs. If you have five minutes, run Steps 0, 3, 5, 6, 8 —
+**Step 6 is the one that lands**.
+
+**Short on time?** [README.md](README.md) carries a 90-second path, and one command
+provisions the exact tenant it describes:
+
+```bash
+cd backend && .venv/Scripts/python scripts/verify_recommendations_live.py \
+    --email demo@your-run.example.com
+```
+
+It walks seven scenarios over real HTTP, prints what each panel renders, and asserts that
+no causal claim and no guaranteed outcome appears anywhere in the served JSON. Run it
+before you go on stage — it both seeds the demo and proves the claims you are about to
+make.
 
 ### Before you start (5 minutes of setup, never on stage)
 
@@ -1529,6 +1796,11 @@ month — including **one `ABNORMAL`**. That abnormal run is the spine of the de
 Keep a second browser profile signed in as a `VIEWER` if you want to show the permission
 split live.
 
+For Step 6, two extras pay for themselves: at least one **registered KPI driver** on the KPI
+you demo (so the recommendation cites a lever the *company* declared controllable rather than
+a family default), and one **`LOW_CONFIDENCE`** result kept in the list (so you can show the
+branch that deliberately gives no advice). The one-command provisioner above sets up both.
+
 ### Step 0 — Open with the problem (45 seconds, no screen)
 
 > "Every company has dashboards. Nobody's dashboard tells them whether a number is *fine*.
@@ -1541,7 +1813,9 @@ split live.
 > "We built a platform that learns what each KPI officially means, learns from the company's
 > own documents which history it should be compared against, and then answers that one
 > question every day — with a verdict a finance team can argue with, because the maths is
-> deterministic and the comparison is stated out loud."
+> deterministic and the comparison is stated out loud. And then it goes one step further
+> than a dashboard ever does: it says which part of the business the movement sits in, what
+> to review, and whose job that is."
 
 ### Step 2 — Sign in (30 seconds)
 
@@ -1642,7 +1916,58 @@ Then deliver the two lines that separate this from a dashboard with a filter on 
 > all**. You cannot investigate a movement the platform never measured. That gate is why the
 > numbers on these two screens can never disagree."
 
-### Step 6 — The AI layer, framed correctly (1.5 minutes)
+### Step 6 — The part judges remember: turn the evidence into an owned action (2 minutes) ⭐⭐⭐
+
+Go back to **Results**, open the abnormal run, and scroll to **Recommended next actions**.
+
+> "Here's the gap every BI tool leaves. We now know revenue moved, and we know South
+> accounts for 61% of it. The meeting still ends with nobody owning anything.
+>
+> So: the target area. The business lever to review — and this one came from a driver *this
+> company registered as controllable*, not from our guess; the card tells you which. The
+> action, written for a regional review. Potential impact — **High**, and underneath it,
+> *why* it's high: this KPI is registered as high business criticality and this area holds
+> most of the movement. A named owner. The confidence. And what to monitor for the next
+> three comparable periods."
+
+Then land the two lines that matter most:
+
+> "First — look at what is *not* here. There's no rupee figure attached to 'expected
+> impact', because we measure no counterfactual, and an invented number is the fastest way
+> for a recommendation to become indefensible in the room where it matters. It's a band with
+> its basis stated.
+>
+> Second — this sentence is on every single card: **contribution alone does not establish
+> causation**. Not in a tooltip. On the card. And there's a test that scans the whole served
+> payload for causal verbs and for words like 'guarantee' — if a sentence like *'South
+> caused the drop'* ever appeared, the build fails."
+
+Now do the thing that proves it is derived and not written:
+
+> "Watch this. I'll drill from region into channel." *(Run the deeper breakdown, come back.)*
+> "Same result, same page — and the recommendation **re-aimed itself**. New target area, new
+> owner, and the comparison basis changed from *peer regions* to *other channels serving the
+> same customers*. Nothing was regenerated. There is no recommendations table and no model
+> call — it's derived on read from the newest stored breakdown. Which is exactly why it can
+> never disagree with the numbers printed above it."
+
+Two 20-second finishers, if the room is engaged:
+
+- **The abstention.** Open the `LOW_CONFIDENCE` result. > "No lever. No owner. No action.
+  Four evidence-collection steps instead. When the evidence can't support a targeted
+  intervention, a confident-sounding recommendation is where this kind of product does the
+  most damage — so that branch deliberately has no advice in it."
+- **The feedback.** Click *Useful* and *In review*. > "One row per reader per
+  recommendation, audited, and structurally unable to move a verdict — no detection path
+  reads this table. It's a signal for the humans, not a threshold that drifts on its own."
+
+Toggle **Executive / Analyst** on your way out:
+
+> "Same conclusion, two depths. The analyst view *adds* the evidence behind those lines
+> rather than replacing them, so two people reading one result can't walk out with two
+> different answers."
+
+### Step 7 — The AI layer, framed correctly (1.5 minutes)
 
 Open **Copilot** from the header.
 
@@ -1665,33 +1990,38 @@ If the model is not configured, use that:
 > "Right now it says no model is configured. That's a normal state in this product, not an
 > error — which is exactly the point."
 
-### Step 7 — Close on value and honesty (1 minute)
+### Step 8 — Close on the full chain (1 minute)
 
-> "So: a verdict instead of a number. The comparison stated out loud, extracted from the
-> company's own documents and approved by a person. Nine checks before a KPI can be approved.
-> A breakdown that's real arithmetic on real rows, gated so it can never contradict the
-> verdict. And a role model where every request re-derives what you're allowed to see from the
-> database — editing a company id in the URL buys you nothing.
+> "So, end to end: a verdict instead of a number. The comparison stated out loud, extracted
+> from the company's own documents and approved by a person. Nine checks before a KPI can be
+> approved. A breakdown that's real arithmetic on real rows, gated so it can never contradict
+> the verdict. An action with an owner, derived from that same evidence on every read. And a
+> role model where every request re-derives what you're allowed to see from the database —
+> editing a company id in the URL buys you nothing.
 >
-> And a short list of what it deliberately does **not** do: no forecasting, no causal claims,
-> no automated alerts, no continuous scanning of every entity, no black box. Every one of those
-> would have been easy to add and impossible to defend."
+> Four lines we hold on purpose, and they're the reason a finance team would actually use
+> this: we measure, we don't predict. We size a contribution, we don't claim a cause. We
+> suggest for review, we don't decide. And when the evidence is thin we say so instead of
+> guessing well. Each of those was easy to cross and impossible to defend once crossed."
 
 Optional strong finish for a technical panel:
 
-> "167 backend tests, all green. The frontend has 47, with 10 currently failing in one
-> investigation test file — that's a known, isolated gap and I can show you exactly where."
+> "**260 backend tests green. 87 frontend tests across 12 files. Clean type-check, clean
+> production build.** And three of those tests are the ones I care about: one scans every
+> served recommendation for causal verbs, one scans for guaranteed outcomes, and one asserts
+> the low-confidence branch returns no advice at all. They're written to fail if we ever get
+> this wrong — I can run them for you right now."
 
-*(Saying that out loud is worth more than hiding it — reviewers check.)*
+*(That last offer is worth making — reviewers check.)*
 
 ### Audience-specific variants
 
 | Audience | Time | Emphasise | Skip |
 | --- | --- | --- | --- |
-| **Hackathon panel** | 5 min | Steps 0, 3, 5, 7 — problem, verdict, contribution, close | KPI Setup depth, Copilot |
-| **Recruiter / interview** | 10 min | Steps 4, 5, and Key Technical Decisions (§9) — the permission chain, the two keys, the two data domains | The pitch framing in Step 0 |
-| **Client / business** | 8 min | Steps 0, 3, 4.2 (Comparison Policy), 5, 7 — plain language throughout | The formula parser, statistics, tests |
-| **Technical review** | 15 min | §2 architecture, §6 flows, §7 wiring, the 409 gate, the business-view/evidence split, `verify_no_llm.py` | The demo narration |
+| **Hackathon panel** | 6 min | Steps 0, 3, 5, 6, 8 — problem, verdict, contribution, **the owned action**, close. Step 6 is the one they remember | KPI Setup depth, Copilot |
+| **Recruiter / interview** | 10 min | Steps 4, 5, 6, and Key Technical Decisions (§9) — the permission chain, the two keys, the two data domains, derived-on-read | The pitch framing in Step 0 |
+| **Client / business** | 8 min | Steps 0, 3, 4.2 (Comparison Policy), 5, 6, 8 — plain language throughout, and linger on the owner and the monitoring window | The formula parser, statistics, tests |
+| **Technical review** | 15 min | §2 architecture, §6 flows, §7 wiring, the 409 gate, the business-view/evidence split, `verify_no_llm.py`, `verify_recommendations_live.py` | The demo narration |
 
 ### Questions you will be asked, with the honest answers
 
@@ -1701,8 +2031,9 @@ Optional strong finish for a technical panel:
 | *"Why no machine learning?"* | Because the output has to be defensible to a finance team. Deterministic maths gives the same verdict every time and can be traced to the exact reference dates. A model that can't explain itself doesn't get believed, and an unbelieved alert is worthless. |
 | *"Does the AI make up numbers?"* | It can't. It has no tool that computes anything — the server re-reads stored measurements — and it's disabled by default. |
 | *"How do you stop cross-tenant leakage?"* | Two physically separate data domains, and authorization re-derived from the database on every request. The company in the URL is an assertion, never a credential. |
-| *"Can it tell me *why* revenue dropped?"* | It tells you which parts of the business **account for** the movement, with real arithmetic. It does not claim causation, and it never will from this data. |
-| *"What's missing?"* | Five connectors are declared but not implemented; there's no forecasting, no alerting, no scheduling; and 10 frontend tests in one investigation file are currently failing. |
+| *"Can it tell me *why* revenue dropped?"* | It tells you which parts of the business **account for** the movement, with real arithmetic — and then which lever to review, whose job that is, and what to watch next. What it will not do is call that a cause: contribution is a share, and the card says so in those words. That distinction is what makes the rest of it usable in a board pack. |
+| *"So what do I actually do with it on Monday?"* | Open the result. It names the area, the lever, the action, a potential-impact band with its basis, an owner and a monitoring window. Mark it *useful* or *in review* and that's an audited row your team can act from — with no threshold quietly moving underneath you. |
+| *"What's next?"* | Forecasting, alerting and scheduling are the natural next layer — the run history and stored evidence they'd need is already there, which is why we could add the action layer in a round. Four connectors are live (Supabase, PostgreSQL, SQLite, and CSV/Excel upload); the remaining five are declared against the same interface, so each is a connector implementation rather than an architecture change. |
 
 ---
 
@@ -1711,9 +2042,10 @@ Optional strong finish for a technical panel:
 ### Application purpose
 
 A governed, multi-tenant KPI intelligence platform. It connects to a company's own business
-data, holds each KPI as an approved versioned contract, and answers one question per KPI per
-date — **did this number behave normally?** — then breaks an abnormal movement down across the
-dimensions that KPI's registration approved.
+data, holds each KPI as an approved versioned contract, and answers the chain a dashboard
+leaves unfinished: **did this number behave normally** — *why was it flagged* — **which part of
+the business does the movement sit in** — and *what should be reviewed about it, by whom*. Every
+step is deterministic arithmetic over stored evidence, and every step states its own basis.
 
 ### Core features
 
@@ -1725,13 +2057,16 @@ dimensions that KPI's registration approved.
 | 4 | Nine validation checks | Formula, columns, time field, dimensions, aggregation, duplicates, grain, access, reconciliation |
 | 5 | Contribution analysis | Deterministic apportionment, ranked shares, sufficiency check, 409 run gate |
 | 6 | Investigation | Guided descent through the KPI's own approved hierarchy |
-| 7 | Data Source Registry | 8 connector descriptors, 3 implemented; Fernet-sealed credentials |
-| 8 | Discovery → scope → profiling | Discovery grants no analytical access on its own |
-| 9 | Document library | Reference + event documents, versioned, role-scoped |
-| 10 | RBAC | 25 permissions, 6 roles, row scope, denied columns, re-derived per request |
-| 11 | Elevated admin gate | Re-authentication for KPI Setup; token in memory only |
-| 12 | Governed Copilot | Optional, off by default, 18 read-only tools, cannot compute |
-| 13 | Catalog + audit | Immutable published versions and a full change trail |
+| 7 | Evidence-to-action recommendations | Target area, business lever, action, impact band, named owner, monitoring window — derived on read from the newest stored evidence, five stances including a no-advice branch |
+| 8 | Recommendation feedback | One audited row per reader per recommendation; structurally cannot move a verdict |
+| 9 | Data Source Registry | 9 connector descriptors, 4 implemented; Fernet-sealed credentials |
+| 10 | Discovery → scope → profiling | Discovery grants no analytical access on its own |
+| 11 | Document library | Reference + event documents, versioned, role-scoped |
+| 12 | Spreadsheet onboarding | CSV / TSV / XLSX upload becomes a first-class governed source, profiled and queried like a database |
+| 13 | RBAC | 25 permissions, 6 roles, row scope, denied columns, re-derived per request |
+| 14 | Elevated admin gate | Re-authentication for KPI Setup; token in memory only |
+| 15 | Governed Copilot | Optional, off by default, 18 read-only tools, cannot compute |
+| 16 | Catalog + audit | Immutable published versions and a full change trail |
 
 ### Main technology stack
 
@@ -1739,11 +2074,11 @@ dimensions that KPI's registration approved.
 | --- | --- |
 | Frontend | React 18.3.1 · react-router-dom 6.28 · TypeScript 5.6 · Vite 6.0.5 · Tailwind 3.4.17 · Vitest 2.1.9 |
 | Backend | Python 3.11+ · FastAPI 0.115.6 · Uvicorn 0.34 · Pydantic 2.10 · SQLAlchemy 2.0.36 · Alembic 1.14 |
-| Database | SQLite (dev) · PostgreSQL via psycopg 3.2 (prod) · 32 tables · 5 migrations |
+| Database | SQLite (dev) · PostgreSQL via psycopg 3.2 (prod) · 40 tables · 7 migrations |
 | Security | bcrypt 4.2 (12 rounds, SHA-256 pre-hash) · PyJWT 2.10 (HS256, 720 min) · cryptography 44 (Fernet) |
-| Connectors | Supabase REST · PostgreSQL · SQLite file *(implemented)*; Snowflake · BigQuery · HTTP API · CSV · File drop *(declared)* |
-| AI (optional) | Any OpenAI-compatible endpoint (vLLM / Ollama); default `Qwen/Qwen3-30B-A3B-Instruct-2507`; `LLM_ENABLED=false` |
-| Testing | pytest 8.3 + httpx 0.28 (**167 passing**) · Vitest + Testing Library (**47 total, 37 passing**) |
+| Connectors | Supabase REST · PostgreSQL · SQLite file · CSV/Excel upload *(implemented)*; Snowflake · BigQuery · HTTP API · CSV extract · File drop *(declared against the same interface)* |
+| AI (optional) | Any OpenAI-compatible endpoint (vLLM / Ollama / Gemini-compatible); default `Qwen/Qwen3-30B-A3B-Instruct-2507`; `LLM_ENABLED=false` |
+| Testing | pytest 8.3 + httpx 0.28 (**260 passing**) · Vitest + Testing Library (**87 passing across 12 files**) · clean `tsc -b --noEmit` · clean `npm run build` |
 
 ### Architecture summary
 
@@ -1751,10 +2086,11 @@ dimensions that KPI's registration approved.
 React SPA (:5173)
    → Vite proxy /api → FastAPI (:8000, prefix /api/v1)
       → core/deps.py  [JWT → User → Membership → Role → Permission → Company scope]
-         → 12 route modules → 34 services
-            ├→ Platform DB   (32 metadata tables, SQLAlchemy + Alembic)
+         → 14 route modules (119 endpoints) → 37 services
+            ├→ Platform DB   (40 metadata tables, SQLAlchemy + Alembic)
             └→ Connector registry → tenant business DB (Fernet-sealed DSN)
          → deterministic computation, persisted as agent_runs / detection_runs
+         → recommendations derived on read from that stored evidence (never stored)
       → response: business_view() always · evidence() only with kpi.read
    → optional: copilot orchestrator → 18 read-only tools → OpenAI-compatible model
 ```
@@ -1772,6 +2108,11 @@ Pick a date → Run Agent
   → verdict persisted
   → Dashboard / Monitoring / Results / KPI-detail calendar all project that stored record
   → Investigation apportions it — but only for dates already measured (else 409)
+  → Result detail derives the action from whatever evidence is stored right now:
+       verdict + confidence → stance
+       top contributor      → target area + owner + comparison basis
+       KPI driver / family  → business lever + action + monitoring window
+     drill deeper, and the same read re-aims the advice at the new evidence
 ```
 
 ### Key differentiators
@@ -1785,22 +2126,31 @@ Pick a date → Run Agent
 5. **Deterministic by design** — robust statistics, no training, no drift, reproducible.
 6. **A structured formula contract instead of free-text SQL**, which is what makes safe SQL
    generation and deterministic apportionment possible.
-7. **Contribution without causation** — "accounts for", never "caused by".
-8. **The 409 gate** — you cannot investigate a movement the platform never measured, so two
-   screens can never contradict each other.
-9. **Business view / evidence split enforced server-side**, not as a UI toggle.
-10. **Authorization re-derived per request** — the company in the URL buys nothing.
-11. **Two physically separate data domains** and **two encryption keys with two lifecycles**.
-12. **The AI is optional, fenced by 18 read-only tools, and cannot compute a business number**
-    — with unsafe tool signatures rejected at import time.
-13. **An explicit list of what it refuses to do**: no forecasting, no causal inference, no
-    embeddings, no action recommendations, no automated alerts, no feedback learning, no
-    autonomous investigation, no continuous per-entity monitoring.
+7. **Contribution without causation** — "accounts for", never "caused by", and the served
+   payload is scanned for causal verbs by a test that fails the build.
+8. **The chain finishes with an owner** — target area, lever, action, impact band, owner and
+   monitoring window, so a flagged movement leaves the screen as somebody's task.
+9. **Recommendations are derived on read, never stored**, so they cannot drift out of agreement
+   with the evidence printed above them — drill deeper and the advice re-aims itself.
+10. **Impact is a band with its basis stated**, never an invented rupee figure, because no
+    counterfactual is measured.
+11. **A branch that deliberately gives no advice** — low confidence returns evidence-collection
+    steps instead, which is where a confident-sounding guess would do the most damage.
+12. **The 409 gate** — you cannot investigate a movement the platform never measured, so two
+    screens can never contradict each other.
+13. **Business view / evidence split enforced server-side**, not as a UI toggle.
+14. **Authorization re-derived per request** — the company in the URL buys nothing.
+15. **Two physically separate data domains** and **two encryption keys with two lifecycles**.
+16. **The AI is optional, fenced by 18 read-only tools, and cannot compute a business number**
+    — with unsafe tool signatures rejected at import time, and a script that proves the whole
+    platform works with it switched off.
+17. **Feedback that informs people without moving thresholds** — no detection path reads the
+    feedback table, by design.
 
 ---
 
-*Written from the source. Where `README.md`, `docs/DETECTION.md` and `docs/COPILOT.md`
-disagree with the code — the Sprint-1 "deliberately absent" list, the 16-tool count, the
-92/12 and 147/24 test counts — the code and the verified test run were treated as
-authoritative.*
+*Written from the source. Every count in this document — 40 tables, 119 endpoints, 37 services,
+25 permissions, 18 Copilot tools, 103 exported types, 260 backend and 87 frontend tests — was
+verified against the code and a real test run rather than carried forward from an earlier
+draft. Where a doc and the code disagreed, the code won.*
 

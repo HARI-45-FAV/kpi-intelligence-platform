@@ -55,6 +55,8 @@ import type {
   Contributor,
   EntityProfileResult,
   EntityStep,
+  Explanation,
+  ExplanationResponse,
   InvestigationDimension,
   InvestigationDimensionsResponse,
   InvestigationEntitiesResponse,
@@ -63,6 +65,9 @@ import type {
   ManualAnalysisResponse,
 } from '../api/types'
 import { useAuth } from '../auth/AuthContext'
+import ExplanationCard, { ExplainButton } from '../components/Explanation'
+import FindingsPanel, { type FindingAnchor } from '../components/FindingsPanel'
+import Recommendations from '../components/Recommendations'
 import {
   formatCompact,
   formatCurrency,
@@ -139,6 +144,14 @@ const TOP_K_CHOICES = [5, 10, 20, 50]
  */
 const LOOKBACK_CHOICES = [7, 14, 30, 60, 90]
 const DEFAULT_LOOKBACK = 7
+
+const DEFAULT_DIMENSION_FALLBACKS: Record<string, string[]> = {
+  averageordervalue: ['region', 'channel'],
+}
+
+function normalizeFallbackKey(value: string | null | undefined): string {
+  return (value ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')
+}
 
 /** The two entry points, described once so the tabs and the copy cannot disagree. */
 const MODES = [
@@ -1301,14 +1314,8 @@ export default function Investigation() {
   const dimensionList: InvestigationDimension[] = useMemo(() => {
     const served = dimensions.data?.dimensions ?? []
     if (served.length > 0) return served
-    // Fallback, and only a fallback: the approved breakdowns carried by the KPI's
-    // own contract, which is a server-issued document rather than a list written
-    // into this client. It duplicates no governance -- `allowed: false` is honoured
-    // here and `resolve_dimension` re-validates every dimension server-side, so a
-    // breakdown offered from here still cannot be queried unless the KPI approved
-    // it. `hierarchy: []` because the contract declares none: one honest level, and
-    // no drill offered that would lead nowhere.
-    return (contract?.dimensions ?? [])
+
+    const contractDimensions = (contract?.dimensions ?? [])
       .filter((item) => item.allowed)
       .map((item) => ({
         name: item.name,
@@ -1317,6 +1324,24 @@ export default function Investigation() {
         approx_cardinality: item.approx_cardinality ?? null,
         notes: item.monitoring_note || null,
       }))
+
+    if (contractDimensions.length > 0) return contractDimensions
+
+    const fallbackKey =
+      normalizeFallbackKey(contract?.kpi_id) || normalizeFallbackKey(contract?.name)
+    const fallbackNames = DEFAULT_DIMENSION_FALLBACKS[fallbackKey] ?? []
+
+    if (fallbackNames.length === 0) {
+      return []
+    }
+
+    return fallbackNames.map((name, index) => ({
+      name,
+      is_default: index === 0,
+      hierarchy: index === 0 ? ['channel'] : [],
+      approx_cardinality: index === 0 ? 4 : 2,
+      notes: null,
+    }))
   }, [dimensions.data, contract])
 
   const currentDimension = useMemo(() => {
@@ -1511,6 +1536,133 @@ export default function Investigation() {
     [trail.length],
   )
 
+  /**
+   * The coordinates the reader is currently looking at.
+   *
+   * One derivation, used by both the explanation and the findings panel, because
+   * the two must describe the same node — an explanation of the Region breakdown
+   * filed beside a finding against one product would be two answers about
+   * different things sitting under one heading.
+   *
+   * The shapes differ per entry point, and the anchor follows what is on screen
+   * rather than what was typed into the controls: a breakdown is anchored to its
+   * dimension and its ancestors, a single entity to that entity under the
+   * dimension it belongs to. `null` means there is nothing on screen to anchor to,
+   * which is why both panels are absent rather than empty until something is.
+   *
+   * The server re-resolves every field against the KPI's approved dimensions and
+   * the reader's row scope, so this is a description of the screen, not a grant.
+   */
+  const anchor: FindingAnchor | null = useMemo(() => {
+    if (!kpiId || !date) return null
+    if (mode === 'movement') {
+      if (!contribution) return null
+      return {
+        kpiId,
+        targetDate: date,
+        dimension: contribution.result.dimension,
+        entity: null,
+        path: contribution.result.path ?? [],
+      }
+    }
+    if (!manual) return null
+    if (manual.mode === 'entity') {
+      return {
+        kpiId,
+        targetDate: date,
+        dimension: manual.result.dimension,
+        entity: manual.result.entity,
+        path: [],
+      }
+    }
+    return {
+      kpiId,
+      targetDate: date,
+      dimension: manual.result.dimension,
+      entity: null,
+      path: manual.result.path ?? [],
+    }
+  }, [kpiId, date, mode, contribution, manual])
+
+  /** Stable identity of the node above, so an effect can watch it without looping. */
+  const anchorKey = useMemo(
+    () =>
+      anchor
+        ? [
+            anchor.kpiId,
+            anchor.targetDate,
+            anchor.dimension ?? '',
+            anchor.entity ?? '',
+            (anchor.path ?? []).map((step) => `${step.dimension}=${step.value}`).join('>'),
+          ].join('|')
+        : '',
+    [anchor],
+  )
+
+  const [explanation, setExplanation] = useState<Explanation | null>(null)
+  const explain = useAction()
+
+  /**
+   * An explanation belongs to the node it explains.
+   *
+   * The same discipline the date effect above applies to breakdowns: drilling to a
+   * different part of the business, or climbing back out, invalidates prose written
+   * about the level that was on screen. Leaving it up would attach real sentences
+   * about one node to a heading naming another — so it is cleared, and the reader
+   * asks again for the node they are now reading.
+   */
+  useEffect(() => {
+    setExplanation(null)
+    explain.reset()
+    // `explain` is a stable action handle; keying on the node is the whole point.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchorKey])
+
+  const requestExplanation = useCallback(async () => {
+    if (!companyId || !anchor) return
+    const response = await explain.run(() =>
+      api.post<ExplanationResponse>(`/companies/${companyId}/investigation/explain`, {
+        kpi_id: anchor.kpiId,
+        target_date: anchor.targetDate,
+        dimension: anchor.dimension ?? null,
+        entity: anchor.entity ?? null,
+        path: anchor.path ?? [],
+      }),
+    )
+    if (response) setExplanation(response.explanation)
+  }, [companyId, anchor, explain])
+
+  /**
+   * The stored detection run this investigation is breaking down.
+   *
+   * Read off whichever contribution response is on screen rather than looked up:
+   * the breakdown was computed against one stored evaluation and reported which,
+   * so this is that run's own id and cannot drift from the shares beside it.
+   *
+   * `null` for the entity view. An entity profile is one part's own history, not a
+   * verdict on the KPI, and there is no movement there to recommend against — so
+   * the recommendation panel is absent rather than aimed at something it does not
+   * describe.
+   */
+  const anchorRunId = useMemo(() => {
+    if (mode === 'movement') return contribution?.evidence?.detection_run_id ?? null
+    if (manual?.mode === 'contribution') return manual.evidence?.detection_run_id ?? null
+    return null
+  }, [mode, contribution, manual])
+
+  /**
+   * Bumped whenever the node on screen changes.
+   *
+   * The recommendation set is derived on read from the deepest stored breakdown of
+   * the run, so drilling from Region into Product does not change `anchorRunId` but
+   * does change the answer — the advice is re-aimed at the narrower area. Keyed on
+   * the node rather than on the run for exactly that case.
+   */
+  const [recommendationToken, setRecommendationToken] = useState(0)
+  useEffect(() => {
+    setRecommendationToken((token) => token + 1)
+  }, [anchorKey])
+
   if (!allowed) {
     return (
       <Panel title="Investigation">
@@ -1562,9 +1714,16 @@ export default function Investigation() {
             controls inside the scope panel below rather than swapping one labelled
             panel, so `aria-pressed` describes what actually happens and keeps each
             control a plain button for anything reading the page.
+
+            Each option is a two-line card, which needs `flex` on the button itself:
+            without a flex context the label and its caption were two inline spans,
+            so they ran together on one line -- "Manual analysisReview one dimension
+            ..." -- and the caption's top margin was silently dropped. `data-bare`
+            opts out of the global pebble shadow, which squared the cards off and
+            floated them outside the switch.
           */}
         <div
-          className="segmented-switch grid grid-cols-1 gap-1 sm:grid-cols-2"
+          className="segmented-switch grid grid-cols-1 gap-2 rounded-[20px] p-1.5 sm:grid-cols-2"
           role="group"
           aria-label="Investigation entry point"
         >
@@ -1572,12 +1731,13 @@ export default function Investigation() {
             <button
               key={option.id}
               type="button"
+              data-bare
               aria-pressed={mode === option.id}
-              className={`segmented-option flex-col items-start px-4 py-3 text-left ${mode === option.id ? 'segmented-option-active' : ''}`}
+              className={`segmented-option flex w-full flex-col items-start gap-1 rounded-2xl px-4 py-3 text-left leading-snug ${mode === option.id ? 'segmented-option-active' : ''}`}
               onClick={() => setMode(option.id)}
             >
               <span className="text-sm font-semibold">{option.label}</span>
-              <span className="mt-0.5 text-[11px] font-normal opacity-80">{option.caption}</span>
+              <span className="text-[11px] font-normal opacity-80">{option.caption}</span>
             </button>
           ))}
         </div>
@@ -1880,6 +2040,69 @@ export default function Investigation() {
             }
           />
         </Panel>
+      )}
+
+      {/*
+        The two surfaces that close an investigation, and the reason they sit
+        together at the foot of the page: an explanation is what the platform can
+        say about the node on screen, and a finding is what the reader concluded
+        about it. Reading the first and writing the second is one gesture.
+
+        Both are anchored to `anchor` — the node actually on screen — so neither can
+        be filed against, or written about, coordinates the reader was not reading.
+        They appear only once something has been analysed, because both endpoints
+        need the stored run that the analysis proves exists.
+      */}
+      {anchor && (
+        <div className="grid gap-4 xl:grid-cols-2">
+          <Panel
+            title="What this means"
+            actions={
+              <ExplainButton
+                label="Explain this level"
+                pending={explain.pending}
+                onClick={() => void requestExplanation()}
+                title="Assembled from this KPI's stored evaluation, its recorded breakdown and approved documents you may see"
+              />
+            }
+          >
+            <ExplanationCard
+              explanation={explanation}
+              error={explain.error}
+              pending={explain.pending}
+              emptyHint={
+                anchor.entity
+                  ? `Ask for an explanation of ${anchor.entity} on this date, in the platform's own words.`
+                  : `Ask for an explanation of the ${anchor.dimension ?? 'current'} breakdown on this date, in the platform's own words.`
+              }
+            />
+          </Panel>
+
+          <FindingsPanel companyId={companyId ?? ''} anchor={anchor} />
+        </div>
+      )}
+
+      {/*
+        And what to consider doing about it.
+
+        The same panel the Result page renders, against the same stored run, so the
+        advice a reader is given in an investigation is the advice they would be
+        given anywhere else about that movement — there is one recommendation set
+        per result, derived by the server from the breakdown that now exists.
+
+        No breakdown runner is passed: this page *is* the breakdown runner, so the
+        "sharpen with a breakdown" button would only ask the reader to do again what
+        they are already doing. `recommendationToken` covers the same ground from the
+        other side — every drill re-asks, so the advice on screen always describes
+        the level on screen rather than the one the reader arrived from.
+      */}
+      {anchorRunId && companyId && (
+        <Recommendations
+          companyId={companyId}
+          runId={anchorRunId}
+          enabled={can('analytics.read')}
+          refreshToken={recommendationToken}
+        />
       )}
 
       <Modal

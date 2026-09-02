@@ -209,9 +209,14 @@ _PANEL_GUIDANCE: dict[str, str] = {
         "and what is associated with it."
     ),
     "future_action": (
-        "The user is thinking about what to do next. This version does not recommend "
-        "actions, so give them the measurement and the recorded context and say the "
-        "decision is theirs. Do not propose a plan as though the platform had "
+        "The user is thinking about what to do next. The platform does derive a "
+        "governed recommendation for a stored result -- target area, business lever, "
+        "action to review, a qualitative impact band, an owning role and a monitoring "
+        "window -- but it is derived on the result screen and you have no tool for it. "
+        "So point them at the recommended actions on that result rather than composing "
+        "advice of your own, give them the measurement and the recorded context, and "
+        "say the decision is theirs. Never claim a cause, a rupee impact or a "
+        "guaranteed outcome, and do not propose a plan as though the platform had "
         "evaluated one."
     ),
     "kpi_setup": (

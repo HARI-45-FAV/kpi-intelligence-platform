@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from datetime import date, datetime, time
+
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 
 from app.core.clock import as_utc, utcnow
 from app.core.deps import AccessContext, SessionDep, require_permissions
@@ -27,17 +29,150 @@ def list_audit(
     offset: int = Query(default=0, ge=0),
     action: str | None = None,
     resource_type: str | None = None,
+    actor_email: str | None = None,
+    outcome: str | None = None,
+    since: date | None = Query(default=None, description="Only entries on or after this date (UTC)"),
+    until: date | None = Query(default=None, description="Only entries on or before this date (UTC)"),
+    q: str | None = Query(default=None, max_length=200, description="Substring of the resource or summary"),
     access: AccessContext = Depends(require_permissions("audit.read")),
 ) -> list[AuditLogOut]:
-    query = select(AuditLog).where(AuditLog.company_id == access.company.id)
-    if action:
-        query = query.where(AuditLog.action == action)
-    if resource_type:
-        query = query.where(AuditLog.resource_type == resource_type)
+    """One company's governance trail, newest first.
+
+    The filters are additive and every one of them narrows a query that is already
+    company-scoped, so no combination can widen what the caller may read. ``q`` is a
+    substring of the *resource label or summary* only -- deliberately not of
+    ``details``, which is the one column that could hold a value a reader is not
+    otherwise entitled to see, and which no filter should let them probe for
+    blindly.
+
+    Still a bare list rather than an envelope: this is the shape callers already
+    read. What can be filtered by is a different question, answered by
+    ``/audit/options`` beside it.
+    """
+
+    query = _audit_filtered(
+        select(AuditLog).where(AuditLog.company_id == access.company.id),
+        action=action,
+        resource_type=resource_type,
+        actor_email=actor_email,
+        outcome=outcome,
+        since=since,
+        until=until,
+        q=q,
+    )
     rows = session.scalars(
         query.order_by(AuditLog.occurred_at.desc()).limit(limit).offset(offset)
     )
     return [AuditLogOut.model_validate(row) for row in rows]
+
+
+def _audit_filtered(
+    query,
+    *,
+    action: str | None,
+    resource_type: str | None,
+    actor_email: str | None,
+    outcome: str | None,
+    since: date | None,
+    until: date | None,
+    q: str | None,
+):
+    """Apply the audit filters to a company-scoped query.
+
+    Shared by the listing and the total beside it so a filtered page and its own
+    count cannot be produced by two different sets of conditions -- which is how a
+    screen comes to say "showing 100 of 12" and be wrong twice.
+    """
+
+    if action:
+        query = query.where(AuditLog.action == action)
+    if resource_type:
+        query = query.where(AuditLog.resource_type == resource_type)
+    if actor_email:
+        query = query.where(AuditLog.actor_email == actor_email)
+    if outcome:
+        query = query.where(AuditLog.outcome == outcome)
+    if since is not None:
+        query = query.where(AuditLog.occurred_at >= as_utc(datetime.combine(since, time.min)))
+    if until is not None:
+        # Inclusive of the whole day: a reader asking for "until the 28th" means the
+        # 28th, and an exclusive bound would silently drop that day's entries.
+        query = query.where(AuditLog.occurred_at <= as_utc(datetime.combine(until, time.max)))
+    if q:
+        needle = f"%{q.strip()}%"
+        query = query.where(
+            or_(
+                AuditLog.resource_label.ilike(needle),
+                AuditLog.summary.ilike(needle),
+                AuditLog.resource_id.ilike(needle),
+            )
+        )
+    return query
+
+
+@router.get("/companies/{company_id}/audit/options")
+def audit_options(
+    session: SessionDep,
+    action: str | None = None,
+    resource_type: str | None = None,
+    actor_email: str | None = None,
+    outcome: str | None = None,
+    since: date | None = None,
+    until: date | None = None,
+    q: str | None = Query(default=None, max_length=200),
+    access: AccessContext = Depends(require_permissions("audit.read")),
+) -> dict:
+    """What this company's trail can be filtered by, and how many rows match now.
+
+    Server-issued rather than derived from the page the caller received: the listing
+    is capped, so an action or an actor that fell off the end of it would otherwise
+    have no control -- the reader would be unable to filter for the very row they
+    came to find. Each list is a DISTINCT read over this company's own entries, so
+    it offers exactly the values that would return something.
+
+    ``total`` is the count under the *same* filters, which is what makes honest
+    pagination possible: a screen can say how many entries match rather than how
+    many it happens to be holding.
+    """
+
+    company = AuditLog.company_id == access.company.id
+
+    def distinct(column) -> list[str]:
+        return [
+            value
+            for value in session.scalars(
+                select(column).where(company, column.is_not(None)).group_by(column).order_by(column)
+            ).all()
+            if value
+        ]
+
+    total = session.scalar(
+        _audit_filtered(
+            select(func.count(AuditLog.id)).where(company),
+            action=action,
+            resource_type=resource_type,
+            actor_email=actor_email,
+            outcome=outcome,
+            since=since,
+            until=until,
+            q=q,
+        )
+    )
+
+    return {
+        "options": {
+            "actions": distinct(AuditLog.action),
+            "resource_types": distinct(AuditLog.resource_type),
+            "actors": distinct(AuditLog.actor_email),
+            "outcomes": distinct(AuditLog.outcome),
+        },
+        # The whole trail, so a screen can distinguish "no entry matches these
+        # filters" from "this company has recorded nothing yet". They read
+        # identically on an empty table and mean entirely different things.
+        "total": total or 0,
+        "total_unfiltered": session.scalar(select(func.count(AuditLog.id)).where(company)) or 0,
+    }
+
 
 
 @router.get("/companies/{company_id}/telemetry", response_model=list[ExecutionLogOut])

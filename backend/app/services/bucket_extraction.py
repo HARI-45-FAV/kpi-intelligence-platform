@@ -49,7 +49,9 @@ import calendar
 import json
 import re
 from dataclasses import dataclass, field, replace
+from datetime import date
 
+from app.core.clock import utcnow
 from app.core.errors import ValidationFailure
 from app.core.telemetry import LlmUsage
 from app.llm.config import LLMConfig, get_llm_config
@@ -116,29 +118,50 @@ The object may contain only these keys:
   "same_week_of_month":   {"enabled": bool, "weeks": [1-5]},
   "same_month_or_season": {"enabled": bool, "months": [month names or 1-12]},
   "business_event":       {"enabled": bool, "events": [{"name": str, "dates": ["YYYY-MM-DD", ...]}]},
-  "yoy_period":           {"enabled": bool}
+  "yoy_period":           {"enabled": bool},
+  "kpi_overrides":        [{"kpi": str, ...any of the five keys above}]
 }
+
+The five slots at the top describe the company as a whole. "kpi_overrides" is
+for the exception: a measure the document singles out as behaving differently
+from the rest.
 
 Rules you must follow:
 
 1. Enable a slot only when the document actually states the pattern. An absent
    statement means "enabled": false. Do not enable a slot because it seems
    plausible for this kind of business.
-2. Never invent event dates. If the document names an event without giving its
-   dates, return the name with an empty "dates" list. Every date you return is
-   checked against the document text and discarded if it does not appear there,
-   so a guessed date is wasted output.
-3. Do not compute anything. You are not being asked for a KPI value, an
+2. Never invent event dates. Report only the days the document itself states.
+   Every date you return is checked against the document text and discarded if
+   neither the full date nor its day-and-month appears there, so a guessed date
+   is wasted output. If the document names an event without giving any dates at
+   all, return the name with an empty "dates" list.
+3. Documents usually state an annual window as a day and a month with no year
+   ("the festival runs 15-21 Oct"). Write out every day in that window as a
+   YYYY-MM-DD date and use any year you like: the platform keeps the day and
+   month, discards your year, and works out for itself which years the window
+   covers. List each day of the window separately -- the two endpoints alone
+   describe only two days, not the span between them.
+4. Do not compute anything. You are not being asked for a KPI value, an
    expected value, an average, a median, a percentage, a growth rate, a
    multiplier, a threshold or a normal/abnormal judgement, and any such key will
    be rejected. An uplift figure mentioned in the document ("that day runs
    materially higher") is evidence that the weekday matters -- report the
    weekday, not the figure.
-4. Do not set how much history to search or how many reference points to use.
+5. Do not set how much history to search or how many reference points to use.
    Those are platform settings and any value you supply is discarded.
-5. Quote nothing from the document into the JSON except event names.
-6. If the document describes no comparison pattern at all, return every slot
+6. Quote nothing from the document into the JSON except event names.
+7. If the document describes no comparison pattern at all, return every slot
    with "enabled": false.
+8. Use "kpi_overrides" only where the document names a measure and gives it a
+   pattern different from the general one ("orders peak in the third week,
+   unlike everything else"). Write the measure's name exactly as the document
+   writes it: the platform matches that name against the measures this company
+   has registered and discards any name it cannot match. An override states that
+   measure's whole policy, so repeat any general slot that still applies to it.
+   A measure the document merely mentions is not an override. Omit the key
+   entirely when the document states one policy for everything, which is the
+   usual case.
 """
 
 
@@ -150,6 +173,38 @@ markers, in document order. Extract the comparison policy as JSON.
 --- END DOCUMENT ---
 
 Return only the JSON object."""
+
+
+@dataclass
+class KpiOverrideDraft:
+    """A policy the document stated for one named measure specifically.
+
+    ``label`` is the measure's name *as the document wrote it*, deliberately not
+    a KPI key: this module reads prose and has no access to what the company has
+    registered. Matching the label to a registered ``kpi_key`` is the caller's
+    job, which keeps the extraction testable without a database and keeps a model
+    from ever naming a key the company does not have.
+    """
+
+    label: str
+    config: BucketConfig
+    payload: dict
+    notes: list[str] = field(default_factory=list)
+    review_reasons: list[str] = field(default_factory=list)
+
+    @property
+    def needs_review(self) -> bool:
+        return bool(self.review_reasons)
+
+    def as_dict(self) -> dict:
+        return {
+            "kpi_label": self.label,
+            "buckets": self.config.as_dict(),
+            "warnings": list(self.config.warnings),
+            "notes": self.notes,
+            "needs_review": self.needs_review,
+            "review_reasons": self.review_reasons,
+        }
 
 
 @dataclass
@@ -170,6 +225,10 @@ class BucketDraft:
     #: How the passages sent to the model were chosen, so an extraction can be
     #: explained and reproduced.
     retrieval: dict | None = None
+    #: Measures the document gave their own pattern. Each becomes its own
+    #: configuration row scoped to that KPI; the engine already prefers a
+    #: KPI-scoped row over the company-wide one, so nothing downstream changes.
+    overrides: list[KpiOverrideDraft] = field(default_factory=list)
 
     def as_dict(self) -> dict:
         return {
@@ -181,6 +240,7 @@ class BucketDraft:
             "needs_review": self.needs_review,
             "review_reasons": self.review_reasons,
             "retrieval": self.retrieval,
+            "kpi_overrides": [override.as_dict() for override in self.overrides],
         }
 
 
@@ -210,10 +270,15 @@ def _extract_json(text: str) -> dict:
     return parsed
 
 
+#: The per-measure section. Allowed through :func:`_quarantine` so it is not
+#: reported as a boundary violation, then split off before validation -- it is a
+#: list of policies, not a slot, and ``validate_bucket_config`` would reject it.
+_OVERRIDES_KEY = "kpi_overrides"
+
 #: Keys the model is allowed to fill in. Anything else is dropped *and reported*
 #: rather than silently ignored, because a model trying to return a computed
 #: number is exactly the boundary violation worth surfacing to a reviewer.
-_ALLOWED_KEYS = frozenset(SLOT_KEYS.values()) | set(_BUDGET_KEYS)
+_ALLOWED_KEYS = frozenset(SLOT_KEYS.values()) | set(_BUDGET_KEYS) | {_OVERRIDES_KEY}
 
 
 def _quarantine(payload: dict) -> tuple[dict, list[str], list[str]]:
@@ -308,47 +373,189 @@ def _is_grounded(iso: str, haystack: str) -> bool:
     return any(rendering in haystack for rendering in _date_renderings(iso))
 
 
-def _ground_events(kept: dict, document_text: str) -> list[str]:
-    """Drop event dates the document does not actually contain.
+# --- recurring windows stated without a year -------------------------------
+# A handbook states an annual event the way a person says it: "NovaFest
+# (15-21 Oct)". There is no year in that, and there should not be -- the window
+# recurs. Requiring a full year-month-day rendering therefore discards the most
+# common way a document states an event, which is what made the business_event
+# slot unfillable from a real handbook.
+#
+# So a date is grounded two ways. Either the document contains the whole date, or
+# it contains the *day and month* -- and then the platform, not the model, decides
+# which years that window covers. The model's year is thrown away either way, so
+# no year that a model invented can reach a comparison.
 
-    Returns one note per discarded date. The event *name* is always kept: the
-    company clearly has an event by that name, the reviewer can supply the real
-    dates, and deleting the name would hide that the document mentioned it.
+#: Years a recurring window is expanded across. Back far enough to cover
+#: ``LOOKBACK_MAX_DAYS`` (five years), forward one so an occurrence that has not
+#: happened yet is still comparable when it does. Dates outside a company's
+#: configured lookback simply never match a candidate, so a generous span costs
+#: nothing but makes the slot work without re-extraction each year.
+EVENT_YEARS_BACK = 5
+EVENT_YEARS_FORWARD = 1
 
-    Only the shapes :func:`_parse_events` accepts are inspected. Anything else is
-    left untouched so validation reports the shape problem in its own words
-    rather than this function guessing at it.
+#: February is bounded at 29 so a window stated as "29 Feb" is not rejected
+#: outright; the expansion then emits it only in years that actually have one.
+_LEAP_YEAR = 2024
+
+
+def _month_tokens() -> dict[str, int]:
+    """Every spelling of a month name, mapped to its number. No literals."""
+
+    tokens: dict[str, int] = {}
+    for month in range(1, 13):
+        for word in (calendar.month_name[month], calendar.month_abbr[month]):
+            token = word.strip().lower()
+            if token:
+                tokens[token] = month
+    return tokens
+
+
+_MONTH_TOKENS = _month_tokens()
+# Longest first, so "march" is not matched as "mar" with a stray "ch" left over.
+_MONTH_ALTERNATION = "|".join(
+    re.escape(token) for token in sorted(_MONTH_TOKENS, key=len, reverse=True)
+)
+
+#: "15 oct" and "15 21 oct" -- the second number is the end of a range. The
+#: trailing ``\b`` on each number is what stops "october 2025" being read as day
+#: 20 of October.
+_DAY_THEN_MONTH = re.compile(
+    rf"\b(\d{{1,2}})\b(?:\s+(\d{{1,2}})\b)?\s+({_MONTH_ALTERNATION})\b"
+)
+#: "oct 15" and "oct 15 21".
+_MONTH_THEN_DAY = re.compile(
+    rf"\b({_MONTH_ALTERNATION})\s+(\d{{1,2}})\b(?:\s+(\d{{1,2}})\b)?"
+)
+
+
+def _plausible(month: int, day: int) -> bool:
+    return 1 <= month <= 12 and 1 <= day <= calendar.monthrange(_LEAP_YEAR, month)[1]
+
+
+def _document_month_days(haystack: str) -> set[tuple[int, int]]:
+    """The (month, day) positions the document actually names, ranges expanded.
+
+    A range matters as much as a single date: "15-21 Oct" states seven days, and
+    only its two endpoints appear as numbers. Reading it as two dates would ground
+    the edges of an event window and discard its middle.
+    """
+
+    found: set[tuple[int, int]] = set()
+
+    def add(month: int, first: str | None, second: str | None) -> None:
+        if first is None:
+            return
+        start = int(first)
+        end = int(second) if second is not None else start
+        # A descending pair is not a range -- it is two dates that happen to be
+        # adjacent in the prose. Take them literally rather than inverting them.
+        days = range(start, end + 1) if start <= end else (start, end)
+        for day in days:
+            if _plausible(month, day):
+                found.add((month, day))
+
+    for first, second, name in _DAY_THEN_MONTH.findall(haystack):
+        add(_MONTH_TOKENS[name], first, second or None)
+    for name, first, second in _MONTH_THEN_DAY.findall(haystack):
+        add(_MONTH_TOKENS[name], first, second or None)
+    return found
+
+
+def _month_day_of(iso: str) -> tuple[int, int] | None:
+    """The (month, day) a model-supplied date points at, ignoring its year."""
+
+    try:
+        _, month, day = (int(part) for part in iso.split("-")[:3])
+    except (ValueError, IndexError):
+        return None
+    return (month, day) if _plausible(month, day) else None
+
+
+def _expand_recurring(month: int, day: int) -> list[str]:
+    """The same calendar position in every year the platform may compare across."""
+
+    this_year = utcnow().date().year
+    years = range(this_year - EVENT_YEARS_BACK, this_year + EVENT_YEARS_FORWARD + 1)
+    return [
+        date(year, month, day).isoformat()
+        for year in years
+        if day <= calendar.monthrange(year, month)[1]
+    ]
+
+
+def _ground_events(kept: dict, document_text: str) -> tuple[list[str], bool]:
+    """Reconcile the model's event dates with what the document actually says.
+
+    Three outcomes per date, and the difference between them is the whole point:
+
+    * the document contains the full date -- kept as it stands;
+    * the document contains its day and month but no year -- a recurring window,
+      so the platform expands it across the years it may compare and the model's
+      year is discarded;
+    * the document contains neither -- dropped, because a plausible wrong date
+      silently corrupts every comparison built on it.
+
+    Returns the notes to show a reviewer, and whether anything was dropped. Only a
+    drop is a reason to review: an expansion used the document's own day and month
+    and a year this platform derived from the calendar.
+
+    The event *name* is always kept. The company clearly has an event by that name,
+    the reviewer can supply real dates, and deleting the name would hide that the
+    document mentioned it.
     """
 
     slot_key = SLOT_KEYS[BucketType.BUSINESS_EVENT]
     slot = kept.get(slot_key)
     if not isinstance(slot, dict):
-        return []
+        return [], False
     events = slot.get("events")
     haystack = _searchable(document_text)
+    month_days = _document_month_days(haystack)
     notes: list[str] = []
+    dropped_any = False
 
     def clean(name: str, raw_dates: object) -> list[str]:
-        """Keep only grounded dates, reporting the rest."""
-
+        nonlocal dropped_any
         if not isinstance(raw_dates, (list, tuple)):
             return []
-        kept_dates: list[str] = []
+        kept_dates: set[str] = set()
         dropped: list[str] = []
+        recurring: list[str] = []
         for item in raw_dates:
-            text = item if isinstance(item, str) else str(item)
-            if _is_grounded(text.strip()[:10], haystack):
-                kept_dates.append(text)
+            text = (item if isinstance(item, str) else str(item)).strip()[:10]
+            if _is_grounded(text, haystack):
+                kept_dates.add(text)
+                continue
+            position = _month_day_of(text)
+            if position is not None and position in month_days:
+                kept_dates.update(_expand_recurring(*position))
+                recurring.append(text)
             else:
                 dropped.append(text)
+
+        if recurring:
+            positions = sorted(
+                {pos for pos in (_month_day_of(item) for item in recurring) if pos}
+            )
+            stated = ", ".join(
+                f"{day} {calendar.month_name[month]}" for month, day in positions
+            )
+            notes.append(
+                f"business_event '{name}': the document states {stated} without a "
+                "year, so it was read as a window that recurs. The platform expanded "
+                f"it across {EVENT_YEARS_BACK} years back and {EVENT_YEARS_FORWARD} "
+                "forward; the year the model supplied was discarded. Narrow the dates "
+                "by hand if the event ran only once."
+            )
         if dropped:
+            dropped_any = True
             notes.append(
                 f"business_event '{name}': {len(dropped)} date(s) the model supplied "
-                f"({', '.join(sorted(dropped))}) do not appear in the document, so they "
-                "were discarded rather than used. Enter the real dates to make this "
-                "event usable."
+                f"({', '.join(sorted(dropped))}) do not appear in the document -- not as "
+                "a full date and not as a day and month -- so they were discarded rather "
+                "than used. Enter the real dates to make this event usable."
             )
-        return kept_dates
+        return sorted(kept_dates)
 
     if isinstance(events, dict):
         slot["events"] = {
@@ -364,7 +571,120 @@ def _ground_events(kept: dict, document_text: str) -> list[str]:
             rebuilt.append(entry)
         slot["events"] = rebuilt
 
-    return notes
+    return notes, dropped_any
+
+
+# ---------------------------------------------------------------------------
+# Per-measure overrides
+# ---------------------------------------------------------------------------
+#: How a model might label the measure an override applies to. The first of
+#: these that carries text is the name; the remaining keys of the entry are read
+#: as slots.
+_LABEL_KEYS = ("kpi", "kpi_name", "name", "measure", "label")
+
+
+def _override_label(entry: dict) -> tuple[str, str]:
+    """The measure's name and the key that carried it, or two empty strings."""
+
+    for key in _LABEL_KEYS:
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()[:200], key
+    return "", ""
+
+
+def _override_drafts(
+    raw: object, document_text: str
+) -> tuple[list[KpiOverrideDraft], list[str]]:
+    """Turn the model's per-measure section into validated drafts, one per name.
+
+    Each override goes through exactly the same treatment as the company-wide
+    policy -- unknown keys quarantined, event dates grounded in the same
+    document, search budget forced to the platform's, payload validated against
+    the same five-slot contract. An override reaches the engine by the same door,
+    so a looser path here would be the way around the boundary rather than a
+    convenience.
+
+    An override is dropped, with a note, when it names no measure or states no
+    pattern. Neither is a reviewable draft: the first cannot be matched against
+    anything the company registered, and the second is the model having noticed a
+    measure rather than having read a policy for it.
+    """
+
+    if not isinstance(raw, (list, tuple)):
+        return [], []
+
+    drafts: list[KpiOverrideDraft] = []
+    notes: list[str] = []
+    seen: set[str] = set()
+
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        label, label_key = _override_label(entry)
+        if not label:
+            notes.append(
+                "A per-measure override named no measure, so it was discarded -- there "
+                "is nothing to scope it to."
+            )
+            continue
+        folded = label.casefold()
+        if folded in seen:
+            notes.append(
+                f"More than one override was returned for '{label}'; only the first was "
+                "kept."
+            )
+            continue
+
+        body = {key: value for key, value in entry.items() if key != label_key}
+        kept, rejected, own_notes = _quarantine(body)
+        kept.pop(_OVERRIDES_KEY, None)  # no nesting: an override cannot carry overrides
+        reasons: list[str] = []
+        if rejected:
+            reasons.append(
+                f"The override for '{label}' returned key(s) outside the configuration "
+                f"contract ({', '.join(sorted(rejected))})."
+            )
+
+        date_notes, dropped = _ground_events(kept, document_text)
+        own_notes.extend(date_notes)
+        if dropped:
+            reasons.append(
+                f"Event dates in the override for '{label}' were discarded because the "
+                "document does not contain them."
+            )
+        own_notes.extend(_force_budget(kept))
+
+        if not _any_slot_enabled(kept):
+            notes.append(
+                f"The document mentions '{label}' but states no comparison pattern of "
+                "its own for it, so no override was drafted. It keeps the company-wide "
+                "policy."
+            )
+            continue
+
+        try:
+            validated = validate_bucket_config(kept)
+        except ValidationFailure as exc:
+            notes.append(
+                f"The override for '{label}' is not a valid configuration "
+                f"({exc.message}), so it was discarded. The company-wide policy still "
+                "applies to it."
+            )
+            continue
+
+        seen.add(folded)
+        drafts.append(
+            KpiOverrideDraft(
+                label=label,
+                config=validated,
+                payload=validated.as_dict(),
+                notes=own_notes,
+                review_reasons=reasons,
+            )
+        )
+
+    return drafts, notes
 
 
 def _record(usage: LlmUsage | None, config: LLMConfig, response: LLMResponse) -> None:
@@ -388,6 +708,7 @@ def _unconfigured_draft(
     raw_keys: list[str] | None = None,
     rejected_keys: list[str] | None = None,
     retrieval: dict | None = None,
+    overrides: list[KpiOverrideDraft] | None = None,
 ) -> BucketDraft:
     """A draft that says "nothing usable was found", explicitly.
 
@@ -396,6 +717,11 @@ def _unconfigured_draft(
     policy, correctly, because such a policy cannot drive a comparison. The point
     here is to return the empty result *with its reason attached* instead of a
     validation error the reviewer cannot act on.
+
+    Overrides are carried through rather than dropped: a document that states a
+    pattern only for named measures and none for the company as a whole has said
+    something usable about those measures, and discarding it because the
+    company-wide slot came out empty would lose the only policy it contained.
     """
 
     empty = BucketConfig(warnings=tuple(reasons))
@@ -409,6 +735,7 @@ def _unconfigured_draft(
         needs_review=True,
         review_reasons=reasons,
         retrieval=retrieval,
+        overrides=overrides or [],
     )
 
 
@@ -500,11 +827,27 @@ async def extract_bucket_config(
             "similarly loose, so read it before approving."
         )
 
-    # Ground event dates in the document *before* validation, so an invented date
-    # never reaches a BucketConfig at all.
-    date_notes = _ground_events(kept, text)
+    # Split the per-measure section off before validation: it is a list of
+    # policies, not a slot, and it is graded on its own. Each override is
+    # validated by the same contract, so nothing reaches the engine through this
+    # branch that could not reach it through the company-wide one.
+    overrides, override_notes = _override_drafts(kept.pop(_OVERRIDES_KEY, None), text)
+    notes.extend(override_notes)
+    if overrides:
+        listed = ", ".join(f"'{override.label}'" for override in overrides)
+        notes.append(
+            f"The document gives {len(overrides)} measure(s) a pattern of their own "
+            f"({listed}). Each becomes a configuration scoped to that measure, which "
+            "the engine prefers over the company-wide one; every other measure keeps "
+            "the company-wide policy. A name that matches nothing this company has "
+            "registered is reported and not stored."
+        )
+
+    # Reconcile event dates with the document *before* validation, so a date the
+    # document never stated never reaches a BucketConfig at all.
+    date_notes, dates_dropped = _ground_events(kept, text)
     notes.extend(date_notes)
-    if date_notes:
+    if dates_dropped:
         review_reasons.append(
             "Event dates were discarded because the document does not contain them."
         )
@@ -531,6 +874,7 @@ async def extract_bucket_config(
                 raw_keys=raw_keys,
                 rejected_keys=rejected,
                 retrieval=retrieval.as_dict(),
+                overrides=overrides,
             )
         raise ValidationFailure(
             f"The extracted configuration is not valid: {exc.message}"
@@ -567,6 +911,7 @@ async def extract_bucket_config(
         needs_review=bool(review_reasons),
         review_reasons=review_reasons,
         retrieval=retrieval.as_dict(),
+        overrides=overrides,
     )
 
 

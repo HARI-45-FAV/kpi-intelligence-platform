@@ -51,6 +51,12 @@ function ConfidenceChip({ level }: { level: string }) {
  *
  * Separate from the card so a page can put the trigger where the reader is
  * looking and the answer where there is room for it.
+ *
+ * `tone` exists for the dense case. A panel header carries one of these and it is
+ * the primary action there; a list of eight movement rows carries eight, where
+ * eight primary buttons would shout over the movements themselves. The wording,
+ * the pending text and the ✨ are the same either way, because it is the same
+ * action asking the same endpoint — only the weight on the page changes.
  */
 export function ExplainButton({
   label,
@@ -58,17 +64,19 @@ export function ExplainButton({
   disabled,
   onClick,
   title,
+  tone = 'primary',
 }: {
   label: string
   pending?: boolean
   disabled?: boolean
   onClick: () => void
   title?: string
+  tone?: 'primary' | 'ghost'
 }) {
   return (
     <button
       type="button"
-      className="btn btn-xs btn-primary shrink-0"
+      className={`btn btn-xs shrink-0 ${tone === 'ghost' ? 'btn-ghost' : 'btn-primary'}`}
       onClick={onClick}
       disabled={pending || disabled}
       title={title}

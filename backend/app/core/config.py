@@ -87,6 +87,16 @@ class Settings(BaseSettings):
     document_storage_dir: str = Field(default=str(DATA_DIR / "documents"))
     max_document_bytes: int = 20 * 1024 * 1024
 
+    # ---- Spreadsheet uploads ------------------------------------------
+    # An uploaded CSV or Excel sheet is loaded into a SQLite database under this
+    # directory, one per source, and is then read like any other SQL source. The
+    # bounds exist because a browser upload is the one entry point where a company
+    # can hand the platform an arbitrarily large file, and a row cap that is stated
+    # and reported is safer than an import that quietly runs the server out of disk.
+    upload_storage_dir: str = Field(default=str(DATA_DIR / "uploads"))
+    max_upload_bytes: int = 50 * 1024 * 1024
+    upload_max_rows: int = 200_000
+
     # ---- Guard rails on connector work -------------------------------
     # Profiling pushes aggregates into the source database, but a runaway
     # query still has to be bounded.
@@ -283,6 +293,7 @@ def get_settings() -> Settings:
     settings = Settings()
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     Path(settings.document_storage_dir).mkdir(parents=True, exist_ok=True)
+    Path(settings.upload_storage_dir).mkdir(parents=True, exist_ok=True)
     return settings
 
 

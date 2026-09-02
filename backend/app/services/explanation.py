@@ -291,6 +291,24 @@ def _confidence(
     return Confidence(level=level, reasons=tuple(reasons))
 
 
+def confidence_for(
+    run: DetectionRun,
+    contribution: ContributionRun | None,
+    access: AccessContext,
+) -> Confidence:
+    """The same rating, for another surface that must not invent a second scale.
+
+    A public wrapper over the rules above, added because the recommendation layer
+    needs exactly this judgement and a *second* confidence scale on the same result
+    would be the platform disagreeing with itself in two panels of one page. It
+    derives ``statistics_visible`` from the caller rather than taking it as an
+    argument, so no caller can accidentally rate a result as though it could see
+    statistics it may not read.
+    """
+
+    return _confidence(run, contribution, statistics_visible=access.has("kpi.read"))
+
+
 # ---------------------------------------------------------------------------
 # The assembled explanation
 # ---------------------------------------------------------------------------

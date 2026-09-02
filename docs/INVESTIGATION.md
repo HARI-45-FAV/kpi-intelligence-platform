@@ -13,7 +13,12 @@ difference throughout:
 > claim causality, and a share is never a verdict.
 
 Nothing in this feature changes a KPI's number, a KPI's status, a bucket
-configuration, an alert or a dashboard card. See §8.
+configuration, a summary mail or a dashboard card. See §8.
+
+Its output does, however, get read: a stored breakdown is what lets
+[the recommendation layer](RECOMMENDATIONS.md) name a **target area** and an owning
+role instead of only a KPI. That direction is one-way — §8 has the details — and
+naming an area is still not naming a cause.
 
 ---
 
@@ -286,11 +291,11 @@ SELECTED: North → top sectors …          [Click a sector → investigate pro
 
 ---
 
-## 8. What this feature did not touch
+## 8. What this feature changed, and what reads it afterwards
 
-KPI registration · KPI calculation · expected-vs-actual · anomaly classification ·
-bucket/RAG configuration · authentication · role-based access · the dashboard ·
-alerts · the existing Copilot.
+**Untouched.** KPI registration · KPI calculation · expected-vs-actual · anomaly
+classification · bucket/RAG configuration · authentication · role-based access ·
+the dashboard · the post-run summary mail · the existing Copilot.
 
 Two behaviour-preserving changes were made inside detection, both additive:
 
@@ -304,4 +309,42 @@ Two behaviour-preserving changes were made inside detection, both additive:
    force", so a scheduled run and an on-demand analysis cannot drift apart.
 
 The full backend suite passes, which is where the non-regression claim actually
-lives — the detection, dashboard and alert tests were not modified.
+lives — the detection, dashboard and mail tests were not modified.
+
+### What now reads a stored breakdown
+
+A `ContributionRun` is durable evidence, and three other surfaces read it. None of
+them can write one, and none can create a verdict:
+
+| Reader | What it does with the breakdown |
+|---|---|
+| [Recommendations](RECOMMENDATIONS.md) | Turns the top contributor into a **target area** with an owning role and a comparison basis, then aims a business lever and an action at it |
+| Copilot | `get_contribution_breakdown` and `list_stored_contribution_analyses` read it under `investigation.read`; the investigation panel also loads it as evidence before the model is asked anything |
+| Result detail | Renders the same ranked shares beside the verdict that produced them |
+
+**The relationship with recommendation derivation, precisely.** A recommendation is
+computed on every read from whatever is stored at that moment — there is no
+`recommendations` table and nothing is generated ahead of time. So the breakdown is
+an *input*, not a trigger:
+
+* **No breakdown stored?** The advice is still produced, aimed at the KPI as a
+  whole, and it says plainly that no part of the business has been named yet. It
+  degrades; it does not fail or fall silent.
+* **A breakdown stored?** The highest-contribution part becomes the target area,
+  and the `EntityRole` for that dimension supplies the owning role and the
+  comparison hint ("against peer regions", "against other channels serving the
+  same customers").
+* **Drilled a level deeper?** The next read sees the newer, deeper
+  `ContributionRun` and the advice **re-aims itself** — new area, new owner, new
+  comparison basis. Nothing is regenerated, because nothing was ever stored.
+
+That is the whole reason recommendations are derived rather than persisted: a stored
+recommendation written against a region-level breakdown would still be sitting there,
+naming a region, after the reader drilled into channel — disagreeing with the
+evidence printed directly above it. Deriving on read makes that state
+unrepresentable. What *is* persisted is the reader's response to a recommendation,
+in `recommendation_feedback`, and no detection or contribution path reads that table.
+
+And the direction of the arrow never reverses: contribution measures **share**.
+Naming a target area is not naming a cause, the recommendation cards carry that
+sentence in the open, and a test scans the served payload for causal verbs.

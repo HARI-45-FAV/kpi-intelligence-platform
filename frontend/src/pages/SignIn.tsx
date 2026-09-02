@@ -38,13 +38,20 @@ export default function SignIn() {
         </div>
 
         <form onSubmit={submit} className="panel space-y-5 p-5 shadow-[0_24px_60px_rgba(41,89,127,0.18)] sm:p-6">
-          <div className="segmented-switch mx-auto w-full max-w-[320px]">
+          {/*
+              A block-level flex row, so `mx-auto` centres it — an inline-flex box
+              ignores auto margins and sat off to one side. `data-bare` keeps each
+              half inside the switch: without it the global pebble rule squares the
+              corners and lifts the option out of the pill it belongs to.
+            */}
+          <div className="segmented-switch mx-auto flex w-full max-w-[320px] p-1.5">
             {(['login', 'register'] as const).map((option) => (
               <button
                 key={option}
                 type="button"
+                data-bare
                 onClick={() => setMode(option)}
-                className={`segmented-option flex-1 ${mode === option ? 'segmented-option-active' : ''}`}
+                className={`segmented-option flex-1 whitespace-nowrap px-3 py-2 text-xs ${mode === option ? 'segmented-option-active' : ''}`}
               >
                 {option === 'login' ? 'Sign in' : 'Create account'}
               </button>

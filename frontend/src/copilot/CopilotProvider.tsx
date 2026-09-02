@@ -43,6 +43,10 @@ import type { CopilotRequestContext } from '../api/types'
 /**
  * Which panel is asking. One Copilot serves them all; the panel decides which
  * verified result the answer is anchored to and which mistake it must not make.
+ *
+ * This mirrors the server's `PANELS` set, which is the authority: a value the
+ * server does not recognise is dropped there rather than passed to the model, so a
+ * panel missing from this union is a screen whose context silently arrives blank.
  */
 export type CopilotPanel =
   | 'stage_performance'
@@ -53,6 +57,9 @@ export type CopilotPanel =
   | 'kpi_setup'
   | 'monitoring'
   | 'dashboard'
+  // The two explainability surfaces, both anchored on a stored result.
+  | 'kpi_result'
+  | 'investigation_node'
 
 /** What a screen can tell the Copilot about itself. All optional. */
 export interface CopilotScreenContext {

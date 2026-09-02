@@ -19,7 +19,8 @@ Copilot can say *"this version does not do that"* precisely instead of inventing
 answer, and so the extension point is documented where the tools live. A name
 leaves this list only when the real computation lands, on the same commit -- the
 system prompt is generated from it, so a stale entry would have the Copilot deny a
-capability while its result sits in the evidence.
+capability while its result sits in the evidence. ``get_recommended_action`` left
+on the commit that landed ``services.recommendation`` for exactly that reason.
 """
 
 from __future__ import annotations
@@ -49,10 +50,15 @@ for _module in (kpi_tools, document_tools, data_tools, observability_tools, cont
 # What this platform genuinely does not compute. Detection is not here: a KPI's
 # actual, expected value, deviation and NORMAL/ABNORMAL/LOW_CONFIDENCE status are
 # computed, stored and reach the Copilot as evidence, so listing them as absent
-# would make the Copilot deny a figure it is holding. What remains absent is
-# everything past measurement -- prediction, cause, recommendation, notification --
-# and each entry stays until a deterministic service with its own stored results
-# replaces it.
+# would make the Copilot deny a figure it is holding. Contribution is not here
+# either, for the same reason and one stronger: two registered tools read stored
+# breakdowns. Nor is recommendation, since ``services.recommendation`` derives a
+# governed next action from a stored result and the result screen renders it --
+# what the Copilot lacks there is a *tool*, not the capability, and the panel note
+# for action questions says so rather than denying the feature. What remains here
+# is everything past measurement that no service computes -- prediction, cause,
+# escalation rules, threshold learning -- and each entry stays until a
+# deterministic service with its own stored results replaces it.
 PLANNED_TOOLS: tuple[dict[str, str], ...] = (
     {
         "name": "get_forecast",
@@ -68,20 +74,21 @@ PLANNED_TOOLS: tuple[dict[str, str], ...] = (
         ),
     },
     {
-        "name": "get_recommended_action",
-        "needs": "a recommendation engine",
-        "description": "What the company should do about a result.",
-    },
-    {
         "name": "get_alert_history",
-        "needs": "alerting and notification",
-        "description": "Which results were escalated to whom, and when.",
+        "needs": "alerting and escalation rules",
+        "description": (
+            "Which results were escalated to whom, and when. A completed run mails its "
+            "own stored summary, but no threshold rule, routing table or escalation "
+            "history exists to read back."
+        ),
     },
     {
         "name": "get_anomaly_feedback_state",
         "needs": "feedback learning",
         "description": (
-            "What reviewers accepted or rejected, and how thresholds moved in response."
+            "What reviewers accepted or rejected, and how thresholds moved in response. "
+            "Recommendation feedback is recorded, and deliberately moves nothing: no "
+            "detection path reads it, so there is no learned state to report."
         ),
     },
 )

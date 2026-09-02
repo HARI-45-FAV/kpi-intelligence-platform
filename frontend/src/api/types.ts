@@ -698,6 +698,26 @@ export interface AuditEntry {
   occurred_at: string
 }
 
+/**
+ * What the audit trail can be filtered by, and how many entries match.
+ *
+ * Server-issued, because the listing is capped: options derived from the page the
+ * client received would omit the very action a reader came to look for. `total` is
+ * the count under the filters currently applied and `total_unfiltered` the whole
+ * trail, which is what lets a screen tell "nothing matches these filters" apart
+ * from "this company has recorded nothing".
+ */
+export interface AuditOptionsResponse {
+  options: {
+    actions: string[]
+    resource_types: string[]
+    actors: string[]
+    outcomes: string[]
+  }
+  total: number
+  total_unfiltered: number
+}
+
 export interface TelemetrySummary {
   requests: number
   errors: number
@@ -1582,6 +1602,182 @@ export interface FindingResponse {
   finding: Finding
 }
 
+/* --------------------------------------- evidence-to-action recommendations */
+
+/**
+ * The most specific part of the business the stored evidence points at.
+ *
+ * `chain` is the drill-down as it was actually performed — `["South", "ONLINE"]`
+ * — reconstructed server-side from the stored breakdown's own path, not assembled
+ * here. `share_pct` is null when the KPI's parts do not sum to its whole, in which
+ * case the area is the largest *ranked* part rather than a measured share.
+ */
+export interface RecommendationTargetArea {
+  dimension: string
+  entity: string
+  /** Derived from the company's own dimension name — "Region", "Store", "Category". */
+  entity_type: string
+  chain: string[]
+  chain_label: string
+  share_pct: number | null
+  change: number | null
+  shares_available: boolean
+  /** The next levels this KPI's declared hierarchy allows a drill-down to reach. */
+  drill_next: string[]
+  comparison_hint: string
+  depth: number
+}
+
+/**
+ * Which lever the action is aimed at, and where the lever came from.
+ *
+ * `source` is the honest label on it. `KPI_DRIVER` means the company registered
+ * this driver and marked it controllable, so the business has already stated it
+ * can pull the lever. `KPI_FAMILY_DEFAULT` means no controllable driver is
+ * registered and the platform fell back to a default for this kind of KPI — which
+ * the screen says out loud, because a default is a suggestion about how businesses
+ * like this one usually work, not a fact about this one.
+ */
+export interface RecommendationLever {
+  key: string
+  label: string
+  source: 'KPI_DRIVER' | 'KPI_FAMILY_DEFAULT'
+  note: string
+  driver_name: string | null
+}
+
+/**
+ * A qualitative band, never a figure.
+ *
+ * The platform measures no counterfactual, so any money attached to "what this
+ * action is worth" would be invented. `basis` states what the band rests on: the
+ * KPI's registered business criticality, and how concentrated the movement is.
+ */
+export interface RecommendationImpact {
+  level: 'HIGH' | 'MEDIUM' | 'LOW'
+  label: string
+  basis: string
+}
+
+/** One suggested action, with everything a reader needs in order to disagree with it. */
+export interface Recommendation {
+  /** Stable over the lever and the area, so feedback stays attached across reloads. */
+  key: string
+  priority: 'HIGH_PRIORITY' | 'MEDIUM_PRIORITY' | 'PREVENTIVE_ACTION'
+  priority_label: string
+  /** The evidence sentence: "X accounts for N% of the observed downward movement." */
+  finding: string
+  /** The expandable trail — verdict, deviation, comparison, contributor, share, confidence. */
+  why: string[]
+  target_area: RecommendationTargetArea | null
+  lever: RecommendationLever
+  action: string
+  impact: RecommendationImpact
+  owner: string
+  confidence: { level: string; meaning: string }
+  monitoring: { metrics: string[]; window: string }
+  /** Shown on every card, never behind a disclosure. */
+  causation_note: string
+}
+
+/**
+ * What the platform is willing to say about a result, before any lever is chosen.
+ *
+ * One value rather than a set of flags, so no screen can combine them into a
+ * contradiction:
+ *
+ * - `ACTION` — abnormal and judgeable; suggested actions follow.
+ * - `MONITOR` — it moved *favourably*; the actions are about repeating it.
+ * - `NO_ACTION` — normal; routine monitoring only, and no cards at all.
+ * - `EVIDENCE_FIRST` — not judgeable; evidence steps, no lever, no owner, no action.
+ * - `UNREADABLE` — a verdict this platform does not issue.
+ */
+export type RecommendationStance =
+  | 'ACTION'
+  | 'MONITOR'
+  | 'NO_ACTION'
+  | 'EVIDENCE_FIRST'
+  | 'UNREADABLE'
+
+/** The five lines an executive reads — the same answer, narrowed, never a different one. */
+export interface RecommendationExecutiveView {
+  what_happened: string
+  largest_contributor: string | null
+  largest_contributor_share: number | null
+  top_action: string | null
+  owner: string | null
+  impact: string | null
+  confidence: string
+}
+
+export interface RecommendationSet {
+  kpi: string
+  kpi_key: string
+  target_date: string
+  verdict: string
+  stance: RecommendationStance
+  movement_direction: 'ADVERSE' | 'FAVOURABLE' | 'FLAT' | 'UNKNOWN'
+  headline: string
+  body: string
+  confidence: ExplanationConfidence
+  /** The figures the advice rests on, echoed so a reader can check them. */
+  evidence_summary: {
+    verdict: string
+    actual: number | null
+    expected: number | null
+    deviation_absolute: number | null
+    deviation_pct: number | null
+    unit?: string | null
+    currency?: string | null
+    comparison?: string | null
+    reference_count: number
+    top_contributor: string | null
+    top_contributor_chain: string[] | null
+    top_contributor_share_pct: number | null
+    breakdown_dimension: string | null
+  }
+  target_area: RecommendationTargetArea | null
+  recommendations: Recommendation[]
+  /** Populated for EVIDENCE_FIRST and UNREADABLE, where no action is offered. */
+  next_steps: string[]
+  monitoring: { metrics: string[]; window: string }
+  limitations: string[]
+  /**
+   * True when a breakdown would sharpen this advice from the KPI level to a named
+   * area — the one piece of state the page turns into a button.
+   */
+  awaiting_breakdown: boolean
+  causation_note: string
+  action_preamble: string
+  executive: RecommendationExecutiveView
+}
+
+/** One reader's response to one recommendation. Nothing here can touch a verdict. */
+export interface RecommendationFeedback {
+  recommendation_key: string
+  usefulness: string
+  action_status: string
+  comment: string | null
+  lever_key: string | null
+  target_entity: string | null
+  submitted_by_email: string | null
+  submitted_at: string
+}
+
+export interface RecommendationsResponse {
+  result: RecommendationSet
+  run_id: string
+  feedback: RecommendationFeedback[]
+  /** Offered by the server, so the screen never presents a response it would reject. */
+  feedback_options: { usefulness: string[]; action_status: string[] }
+  may_submit_feedback: boolean
+  evidence?: Record<string, unknown>
+}
+
+export interface RecommendationFeedbackResponse {
+  feedback: RecommendationFeedback
+}
+
 /* ------------------------------------------------------ monitoring dashboard */
 
 /**
@@ -1626,6 +1822,55 @@ export interface MonitoringMovement {
    */
   has_contribution: boolean | null
   open_findings: number | null
+  /**
+   * The leading contributor a stored breakdown already found, copied not recomputed.
+   *
+   * All four arrive together or not at all. `null` throughout means either that no
+   * breakdown has been run for this movement or that the reader lacks
+   * `investigation.read` — in both cases the screen names no contributor, because
+   * "no contributor" and "not shown to you" must not be rendered as a fact.
+   */
+  contributor_dimension?: string | null
+  contributor_entity?: string | null
+  contributor_share_pct?: number | null
+  /** False means a breakdown ran and found no single entity that explains the move. */
+  contributor_is_sufficient?: boolean | null
+  /** Whether this row can be opened in the existing investigation workflow. */
+  can_investigate?: boolean
+}
+
+/**
+ * One abnormal movement, written the way a business reader would say it.
+ *
+ * `headline` is assembled on the server from the KPI's own name, the run's own
+ * date and figures the detection engine already computed — it is not a model's
+ * sentence, so the same stored row always produces the same line. Where no
+ * breakdown exists the headline names no cause and `contributor_note` says why,
+ * which is the difference between reporting and guessing.
+ */
+export interface MonitoringHeadline {
+  detection_run_id: string
+  kpi_id: string
+  kpi_key: string
+  kpi_name: string
+  target_date: string
+  status: string
+  headline: string
+  deviation_pct: number | null
+  deviation_absolute: number | null
+  actual_value: number | null
+  expected_value: number | null
+  unit?: string | null
+  currency?: string | null
+  /** "above" or "below", from the sign the engine stored. */
+  direction?: string | null
+  contributor_dimension?: string | null
+  contributor_entity?: string | null
+  contributor_share_pct?: number | null
+  contributor_is_sufficient?: boolean | null
+  /** Why no contributor is named, when none is. */
+  contributor_note?: string | null
+  can_investigate?: boolean
 }
 
 export interface MonitoringRun {
@@ -1680,4 +1925,19 @@ export interface MonitoringResponse {
   findings_resolved: number | null
   recent_findings: Finding[]
   monitoring_note: string
+  /**
+   * The headline panel's own period, independent of `window_days`.
+   *
+   * It moves on its own so a reader can widen the tally window without
+   * rewriting the findings period, or the reverse. `findings_window_from`/`_to`
+   * are the earliest and latest *stored* abnormal dates inside the period, so a
+   * quiet quarter reads as empty rather than as a range in which nothing was found.
+   */
+  findings_window_days?: number
+  findings_window_options?: number[]
+  findings_window_from?: string | null
+  findings_window_to?: string | null
+  headlines?: MonitoringHeadline[]
+  /** Abnormal movements in the findings period — may exceed `headlines.length`. */
+  headline_total?: number
 }

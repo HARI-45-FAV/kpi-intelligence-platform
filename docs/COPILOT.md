@@ -72,36 +72,38 @@ forgotten: there is no shared index to leak from.
 
 | File | Lines | What it is |
 |---|---|---|
-| `backend/app/llm/provider.py` | 249 | `LLMProvider` ABC, message/tool/response types, `NullProvider`, `strip_reasoning`, `build_provider` — the single dispatch site |
-| `backend/app/llm/config.py` | 131 | `LLMConfig`, `unavailable_reason`, `describe()` (never includes the key), cost estimation |
-| `backend/app/llm/openai_compatible.py` | 359 | The one transport. Imported lazily, so `httpx` never enters the import graph on a deployment without a model |
+| `backend/app/llm/provider.py` | 254 | `LLMProvider` ABC, message/tool/response types, `NullProvider`, `strip_reasoning`, `build_provider` — the single dispatch site |
+| `backend/app/llm/config.py` | 171 | `LLMConfig`, `unavailable_reason`, `describe()` (never includes the key), cost estimation |
+| `backend/app/llm/openai_compatible.py` | 364 | One transport. Imported lazily, so `httpx` never enters the import graph on a deployment without a model |
+| `backend/app/llm/gemini.py` | 489 | The second transport, added the same way: one module behind the same interface, reached by one branch in `build_provider` |
 | `backend/app/llm/__init__.py` | 47 | Public surface |
-| `backend/app/copilot/context.py` | 176 | `CopilotContext` — the security boundary. Re-resolves every client hint inside the caller's company |
-| `backend/app/copilot/retrieval.py` | 723 | Company-scoped lexical retrieval over 14 kinds of governed knowledge |
-| `backend/app/copilot/evidence.py` | 215 | `EvidenceBundle`, `EvidenceItem`, `[E1]` citation ids, `placeholder_notice()` |
-| `backend/app/copilot/orchestrator.py` | 417 | The bounded turn: retrieve → offer tools → ask → return with evidence |
-| `backend/app/copilot/prompts.py` | 234 | System rules, user prompt assembly, and the deterministic answers used when no model or no evidence exists |
-| `backend/app/copilot/schemas.py` | 120 | Request/response contracts. The request cannot carry a company, SQL, a filter, a tool choice, or a prompt override |
-| `backend/app/copilot/text.py` | 230 | Document text extraction and chunking |
+| `backend/app/copilot/context.py` | 352 | `CopilotContext` — the security boundary. Re-resolves every client hint inside the caller's company |
+| `backend/app/copilot/retrieval.py` | 873 | Company-scoped lexical retrieval over 14 kinds of governed knowledge |
+| `backend/app/copilot/evidence.py` | 478 | `EvidenceBundle`, `EvidenceItem`, `[E1]` citation ids, `placeholder_notice()` |
+| `backend/app/copilot/orchestrator.py` | 658 | The bounded turn: retrieve → offer tools → ask → return with evidence |
+| `backend/app/copilot/prompts.py` | 482 | System rules, per-panel notes, user prompt assembly, and the deterministic answers used when no model or no evidence exists |
+| `backend/app/copilot/schemas.py` | 158 | Request/response contracts. The request cannot carry a company, SQL, a filter, a tool choice, or a prompt override |
+| `backend/app/copilot/text.py` | 438 | Document text extraction and chunking |
 | `backend/app/copilot/tools/base.py` | 298 | `ToolSpec`, `ToolRegistry`, `FORBIDDEN_PARAMETERS`, argument validation, `refuse()` |
 | `backend/app/copilot/tools/kpi_tools.py` | 741 | 7 KPI governance tools |
 | `backend/app/copilot/tools/data_tools.py` | 580 | 6 profiling / relationship / source tools |
-| `backend/app/copilot/tools/document_tools.py` | 274 | 1 document-passage tool |
-| `backend/app/copilot/tools/observability_tools.py` | 261 | 2 telemetry / capability tools |
-| `backend/app/copilot/tools/__init__.py` | 94 | Registry assembly + `PLANNED_TOOLS` (named, never stubbed) |
+| `backend/app/copilot/tools/document_tools.py` | 286 | 1 document-passage tool |
+| `backend/app/copilot/tools/observability_tools.py` | 284 | 2 telemetry / capability tools |
+| `backend/app/copilot/tools/contribution_tools.py` | 326 | 2 stored-breakdown tools, `investigation.read` |
+| `backend/app/copilot/tools/__init__.py` | 108 | Registry assembly (18 tools) + `PLANNED_TOOLS` (named, never stubbed) |
 | `backend/app/copilot/__init__.py` | 30 | Package doc |
-| `backend/app/api/v1/copilot.py` | 164 | `POST …/copilot/chat`, `GET …/copilot/status` |
+| `backend/app/api/v1/copilot.py` | 186 | `POST …/copilot/chat`, `GET …/copilot/status` |
 | `backend/app/services/analysis_views.py` | 297 | Payload shapers extracted from `analysis.py` so tools and screens answer from one code path |
-| `backend/tests/test_copilot.py` | 998 | 34 tests |
-| `backend/verify_no_llm.py` | 207 | Out-of-band verification that the platform runs fully with `LLM_ENABLED=false` |
-| `frontend/src/copilot/CopilotProvider.tsx` | 177 | Context inheritance — company, page, KPI, version, date |
-| `frontend/src/copilot/CopilotPanel.tsx` | 382 | The panel: answer, evidence with citations, tool trail, honest disabled state |
+| `backend/tests/test_copilot.py` | 1433 | 34 tests, 44 cases |
+| `backend/verify_no_llm.py` | 214 | Out-of-band verification that the platform runs fully with `LLM_ENABLED=false` |
+| `frontend/src/copilot/CopilotProvider.tsx` | 214 | Context inheritance — company, page, KPI, version, date |
+| `frontend/src/copilot/CopilotPanel.tsx` | 354 | The panel: answer, evidence with citations, tool trail, honest disabled state |
 
 ## 3. Files modified
 
 | File | Change |
 |---|---|
-| `backend/app/core/config.py` | 12 new settings (`LLM_*`, `COPILOT_*`). Defaults keep the Copilot off |
+| `backend/app/core/config.py` | 17 settings (`LLM_*`, `COPILOT_*`). Defaults keep the Copilot off |
 | `backend/app/main.py` | Copilot description; `/api/v1/meta` now reports `copilot.enabled/available/model/unavailable_reason` and `vector_embeddings` as absent |
 | `backend/app/api/router.py` | Mounts `copilot.router` |
 | `backend/app/core/telemetry.py` | Added `LlmUsage` and `llm_usage_of()`. **Also converted `TelemetryMiddleware` from `BaseHTTPMiddleware` to a plain ASGI middleware** — see §13 |
@@ -110,7 +112,7 @@ forgotten: there is no shared index to leak from.
 | `backend/app/api/v1/analysis.py` | Payload shapers moved to `analysis_views.py` and imported back under their original names. Behaviour identical |
 | `backend/app/api/v1/kpis.py` | Same extraction pattern; no behavioural change |
 | `backend/app/services/kpi_validation.py` | Validation-state summarisation reused by `get_kpi_validation_summary` |
-| `backend/.env.example` | The 12 new variables, documented and defaulted off |
+| `backend/.env.example` | All 17, documented and defaulted off |
 | `frontend/src/api/types.ts` | Copilot request/response/status types |
 | `frontend/src/pages/AppShell.tsx` | Wraps routes in `CopilotProvider`, mounts the panel and launcher |
 | `frontend/src/pages/Dashboard.tsx` | Publishes KPI/date context; "Ask" affordance on tiles |
@@ -202,7 +204,7 @@ reaches a response, so hidden reasoning is never returned to a user
 
 ## 6. Governed tools
 
-Sixteen, each one a narrow read over the platform metadata database, gated by the
+Eighteen, each one a narrow read over the platform metadata database, gated by the
 permission that already governs the same material in the REST API. Every call
 re-checks that permission, validates its arguments, and is scoped to
 `context.company_id`. **No tool takes a company argument.**
@@ -216,6 +218,8 @@ re-checks that permission, validates its arguments, and is scoped to
 | `get_kpi_lineage` | `kpi.read` | Column-level lineage from the parsed formula |
 | `get_kpi_dimensions` | `kpi.read` | Declared dimensions, with the "declaring ≠ scheduling" note |
 | `get_kpi_drivers` | `kpi.read` | Declared driver relationships |
+| `get_contribution_breakdown` | `investigation.read` | A **stored** breakdown: each part's actual, expected, change and signed share, ranked, with how much of the movement the listed parts account for. Computes nothing |
+| `list_stored_contribution_analyses` | `investigation.read` | Which breakdowns exist for the KPI in view — date, dimension, drill depth, when run |
 | `get_data_source_summary` | `source.read` | Source type, status, connector limitations. **Never credentials** |
 | `get_table_profile` | `analytics.read` | Row counts, quality status, grain, freshness |
 | `get_column_profile` | `analytics.read` | Null rate, cardinality, type. **`sample_values` stripped** |
@@ -240,8 +244,8 @@ would fail to start rather than ship the hole.
 
 Named in `PLANNED_TOOLS`, and **not implemented** — a stub returning a plausible
 forecast or a plausible cause would be exactly the failure this platform exists to
-prevent: `get_forecast`, `get_causal_attribution`, `get_recommended_action`,
-`get_alert_history`, `get_anomaly_feedback_state`.
+prevent: `get_forecast`, `get_causal_attribution`, `get_alert_history`,
+`get_anomaly_feedback_state`.
 
 The Copilot reads this list so it can say *"that will be answerable when
 forecasting ships"* instead of inventing an answer. A name leaves the list on the
@@ -249,14 +253,25 @@ same commit that lands the real computation, because the system prompt is genera
 from it: a stale entry would have the Copilot deny a capability whose result is
 sitting in its own evidence.
 
-**Detection and contribution are not on this list.** A KPI's actual, expected
-value, deviation and `NORMAL`/`ABNORMAL`/`LOW_CONFIDENCE` status are computed and
-persisted by `services.detection`, and a movement's breakdown by
-`services.contribution`. Both reach the Copilot as *evidence* rather than as tools
-the model may call: `orchestrator._FIGURE_PANELS` loads the stored `DetectionRun`
-for the panel's KPI and date before the model is asked anything, and the
-investigation panel additionally loads the stored `ContributionRun` when the caller
-holds `investigation.read`. When no run exists for the date,
+**`get_recommended_action` has left this list.** [`services/recommendation.py`](../backend/app/services/recommendation.py)
+derives a governed next action from a stored result — target area, business lever,
+action to review, a qualitative impact band, an owning role and a monitoring window
+— and the result screen renders it (see [RECOMMENDATIONS.md](RECOMMENDATIONS.md)).
+What the Copilot lacks is a *tool* for it, not the capability, so the honest
+position is neither "planned" nor "here is my advice": the `future_action` panel
+note points the reader at the recommended actions on the result and forbids the
+model composing its own, alongside the standing bans on a claimed cause, a currency
+figure and a guaranteed outcome. Registering a read-only tool over the same derived
+payload is the obvious next step and needs no new computation.
+
+**Detection and contribution are not on this list either.** A KPI's actual,
+expected value, deviation and `NORMAL`/`ABNORMAL`/`LOW_CONFIDENCE` status are
+computed and persisted by `services.detection`, and a movement's breakdown by
+`services.contribution`. Both reach the Copilot as *evidence* as well as through the
+two contribution tools above: `orchestrator._FIGURE_PANELS` loads the stored
+`DetectionRun` for the panel's KPI and date before the model is asked anything, and
+the investigation panel additionally loads the stored `ContributionRun` when the
+caller holds `investigation.read`. When no run exists for the date,
 `no_detection_run_notice` says so — the absence is stated, never filled in.
 
 ---
@@ -482,25 +497,32 @@ grouped by the invariant each one defends:
 ### Results
 
 ```
-backend:   147 passed, 2 warnings in 75.50s
-           ├──  44  copilot            (34 tests, parametrised)
+backend:   260 passed, no warnings  (~2 min)
+           ├──  44  copilot                    (34 tests, parametrised)
+           ├──  40  explainability findings
            ├──  28  kpi formula
            ├──  20  source governance
+           ├──  19  detection generalization
+           ├──  18  upload onboarding
+           ├──  17  recommendations
+           ├──  15  investigation / contribution
            ├──  15  security keys
-           ├──  14  investigation / contribution
-           ├──  14  detection generalization
+           ├──  14  gemini transport
+           ├──  11  password policy
            ├──   7  company kpi definitions
+           ├──   7  investigation grain
            ├──   3  presentation contracts
            └──   2  golden flow
 
 frontend:  tsc -b --noEmit  clean
-           vitest            24 passed (4 files)
+           npm run build    clean
+           vitest           87 passed (12 files)
 
-verify_no_llm.py:  47 checks passed
+verify_no_llm.py:  ALL CHECKS PASSED
 ```
 
-Both warnings are third-party deprecations — `fastapi.testclient` on `httpx`, and
-Alembic on `path_separator` — neither raised by this codebase.
+The deprecation warnings this section used to note — `fastapi.testclient` on
+`httpx`, and Alembic on `path_separator` — no longer appear; the suite runs clean.
 
 No pre-existing test was weakened, skipped, or removed. The tenant-isolation
 tests are untouched.
@@ -558,8 +580,11 @@ vocabulary may retrieve nothing — and when it retrieves nothing, the Copilot s
 so rather than guessing. That is the intended failure direction, but it is a real
 limitation.
 
-**One transport.** `openai_compatible` only. Anthropic, Bedrock, and Vertex need
-the three-step addition in §4.
+**Two transports.** `openai_compatible` and `gemini`
+([provider.py](../backend/app/llm/provider.py) holds the only dispatch in the
+codebase). Anthropic, Bedrock and Vertex are the three-step addition in §4 — one
+module, one branch, one settings value, and nothing above the provider interface
+changes.
 
 **Tool calling is required for the tool layer.** A model or server without
 function-calling support still gets retrieval-grounded answers, but the 18 tools
@@ -586,6 +611,17 @@ may not say what caused it, and no engine behind it computes causality —
 contribution analysis measures shares of a movement, which is not a cause. A
 question demanding a cause gets that distinction, not a guess.
 
-**Nothing on this list is computed:** forecasts, causal attribution, recommended
-actions, alert history, feedback state. The Copilot names them as absent rather
-than approximating them.
+**Recommendations are readable, not composable.** The platform derives a governed
+next action for a stored result, and the Copilot has no tool over it. Asked what to
+do, it points the reader at the recommended actions on that result rather than
+writing advice of its own — which is the right answer while no tool exists, and the
+smallest gap left on this list: the derived payload is already served, so a
+read-only tool over it adds no computation. Until then the model stays inside the
+same three bans the panel itself observes: no claimed cause, no currency figure, no
+guaranteed outcome.
+
+**Not computed anywhere in this version:** forecasts, causal attribution,
+threshold-based alert rules and their history, and learned feedback state — reader
+feedback is recorded and deliberately moves no threshold, so there is no learned
+state to report. The Copilot names these as absent rather than approximating them,
+and the list is generated from `PLANNED_TOOLS` so it cannot drift from the code.

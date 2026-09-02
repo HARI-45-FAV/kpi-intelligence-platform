@@ -40,6 +40,12 @@ class AuditAction:
     SOURCE_DELETED = "source.deleted"
     TABLES_DISCOVERED = "source.tables_discovered"
     SCOPE_UPDATED = "source.scope_updated"
+    # A spreadsheet becoming a governed source. Distinct from SOURCE_CREATED because
+    # the interesting facts are different ones: which file, what it hashed to, how
+    # many rows landed and how many were skipped. Recorded on every load, including a
+    # re-upload that replaces rows, so "which version of the export is this KPI built
+    # on" stays answerable after the file itself has been overwritten.
+    FILE_UPLOADED = "source.file_uploaded"
 
     PROFILE_RUN = "profiling.executed"
     GRAIN_DETECTED = "profiling.grain_detected"
@@ -102,6 +108,13 @@ class AuditAction:
     # act on -- and because whether a model wrote the prose is part of the record.
     RESULT_EXPLAINED = "explainability.result_explained"
     NODE_EXPLAINED = "explainability.node_explained"
+
+    # A recommendation is derived, never stored, so there is nothing to log when one
+    # is read. What is worth logging is a person's response to it: "this advice was
+    # not useful" and "we acted on this" are the only records of whether the layer
+    # is earning its place, and the second is a statement about the business that a
+    # reviewer may later need attributed.
+    RECOMMENDATION_FEEDBACK_RECORDED = "recommendation.feedback_recorded"
 
 
 def record(

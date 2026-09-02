@@ -303,8 +303,14 @@
     @apply inline-flex items-center gap-1 rounded-full border border-white/80 bg-white/40 p-1 shadow-[0_8px_18px_rgba(55,92,128,0.08)];
   }
 
+  /* A pill is a flex box, not a text run: the option is laid out rather than
+     relying on inline layout, so a caption stacked under a label sits on its
+     own line and the margins between them actually apply. Every call site must
+     also carry `data-bare` — the global pebble rule would otherwise square the
+     corners off and float the option out of the switch that contains it. */
   .segmented-option {
-    @apply rounded-full px-3 py-1.5 text-[11px] font-medium text-slate-500 transition-all duration-200;
+    @apply inline-flex items-center justify-center rounded-full px-3 py-1.5 text-[11px]
+           font-medium text-slate-500 transition-all duration-200;
   }
 
   .segmented-option-active {

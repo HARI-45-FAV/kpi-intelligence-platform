@@ -101,6 +101,13 @@ class DataSourceType(StrEnum):
     API = "API"
     CSV = "CSV"
     FILE = "FILE"
+    # A spreadsheet the company uploaded, loaded into a SQLite database the platform
+    # owns. Distinct from CSV and FILE, which are references to data held elsewhere
+    # and carry no driver: an UPLOAD *is* queryable, and everything downstream --
+    # discovery, profiling, grain detection, KPI evaluation -- treats it as the SQL
+    # source it has become. Kept apart from SQLITE so the trail can say where the
+    # data came from rather than only where it now sits.
+    UPLOAD = "UPLOAD"
 
 
 class ConnectionStatus(StrEnum):
@@ -116,6 +123,11 @@ class RefreshFrequency(StrEnum):
     HOURS_2 = "HOURS_2"
     DAILY = "DAILY"
     WEEKLY = "WEEKLY"
+    # Refreshed only when somebody does it: an uploaded spreadsheet, or an export
+    # dropped by hand. Distinct from UNKNOWN, which means nobody has said. The
+    # difference decides whether stale data is a fault to chase or the expected
+    # state of a point-in-time snapshot.
+    MANUAL = "MANUAL"
     UNKNOWN = "UNKNOWN"
 
 
@@ -126,6 +138,9 @@ REFRESH_INTERVAL_SECONDS: dict[str, int | None] = {
     RefreshFrequency.HOURS_2: 2 * 60 * 60,
     RefreshFrequency.DAILY: 24 * 60 * 60,
     RefreshFrequency.WEEKLY: 7 * 24 * 60 * 60,
+    # No interval, for the same reason as UNKNOWN but for the opposite cause: there
+    # is no cadence to be late against, so freshness cannot be judged by the clock.
+    RefreshFrequency.MANUAL: None,
     RefreshFrequency.UNKNOWN: None,
 }
 
@@ -452,8 +467,35 @@ FINDING_TRANSITIONS: dict[FindingStatus, tuple[FindingStatus, ...]] = {
 }
 
 
-BUCKET_CONFIG_TRANSITIONS: dict[BucketConfigStatus, tuple[BucketConfigStatus, ...]] = {
-    BucketConfigStatus.DRAFT: (BucketConfigStatus.PROPOSED, BucketConfigStatus.ARCHIVED),
+class RecommendationUsefulness(StrEnum):
+    """A reader's verdict on a *recommendation* — never on the KPI it came from.
+
+    Kept separate from :class:`DetectionStatus` and :class:`FindingStatus` for the
+    same reason those are separate from each other: nobody should be able to close
+    an anomaly, or overturn a measured verdict, by saying an action was unhelpful.
+    This records whether the suggestion landed, which is the only thing the
+    platform can learn from a human here.
+    """
+
+    USEFUL = "USEFUL"
+    NOT_USEFUL = "NOT_USEFUL"
+    NEEDS_REVIEW = "NEEDS_REVIEW"
+
+
+class RecommendationActionStatus(StrEnum):
+    """How far a suggested action has actually got, as a person reports it.
+
+    Self-reported and advisory. The platform performs no business action and
+    verifies none, so this is a shared note about intent rather than a workflow
+    state anything downstream depends on.
+    """
+
+    NOT_STARTED = "NOT_STARTED"
+    IN_REVIEW = "IN_REVIEW"
+    ACTION_TAKEN = "ACTION_TAKEN"
+
+
+BUCKET_CONFIG_TRANSITIONS: dict[BucketConfigStatus, tuple[BucketConfigStatus, ...]] = {    BucketConfigStatus.DRAFT: (BucketConfigStatus.PROPOSED, BucketConfigStatus.ARCHIVED),
     # A reviewer who fixes what the extraction got wrong moves it to DRAFT and
     # onward; there is no path straight to APPROVED, because the whole reason the
     # row is here is that nobody has yet supplied what was missing.

@@ -234,6 +234,54 @@ Two further locks:
   a policy claiming a completely different weekday, then re-runs detection: the
   config key, the expected value and the status are all unchanged.
 
+### Dates the document states without a year
+
+A handbook writes an annual window the way a person says it — *"the promotion runs
+15–21 Oct"* — with no year, because the window recurs. Requiring a full
+year-month-day rendering therefore discarded the most common way a document states
+an event, which made `business_event` unfillable from a real handbook and, because
+a dropped date marks the draft for review, held four correctly-read slots out of an
+engine that reads APPROVED rows only.
+
+A date now grounds two ways, and the difference is recorded on the draft:
+
+| The document contains | Outcome |
+| --- | --- |
+| the whole date | kept exactly as stated |
+| its day and month only | read as a recurring window: the platform expands it across the years it may compare (5 back, 1 forward) and **discards the model's year** |
+| neither | discarded, and the draft is marked for review |
+
+A range is expanded before matching, so *"15–21 Oct"* grounds all seven days and
+not just the two that appear as numbers. No weekday, month or event literal is
+involved: month spellings come from `calendar`, so every tenant's calendar is read
+by the same code. `tests/test_bucket_grounding.py` covers the three outcomes and
+asserts no weekday is privileged over another.
+
+### One company-wide policy, plus the measures a document excepts
+
+Documents state a general rule and then name its exceptions — *"orders peak in the
+third week, unlike everything else"*. The model may return a `kpi_overrides`
+section alongside the five slots, naming a measure **as the document writes it**;
+the platform matches that name against the company's registered measures itself
+(`kpi_key` or display name, normalised), so a model never names a key and an
+unmatched name is reported rather than stored or guessed.
+
+Each override becomes its own configuration row scoped to that `kpi_key`, approved
+separately. That needs no engine change: resolution order already prefers a
+KPI-scoped APPROVED row over the company-wide one, and every measure the document
+does not single out keeps the company-wide policy unchanged.
+
+An override reaches the engine through the same door, so it is put through the same
+checks — unknown keys quarantined, event dates grounded in the same document,
+search budget forced to the platform's, payload validated against the same
+five-slot contract. An override that stated no pattern is *not* stored: that is the
+model having noticed a measure rather than having read a policy for it, and storing
+it would offer an approver a configuration that cannot select a single comparable
+date while taking that measure off the policy currently serving it correctly.
+`tests/test_bucket_overrides.py` covers the contract;
+`test_a_handbook_that_singles_out_one_measure_scopes_a_policy_to_it` proves the
+precedence through the real engine.
+
 ---
 
 ## 8. Requirement 7 — expected value from comparable dates
@@ -471,27 +519,93 @@ suite's two tenants happened to agree with it.
 ## 14. Verified state
 
 ```
-backend     python -m pytest tests      →  147 passed, 2 warnings in 75.50s
-backend     python verify_no_llm.py     →  47 checks passed
+backend     python -m pytest tests      →  298 passed, no warnings  (~3 min)
+backend     python verify_no_llm.py     →  ALL CHECKS PASSED
 frontend    npx tsc -b --noEmit         →  clean
-frontend    npx vitest run              →  4 files, 24 passed
+frontend    npx vitest run              →  12 files, 99 passed
+frontend    npm run build               →  clean production build
 ```
 
-Both warnings are third-party deprecations unrelated to detection: a
-`StarletteDeprecationWarning` from `fastapi.testclient`, and an Alembic
-`DeprecationWarning` about `path_separator` raised by the migration-head test.
+The deprecation warnings this section used to note — a `StarletteDeprecationWarning`
+from `fastapi.testclient` and an Alembic `path_separator` warning from the
+migration-head test — are gone; the suite now runs clean.
 
 ---
 
-## 15. What the engine still will not do
+## 15. Where the engine stops, and what reads on from there
 
-* **Forecast.** Expected value is the median of comparable history, not a
-  projection. Nothing here extrapolates.
-* **Explain a cause.** A verdict says a number is outside comparable history; it
-  never claims why. Root cause is the investigation surface's job, and the
-  Copilot's, and both read governed evidence rather than inventing it.
-* **Substitute a peer baseline.** A KPI declaring a sparse-history strategy is
-  told so in the `reason` field; borrowing another KPI's history is a separate,
+The engine answers one question — *did this number behave normally?* — and stops
+there **by construction**, because everything downstream is a separate,
+independently governed read over what it stored. That boundary is what lets the
+rest of the platform build on a verdict without ever being able to alter it.
+
+| Question | Answered by | Reads |
+|---|---|---|
+| Did this number behave normally? | this engine | the tenant's own data, once, per date |
+| Why was it flagged? | [`services/explanation.py`](../backend/app/services/explanation.py) | the stored run |
+| Which part of the business does it sit in? | [Investigation](INVESTIGATION.md) | the stored run, on request |
+| What should be reviewed, and by whom? | [Recommendations](RECOMMENDATIONS.md) | the stored run and its newest stored breakdown |
+| Who is told, without opening the app? | [`services/run_email.py`](../backend/app/services/run_email.py) | the Agent Run's stored results, plus the membership table for the address list |
+
+Each of those reads the engine's output and never writes back to it: a
+recommendation cannot change a verdict, and a breakdown cannot create one — the
+run gate returns `409` for a date this engine never measured. So the four lines
+below are the engine's own, and they hold whatever is layered above it.
+
+* **It measures; it does not forecast.** Expected value is the median of
+  comparable history, not a projection. Nothing here extrapolates. A forecasting
+  service would be a new engine with its own stored results, not a setting on this
+  one.
+* **It locates; it does not claim a cause.** A verdict says a number is outside
+  comparable history. Contribution then says which part of the business *accounts
+  for* the movement, and the recommendation layer aims advice at that part — with
+  the sentence *contribution alone does not establish causation* served on every
+  card, and a test that fails the build if a causal verb ever reaches the payload.
+* **It borrows no other KPI's history.** A KPI declaring a sparse-history strategy
+  is told so in the `reason` field; substituting a peer baseline is a separate,
   explicitly requested analysis and is never applied silently.
-* **Guess an event date.** A named event with no dates is reported unusable.
-* **Trust an unapproved policy.** Ever.
+* **It abstains rather than guesses.** A named event with no dates is reported
+  unusable, an unapproved policy is never trusted, and thin evidence returns
+  `LOW_CONFIDENCE` — which the recommendation layer honours by offering
+  evidence-collection steps and **no** targeted intervention.
+
+**Natural next layer.** Forecasting, threshold-based alerting and scheduled runs
+are the obvious extensions, and the run history and stored evidence they would read
+already exist — which is how the explanation, investigation and recommendation
+layers were each added without touching the algorithm in §3. A completed run
+already mails its own summary, rendered from the same stored rows the screen reads.
+
+### The run summary mail, and who receives it
+
+One completed Agent Run produces one message, and its body is the same chain the
+screen shows: **KPI → date → actual vs expected → status → deviation → the largest
+contributor → what happened → the recommended next step → the confidence in all of
+it.** Every figure is a stored column re-rendered through the explanation service's
+own formatters, so the mail cannot round a number differently from the Results page,
+and no model produces or adjusts a figure in it — which the message says of itself,
+in a footer beside the *contribution is not causation* line.
+
+**No address is written into this codebase.** Recipients are resolved at send time
+from `company_users`: the active members of *that* company whose role grants both
+`analytics.read` **and** `investigation.read`. Both, not either — one run produces
+one body, and that body carries contribution shares whenever the run has a stored
+breakdown, so the alternative would be either mailing apportionment to someone not
+entitled to read it or composing two versions of one answer. Requiring both keeps
+the guarantee simple: *nothing in the mail is something its reader could not have
+opened in the application themselves.* Adding an analyst to a company adds them to
+its summaries; removing them removes them; no environment change either way.
+
+`EMAIL_RECIPIENTS` is the fallback for the one case a membership table cannot answer
+— a company with no entitled member, mid-setup or after its last analyst is
+deactivated. When neither exists there is nobody to address, and that is reported as
+the summary's state with its reason (alongside the transport's own reason, if the
+deployment is also switched off, so an operator does not debug the same problem
+twice). The audit row records *which of the two sources* was used and never the
+addresses: a mailing list is personal data, and "why these people" is answered by
+the source.
+
+Verified in `tests/test_detection_generalization.py`: a company's own registered
+users receive it and the fallback list does not; a viewer holding `analytics.read`
+alone is excluded from a body containing contribution shares; the fallback engages
+only when no member qualifies; and having nobody at all is a reported state that
+leaves the run's results untouched.

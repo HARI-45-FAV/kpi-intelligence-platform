@@ -9,10 +9,15 @@ Same two guarantees as ``app.llm.config``, for the same reasons:
   is reported as a state, never raised as an error that would fail the run that
   produced it.
 * **Credentials never travel.** ``describe()`` returns what the API and the audit
-  trail are allowed to see: provider, host, port, sender, recipient count. The
-  password is not in it, and neither are the recipient addresses — a mailing list
-  is personal data, and a count answers "was this delivered anywhere" without
-  putting addresses into every audit row.
+  trail are allowed to see: provider, host, port, sender, and how many addresses
+  the fallback list holds. The password is not in it, and neither are any
+  addresses — a mailing list is personal data, and a count answers "was this
+  delivered anywhere" without putting addresses into every audit row.
+
+Who a summary is addressed to is *not* decided here. This module knows nothing
+about companies, so it cannot ask which of a company's registered users may see a
+result; ``app.services.run_email`` resolves that against the membership table and
+treats ``EMAIL_RECIPIENTS`` as the fallback for a company with no entitled member.
 """
 
 from __future__ import annotations
@@ -42,7 +47,15 @@ class EmailConfig:
 
     @property
     def unavailable_reason(self) -> str | None:
-        """Why a summary cannot be sent, or ``None`` when it can."""
+        """Why a summary cannot be sent, or ``None`` when it can.
+
+        Deliberately silent about ``recipients``. Who receives a run summary is a
+        per-company question answered against that company's registered users, and
+        only a company with no entitled member falls back to this list — so an empty
+        ``EMAIL_RECIPIENTS`` is a normal deployment, not a broken transport. The
+        "nobody to send to" case belongs to the caller that knows the company, and
+        ``app.services.run_email`` reports it there.
+        """
 
         if not self.enabled:
             return "Post-run email is disabled for this deployment (EMAIL_ENABLED)."
@@ -55,8 +68,6 @@ class EmailConfig:
             return "No mail host is configured (SMTP_HOST)."
         if not self.sender:
             return "No sender address is configured (EMAIL_FROM)."
-        if not self.recipients:
-            return "No recipients are configured (EMAIL_RECIPIENTS)."
         return None
 
     def describe(self) -> dict[str, object]:
@@ -65,7 +76,9 @@ class EmailConfig:
             "host": self.host,
             "port": self.port,
             "sender": self.sender,
-            "recipient_count": len(self.recipients),
+            # The configured fallback list only. The number actually addressed is
+            # per company and is reported by the send, not by the configuration.
+            "fallback_recipient_count": len(self.recipients),
             "tls": self.use_tls,
             "enabled": self.enabled,
             "unavailable_reason": self.unavailable_reason,

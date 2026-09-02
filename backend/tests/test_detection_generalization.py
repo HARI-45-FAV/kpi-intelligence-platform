@@ -30,7 +30,9 @@ numeric path acquires a dependency on the model layer.
 from __future__ import annotations
 
 import ast
+import json
 import statistics
+from dataclasses import replace
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -1123,6 +1125,112 @@ def test_kpi_handbook_extraction_persists_and_drives_real_detection(company_b, m
     assert result["evidence"]["bucket"]["config_key"] == "borealis-handbook-policy"
 
 
+def test_a_handbook_that_singles_out_one_measure_scopes_a_policy_to_it(
+    company_b, monkeypatch
+):
+    """One company-wide policy, plus a policy for the measure the document excepts.
+
+    A handbook states how the business generally behaves and then names its
+    exceptions. Both readings have to survive: the general rule for every measure,
+    and the exception for the one the document actually singles out.
+
+    This runs *after* the handbook test above and deliberately approves only the
+    KPI-scoped row, so the company-wide policy in force is left exactly as that
+    test left it. The assertion is therefore a real precedence check rather than a
+    restatement of the setup: the same endpoint, on the same date, resolves a
+    different comparison basis for the two KPIs -- ``refund_value`` reads the row
+    scoped to it, ``revenue`` still reads the company-wide one.
+    """
+
+    class HandbookModel(LLMProvider):
+        async def generate(self, messages, tools=None, stream=False):
+            return LLMResponse(
+                text=(
+                    '{"same_day_of_week":{"enabled":true,"days":["TUE"]},'
+                    '"kpi_overrides":['
+                    '{"kpi":"Refund Value",'
+                    '"same_week_of_month":{"enabled":true,"weeks":[1,2,3,4,5]}},'
+                    '{"kpi":"Shrinkage Rate",'
+                    '"same_week_of_month":{"enabled":true,"weeks":[2]}}]}'
+                ),
+                model="test/handbook-model",
+                usage=LLMUsage(prompt_tokens=30, completion_tokens=40),
+            )
+
+    monkeypatch.setattr(settings, "llm_enabled", True)
+    monkeypatch.setattr(settings, "llm_model", "test/handbook-model")
+    monkeypatch.setattr(
+        "app.services.bucket_extraction.build_provider",
+        lambda config=None: HandbookModel(config),
+    )
+
+    admin, base = company_b["admin"], company_b["base"]
+    document = admin.post(
+        f"{base}/documents",
+        data={
+            "metadata": __import__("json").dumps(
+                {
+                    "title": "Borealis KPI Handbook v2",
+                    "document_type": "KPI Handbook",
+                    "inline_content": (
+                        "For comparable trading history, use the same weekday; Borealis "
+                        "trading is compared on Tuesday. Refund Value is the exception: "
+                        "it follows the position of the week within the month rather "
+                        "than the weekday. Shrinkage Rate settles in the second week."
+                    ),
+                }
+            )
+        },
+    )
+    assert document.status_code == 201, document.text
+
+    extracted = admin.post(
+        f"{base}/bucket-configs/extract",
+        json={
+            "config_key": "borealis-handbook-v2",
+            "name": "Borealis handbook policy v2",
+            "document_id": document.json()["id"],
+        },
+    )
+    assert extracted.status_code == 201, extracted.text
+    body = extracted.json()
+
+    # The company-wide row is the general rule, unchanged by the exception.
+    assert body["kpi_key"] is None
+    assert body["buckets"]["same_day_of_week"]["days"] == [2]
+    assert body["buckets"]["same_week_of_month"]["enabled"] is False
+
+    # "Refund Value" is registered here as refund_value: the same measure written
+    # the way a document writes it, matched without the model being told the key.
+    (override,) = body["kpi_overrides"]
+    assert override["kpi_key"] == "refund_value"
+    assert override["status"] == "PROPOSED"
+    assert override["buckets"]["same_week_of_month"]["enabled"] is True
+    assert override["config_key"] != body["config_key"]
+
+    # "Shrinkage Rate" is not a measure this company registered. That is reported
+    # rather than stored or invented, and it changes nothing else.
+    assert any("Shrinkage Rate" in reason for reason in body["kpi_overrides_skipped"])
+    assert len(body["kpi_overrides"]) == 1
+
+    approved = admin.post(
+        f"{base}/bucket-configs/{override['id']}/approve",
+        json={"reason": "The handbook states a different basis for this measure."},
+    )
+    assert approved.status_code == 200, approved.text
+
+    # The precedence, proved through the real engine rather than asserted.
+    refunds = run_detection(admin, base, company_b["refunds_id"], company_b["target"])
+    revenue = run_detection(admin, base, company_b["revenue_id"], company_b["target"])
+
+    assert refunds["evidence"]["bucket"]["config_key"] == override["config_key"]
+    assert revenue["evidence"]["bucket"]["config_key"] == "borealis-handbook-policy"
+    # Both still produce a real number from the company's own source.
+    for outcome in (refunds, revenue):
+        assert outcome["result"]["actual"] is not None
+        assert outcome["result"]["status"] in {"NORMAL", "ABNORMAL", "LOW_CONFIDENCE"}
+
+
 # ---------------------------------------------------------------------------
 # The post-run summary mail
 # ---------------------------------------------------------------------------
@@ -1232,18 +1340,27 @@ def test_the_summary_mail_reprints_the_stored_result_and_is_sent_once(
     assert len(recorder.sent) == 1
 
     message = recorder.sent[0]
-    assert message.recipients == ("ops@borealis.example.com",)
+    # Addressed to the company's own registered user, not to the deployment's
+    # fallback list. Membership, not equality, because a later test in this module
+    # adds members to this company; the exact set is asserted there.
+    assert "admin@borealis-foods.example.com" in message.recipients
+    assert "ops@borealis.example.com" not in message.recipients
+    assert first.json()["email"]["recipient_source"] == "REGISTERED_USERS"
     assert target.isoformat() in message.subject
     assert "[KPI Intelligence]" in message.subject
     body = message.body
     # The chain requirement asks for: actual vs expected, status, contributors,
-    # confidence, recommendation.
+    # the explanation, the recommendation, and the confidence in all of it.
     for heading in ("Actual", "Expected", "Deviation", "Status"):
         assert heading in body, heading
     assert "Top Contributors" in body
+    assert "What Happened" in body
     assert "Confidence Level" in body
     assert "Recommended Next Step" in body
     assert "Contribution is not causation" in body
+    # The prose is the platform's own assembly of stored figures, and the mail says
+    # so: a summary that looked model-written would invite the reader to discount it.
+    assert "no language model produced or adjusted any number" in body
     for word in ("caused", "drove", "driven by", "led to", "resulted in", "root cause"):
         assert word not in body.lower(), f"the summary claims causation: {word!r}"
 
@@ -1307,3 +1424,159 @@ def test_a_refused_mail_server_is_recorded_and_does_not_fail_the_run(
     assert response.json()["results"], "the run's results survive a mail failure"
     assert response.json()["email"]["sent"] is False
     assert "refused" in (response.json()["email"]["reason"] or "").lower()
+
+
+def test_the_summary_addresses_the_companys_own_entitled_members(company_b, monkeypatch):
+    """Recipients come from the membership table, and only from entitled members.
+
+    Two members are added to a company that already has an administrator, and the
+    mail must reach exactly the two who could have opened the same figures in the
+    application:
+
+    * the **analyst** holds ``analytics.read`` and ``investigation.read``, and the
+      summary carries both a stored verdict and its contribution shares;
+    * the **viewer** holds ``analytics.read`` alone, and apportionment is not theirs
+      to read -- so a body containing TOP CONTRIBUTORS must not be addressed to them.
+
+    And the configured ``EMAIL_RECIPIENTS`` list stays out of it entirely. It is the
+    fallback for a company with no entitled member, not a standing copy-list; a
+    deployment address appearing here would mean every company's results reached one
+    inbox regardless of who was registered.
+    """
+
+    from app.services import run_email
+
+    admin, base = company_b["admin"], company_b["base"]
+
+    for email, role_key in (
+        ("analyst@borealis-foods.example.com", "ANALYST"),
+        ("viewer@borealis-foods.example.com", "VIEWER"),
+    ):
+        added = admin.post(
+            f"{base}/members",
+            json={
+                "email": email,
+                "full_name": email.split("@")[0].title(),
+                "password": "Detection-Tests-2026",
+                "role_key": role_key,
+            },
+        )
+        assert added.status_code == 201, added.text
+
+    recorder = _Recorder()
+    monkeypatch.setattr(run_email, "load_email_config", _configured_email)
+    monkeypatch.setattr(run_email, "build_email_provider", lambda *a, **k: recorder)
+
+    response = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": company_b["target"].isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    email = response.json()["email"]
+    assert email["sent"] is True
+    assert email["recipient_source"] == "REGISTERED_USERS"
+
+    message = recorder.sent[0]
+    assert message.recipients == (
+        "admin@borealis-foods.example.com",
+        "analyst@borealis-foods.example.com",
+    ), message.recipients
+    assert "viewer@borealis-foods.example.com" not in message.recipients
+    assert "ops@borealis.example.com" not in message.recipients
+    # The body says whose reading it is, so a recipient can tell a registered-user
+    # summary from a fallback one without asking an operator.
+    assert "registered users of this company" in message.body
+
+    # No address is written into the audit trail -- a mailing list is personal data --
+    # but where the list came from is, because that is what answers "why these people".
+    trail = admin.get(f"{base}/audit", params={"action": "detection.run_summary_emailed"})
+    assert trail.status_code == 200, trail.text
+    entry = trail.json()[0]
+    assert entry["details"]["recipient_source"] == "REGISTERED_USERS"
+    assert "analyst@borealis-foods.example.com" not in json.dumps(entry)
+
+
+def test_a_company_with_no_entitled_member_falls_back_to_the_configured_list(
+    company_b, monkeypatch
+):
+    """The deployment's list is the answer only when the membership table has none.
+
+    A company can exist before anyone is entitled to read its results -- mid-setup,
+    or after its last analyst is deactivated -- and a run that finishes then still
+    produced something an operator should see. The fallback exists for that, and the
+    mail says which of the two it was so nobody mistakes an operator list for the
+    business's own distribution.
+    """
+
+    from app.services import run_email
+
+    recorder = _Recorder()
+    monkeypatch.setattr(run_email, "load_email_config", _configured_email)
+    monkeypatch.setattr(run_email, "build_email_provider", lambda *a, **k: recorder)
+    # Patched rather than deactivating the real administrator: this fixture is shared
+    # with every later test in this module, and taking away its only member would
+    # leave them running against a company nobody may read.
+    monkeypatch.setattr(run_email, "_entitled_member_emails", lambda *a, **k: ())
+
+    admin, base = company_b["admin"], company_b["base"]
+    response = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": company_b["target"].isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    email = response.json()["email"]
+    assert email["sent"] is True
+    assert email["recipient_source"] == "CONFIGURED_FALLBACK"
+
+    message = recorder.sent[0]
+    assert message.recipients == ("ops@borealis.example.com",)
+    assert "no member of this company currently holds both entitlements" in message.body
+
+
+def test_nobody_to_address_is_reported_as_its_own_state_with_both_reasons(
+    company_b, monkeypatch
+):
+    """No members and no fallback: a state, and a message that names every cause.
+
+    The run is already finished and stored, so this can only be reported, never
+    raised. And when a deployment is *both* switched off and unaddressed, both facts
+    are in the reason -- an operator who fixes ``EMAIL_ENABLED`` and then discovers
+    there was also nobody to send to has been made to debug the same problem twice.
+    """
+
+    from app.services import run_email
+
+    configured = _configured_email()
+    monkeypatch.setattr(
+        run_email,
+        "load_email_config",
+        lambda *a, **k: replace(configured, enabled=False, recipients=()),
+    )
+    monkeypatch.setattr(run_email, "_entitled_member_emails", lambda *a, **k: ())
+
+    admin, base = company_b["admin"], company_b["base"]
+    response = admin.post(
+        f"{base}/run-detection/batch",
+        json={
+            "target_date": company_b["target"].isoformat(),
+            "kpi_ids": [company_b["revenue_id"]],
+            "force_rerun": True,
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["results"], "the run's results survive having no recipient"
+    email = response.json()["email"]
+    assert email["sent"] is False
+    assert email["recipient_source"] == "NONE"
+    reason = email["reason"] or ""
+    assert "EMAIL_ENABLED" in reason
+    assert "EMAIL_RECIPIENTS" in reason
+    assert "analytics.read" in reason and "investigation.read" in reason

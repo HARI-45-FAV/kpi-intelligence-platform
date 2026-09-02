@@ -1148,6 +1148,38 @@ class FindingOut(ApiModel):
 
 
 # ---------------------------------------------------------------------------
+# Recommendation feedback: what a reader did with the suggested action
+# ---------------------------------------------------------------------------
+class RecommendationFeedbackIn(ApiModel):
+    """A reader's response to one recommendation.
+
+    Deliberately narrow. There is no field for a verdict, a status or a figure:
+    this says whether the advice was useful and how far the reader's own review
+    got, and nothing here can reach a detection result or an investigation note.
+
+    ``recommendation_key`` is the engine's stable identity for one recommendation
+    — its lever and its target area — so a second submission from the same reader
+    corrects the first rather than stacking a duplicate opinion beside it.
+    """
+
+    recommendation_key: str = Field(min_length=1, max_length=300)
+    usefulness: str = Field(default="USEFUL")
+    action_status: str = Field(default="NOT_STARTED")
+    comment: str | None = Field(default=None, max_length=4000)
+
+
+class RecommendationFeedbackOut(ApiModel):
+    recommendation_key: str
+    usefulness: str
+    action_status: str
+    comment: str | None = None
+    lever_key: str | None = None
+    target_entity: str | None = None
+    submitted_by_email: str | None = None
+    submitted_at: datetime
+
+
+# ---------------------------------------------------------------------------
 # Monitoring dashboard: one read for the whole overview
 # ---------------------------------------------------------------------------
 class MonitoringCountsOut(ApiModel):
@@ -1194,6 +1226,70 @@ class MonitoringMovementOut(ApiModel):
     #: "you may not see this" must not be rendered as "nobody has looked".
     has_contribution: bool | None = None
     open_findings: int | None = None
+    #: The leading contributor from the stored breakdown, when one has been run and
+    #: this caller may see it. Copied from ``ContributionRun``, never recomputed
+    #: here: the dashboard reports the apportionment the investigation reached.
+    #:
+    #: All four are null together -- no breakdown stored, or not disclosed to this
+    #: caller. A movement with no analysis names no contributor rather than
+    #: nominating the largest thing it can find.
+    contributor_dimension: str | None = None
+    contributor_entity: str | None = None
+    contributor_share_pct: float | None = None
+    #: Whether the breakdown itself judged that leader sufficient to explain the
+    #: movement. A share of 30% across a long tail is not a cause, and the screen
+    #: must be able to say so rather than presenting any leader as the answer.
+    contributor_is_sufficient: bool | None = None
+    #: Set when this movement can be opened in the existing investigation workflow:
+    #: it carries a stored deviation and the caller holds ``investigation.read``.
+    can_investigate: bool = False
+
+
+class MonitoringHeadlineOut(ApiModel):
+    """One abnormal movement, written as a business reader would say it.
+
+    Derived entirely from stored rows -- a ``DetectionRun`` the engine wrote and,
+    where one exists, the ``ContributionRun`` an investigation stored beside it.
+    Nothing here is a model's sentence: ``headline`` is assembled from the KPI's
+    own name, the run's own date and the figures already computed, so the same
+    inputs always produce the same line and no claim outruns its evidence.
+
+    A movement with no stored breakdown names no contributor. That is the whole
+    discipline of this shape: the alternative -- nominating whichever entity looks
+    largest -- would be the platform inventing a cause. And where a contributor
+    *is* named, the sentence says it "accounts for" a share of the movement, never
+    that it caused or drove one: a share is a size, and this platform measures
+    where a movement sits rather than why it happened.
+    """
+
+    detection_run_id: str
+    kpi_id: str
+    kpi_key: str
+    kpi_name: str
+    target_date: date
+    status: str
+    #: The sentence itself, ready to print.
+    headline: str
+    #: The movement, in the two forms the engine stored it.
+    deviation_pct: float | None = None
+    deviation_absolute: float | None = None
+    actual_value: float | None = None
+    expected_value: float | None = None
+    unit: str | None = None
+    currency: str | None = None
+    #: "above" or "below" -- the direction of the movement, in words, so the screen
+    #: does not have to re-derive it from a sign.
+    direction: str | None = None
+    #: The leading contributor, when a breakdown has been stored and this caller
+    #: may see it. Null together otherwise; see ``MonitoringMovementOut``.
+    contributor_dimension: str | None = None
+    contributor_entity: str | None = None
+    contributor_share_pct: float | None = None
+    contributor_is_sufficient: bool | None = None
+    #: Why no contributor is named, when none is: no breakdown has been run, or the
+    #: caller may not see the investigation layer. Printed instead of a cause.
+    contributor_note: str | None = None
+    can_investigate: bool = False
 
 
 class MonitoringRunOut(ApiModel):
@@ -1244,6 +1340,24 @@ class MonitoringOut(ApiModel):
     biggest_movements: list[MonitoringMovementOut] = Field(default_factory=list)
     recent_abnormal: list[MonitoringMovementOut] = Field(default_factory=list)
     recent_runs: list[MonitoringRunOut] = Field(default_factory=list)
+    #: The period the headline panel covers, and the periods it can be switched to.
+    #: The options are sent rather than assumed by the screen, so the set of offered
+    #: windows is decided in one place and a client cannot ask for a period the
+    #: server does not support.
+    findings_window_days: int = 7
+    findings_window_options: list[int] = Field(default_factory=list)
+    #: Earliest and latest *stored* target dates inside the headline window, on the
+    #: same principle as ``window_from``/``window_to``: an empty period reads as
+    #: empty rather than as a range in which nothing was found.
+    findings_window_from: date | None = None
+    findings_window_to: date | None = None
+    #: Abnormal movements in that period, written as sentences and computed only
+    #: from stored detection and contribution rows.
+    headlines: list[MonitoringHeadlineOut] = Field(default_factory=list)
+    #: How many abnormal movements the period holds in total, which is not the same
+    #: as how many headlines are listed: the list is capped so the panel stays a way
+    #: in to the Result page rather than a substitute for the result history.
+    headline_total: int = 0
     #: The investigation tallies, and null for a caller without
     #: ``investigation.read``. A zero would assert that nobody has written a
     #: finding, which is a different claim from "this is not yours to see".

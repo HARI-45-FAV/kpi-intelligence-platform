@@ -35,6 +35,7 @@ from app.models.profiling import (
     TableProfile,
     TableRelationship,
 )
+from app.models.recommendation import RecommendationFeedback
 from app.models.source import (
     DataSource,
     SelectedTable,
@@ -80,6 +81,7 @@ __all__ = [
     "KpiValidationRun",
     "KpiVersion",
     "Permission",
+    "RecommendationFeedback",
     "Role",
     "RolePermission",
     "SelectedTable",

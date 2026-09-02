@@ -24,17 +24,29 @@ a retried request and a restarted process must all reach the same answer.
 this is called. A missing mail host, a refused connection or a rejected recipient
 is reported as the state of the summary and recorded, and the request that
 triggered the run still returns its results.
+
+**Who it goes to is read from the membership table, never from a literal.** The
+recipients are this company's own registered users, resolved at send time from
+``company_users`` — so adding an analyst to a company adds them to its summaries,
+and removing them removes them, with no environment change and no address written
+into this codebase. ``EMAIL_RECIPIENTS`` is the fallback for a company that has no
+entitled member, which is the only case where a deployment-wide list is the right
+answer. See :func:`resolve_recipients` for what "entitled" means and why.
 """
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from dataclasses import dataclass
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.deps import AccessContext
+from app.models.base import MembershipStatus
 from app.models.detection import AgentRun, DetectionRun
 from app.models.observability import AuditLog
-from app.notifications import EmailMessage, build_email_provider, load_email_config
+from app.models.tenant import CompanyUser, Permission, Role, RolePermission, User
+from app.notifications import EmailConfig, EmailMessage, build_email_provider, load_email_config
 from app.notifications.provider import EmailProvider
 from app.services import audit
 from app.services.explanation import (
@@ -47,15 +59,105 @@ from app.services.explanation import (
 
 #: Sections carried into the mail, in this order. A summary that reprinted the
 #: whole explanation would be a wall of text nobody reads on a phone; these four
-#: are the chain requirement asks for -- what happened, who accounts for it, how
-#: much weight it carries, and what to do next.
+#: are the chain the requirement asks for -- who accounts for the movement, what
+#: the platform can say about it, what to do next, and how much weight to put on
+#: all three.
 _MAIL_SECTIONS: tuple[str, ...] = (
     "TOP CONTRIBUTORS",
-    "CONFIDENCE LEVEL",
+    "WHAT HAPPENED",
     "RECOMMENDED NEXT STEP",
+    "CONFIDENCE LEVEL",
 )
 
+#: What a member must hold to be sent a summary.
+#:
+#: Both, not either. ``analytics.read`` is the entitlement to a stored verdict and
+#: its figures, and ``investigation.read`` is the entitlement to apportionment --
+#: and the body carries a TOP CONTRIBUTORS section whenever the run has a stored
+#: breakdown. One run produces one body, so the alternative to requiring both would
+#: be either mailing apportionment to someone not entitled to it, or composing two
+#: different versions of one answer and hoping nobody compares them. Requiring both
+#: makes the audience narrower and the guarantee simple: nothing in this mail is
+#: something its reader could not have opened in the application themselves.
+REQUIRED_PERMISSIONS: tuple[str, ...] = ("analytics.read", "investigation.read")
+
 _RULE = "-" * 68
+
+
+@dataclass(frozen=True, slots=True)
+class RecipientSet:
+    """Who a summary is addressed to, and how they were found.
+
+    ``source`` is recorded in the audit trail. The addresses are not: it answers
+    "was this a company's own users or the deployment's fallback list" -- which is
+    the question an operator asks when a summary reached the wrong people -- without
+    writing a mailing list into every audit row.
+    """
+
+    addresses: tuple[str, ...]
+    source: str
+    reason: str | None = None
+
+
+def _entitled_member_emails(session: Session, company_id: str) -> tuple[str, ...]:
+    """Active members of this company whose role grants every required permission.
+
+    One query, grouped and counted, rather than a permission check per member: the
+    ``HAVING`` clause is what makes "holds all of them" a property of the row set
+    instead of something this function assembles in Python and could get wrong.
+    Ordered by address so a company's summaries address the same list in the same
+    order every time.
+    """
+
+    rows = session.execute(
+        select(User.email)
+        .join(CompanyUser, CompanyUser.user_id == User.id)
+        .join(Role, Role.id == CompanyUser.role_id)
+        .join(RolePermission, RolePermission.role_id == Role.id)
+        .join(Permission, Permission.id == RolePermission.permission_id)
+        .where(
+            CompanyUser.company_id == company_id,
+            CompanyUser.status == MembershipStatus.ACTIVE,
+            User.is_active.is_(True),
+            Permission.key.in_(REQUIRED_PERMISSIONS),
+        )
+        .group_by(User.id, User.email)
+        .having(func.count(func.distinct(Permission.key)) == len(REQUIRED_PERMISSIONS))
+        .order_by(User.email)
+    ).all()
+    return tuple(str(row[0]) for row in rows)
+
+
+def resolve_recipients(
+    session: Session, company_id: str, config: EmailConfig | None = None
+) -> RecipientSet:
+    """The addresses for one company's run summary.
+
+    Registered users first, the configured list second, nothing third -- and the
+    third case is a state with a reason, not an exception, for the same reason an
+    unconfigured mail host is: the run has already finished and been stored.
+
+    The fallback is not permission-checked, and that is deliberate. It is an
+    operator's own list in that operator's own environment file; the platform has no
+    membership row to check it against, and silently dropping addresses an operator
+    configured would be harder to diagnose than honouring them.
+    """
+
+    resolved = config or load_email_config()
+    members = _entitled_member_emails(session, company_id)
+    if members:
+        return RecipientSet(addresses=members, source="REGISTERED_USERS")
+    if resolved.recipients:
+        return RecipientSet(addresses=resolved.recipients, source="CONFIGURED_FALLBACK")
+    return RecipientSet(
+        addresses=(),
+        source="NONE",
+        reason=(
+            "No active member of this company holds "
+            f"{' and '.join(REQUIRED_PERMISSIONS)}, and no fallback list is "
+            "configured (EMAIL_RECIPIENTS)."
+        ),
+    )
 
 
 def already_sent(session: Session, company_id: str, agent_run_id: str) -> bool:
@@ -103,12 +205,19 @@ def _result_block(session: Session, access: AccessContext, run: DetectionRun) ->
 
 
 def compose_run_summary(
-    session: Session, access: AccessContext, agent_run: AgentRun
+    session: Session,
+    access: AccessContext,
+    agent_run: AgentRun,
+    *,
+    recipients: RecipientSet | None = None,
 ) -> EmailMessage | None:
     """The mail for one completed Agent Run, or ``None`` if it evaluated nothing.
 
     Public because it is worth testing without a mail server: the composition is
     where a summary could go wrong, and it is pure with respect to the transport.
+
+    ``recipients`` is accepted so the caller that audits the send can resolve the
+    list once and record which source it came from. Left out, this resolves its own.
     """
 
     runs = list(
@@ -125,6 +234,7 @@ def compose_run_summary(
         return None
 
     config = load_email_config()
+    addressed = recipients or resolve_recipients(session, access.company.id, config)
     date_label = agent_run.target_date.isoformat()
     abnormal = [run for run in runs if run.status == "ABNORMAL"]
     prefix = f"{config.subject_prefix} " if config.subject_prefix else ""
@@ -148,14 +258,26 @@ def compose_run_summary(
     footer = [
         _RULE,
         "Every figure above is the value this platform stored for the run; nothing "
-        "was recomputed to write this message.",
+        "was recomputed to write this message, and no language model produced or "
+        "adjusted any number in it.",
         "Contribution is not causation: the shares report what was measured, not "
         "why the movement happened.",
-        f"Prepared for {access.user.email} from Agent Run {agent_run.id}.",
+        # Whose entitlement the wording reflects, and why the recipients are who they
+        # are. One run produces one body, so a reader is owed the fact that it was
+        # assembled under the permissions of the person who ran the detection.
+        f"Assembled from Agent Run {agent_run.id} under the entitlement of "
+        f"{access.user.email}, who ran this detection.",
+        (
+            "Addressed to the registered users of this company who may see stored "
+            "results and contribution analysis."
+            if addressed.source == "REGISTERED_USERS"
+            else "Addressed to the recipient list this deployment configures, because "
+            "no member of this company currently holds both entitlements."
+        ),
     ]
 
     body = "\n".join([*header, "", _RULE, "", f"\n\n{_RULE}\n\n".join(blocks), "", *footer])
-    return EmailMessage(subject=subject, body=body, recipients=config.recipients)
+    return EmailMessage(subject=subject, body=body, recipients=addressed.addresses)
 
 
 def send_run_summary(
@@ -180,8 +302,26 @@ def send_run_summary(
             "duplicate": True,
         }
 
-    transport = provider or build_email_provider()
-    message = compose_run_summary(session, access, agent_run)
+    config = load_email_config()
+    transport = provider or build_email_provider(config)
+    addressed = resolve_recipients(session, access.company.id, config)
+    # Nobody to address is its own state, and it is checked before composing: there
+    # is no point assembling an explanation per KPI for a message that cannot leave.
+    if not addressed.addresses:
+        # Both facts, when there are two. A deployment that is switched off *and* has
+        # nobody to address should not have to fix one problem to discover the other.
+        reason = addressed.reason or "There is nobody to send this summary to."
+        if config.unavailable_reason:
+            reason = f"{config.unavailable_reason} {reason}"
+        return {
+            "sent": False,
+            "reason": reason,
+            "recipient_source": addressed.source,
+            "recipient_count": 0,
+            "duplicate": False,
+        }
+
+    message = compose_run_summary(session, access, agent_run, recipients=addressed)
     if message is None:
         return {
             "sent": False,
@@ -208,7 +348,13 @@ def send_run_summary(
         ),
         # No recipient addresses and no message body: a mailing list is personal
         # data, and the body is reproducible from the stored results at any time.
-        details={"subject": message.subject, **outcome.as_dict()},
+        # Where the list came from is recorded, because "the wrong people received
+        # this" is answered by the source, not by the addresses.
+        details={
+            "subject": message.subject,
+            "recipient_source": addressed.source,
+            **outcome.as_dict(),
+        },
         outcome="SUCCESS" if outcome.sent else "FAILURE",
     )
-    return {**outcome.as_dict(), "duplicate": False}
+    return {**outcome.as_dict(), "recipient_source": addressed.source, "duplicate": False}

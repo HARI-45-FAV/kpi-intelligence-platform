@@ -1,247 +1,201 @@
-# BusinessIntelligence.ai — Sprint 1
+# BusinessIntelligence.ai — KPI Intelligence-to-Action Engine
 
-**Foundation + KPI Governance.** At the end of Sprint 1 the platform answers one
-question per company:
+**A KPI moved. Where did it move? How much of it can we account for? What should
+someone actually do on Monday — and who?**
 
-> *What does this KPI mean, exactly where does its data come from, who is allowed
-> to see it, and can we reliably calculate it?*
+This platform answers that chain end to end, and every number in it is computed by
+deterministic code: SQL, robust statistics and governed business rules. The LLM is
+optional, off by default, and never the source of a figure.
 
-Every number the platform produces is deterministic. On top of the governed
-foundation sits a **generalized detection engine** — one fixed algorithm that
-learns each company's schema and trading rhythm from configuration rather than
-from code, and answers *"did this KPI behave normally on this date?"* with an
-actual, an expected, a deviation and a status. See
-[docs/DETECTION.md](docs/DETECTION.md).
+```
+   DETECT              EXPLAIN                LOCATE                  RECOMMEND
+   ───────             ───────                ──────                  ─────────
+   Is this KPI     →   What does the      →   Which part of the   →   What should the
+   outside its         evidence say           business accounts       business consider
+   comparable          about it?              for the largest         doing next, and
+   history?                                   share?                  who owns it?
 
-There is also an **optional governed AI Copilot**, off by default
-(`LLM_ENABLED=false`), which retrieves and explains that governed material and
-computes nothing — see [docs/COPILOT.md](docs/COPILOT.md). With it disabled the
-platform makes **zero model calls**, which is verifiable at
-`GET /api/v1/companies/{id}/telemetry/summary`.
+   robust median       stored findings        deterministic           evidence-derived
+   MAD · modified      + confidence          apportionment            levers · owners
+   z-score +           calibration           over the KPI's own       impact bands
+   business                                  approved dimensions     monitoring plan
+   materiality
+```
+
+**Nothing in that chain claims a cause.** Contribution measures *where* a movement
+sits; every recommendation says so on its own card and is framed as a suggested
+action for review, not a finding of fact. That distinction is enforced by tests
+that fail if a causal verb or a promised outcome appears anywhere in a payload.
 
 ---
 
-## Running it
-
-Two terminals. Backend first.
-
-### Backend
+## 90-second demo path
 
 ```bash
+# Terminal 1
+cd backend && .venv/Scripts/python -m uvicorn app.main:app --reload
+
+# Terminal 2
+cd frontend && npm run dev            # → http://localhost:5173
+```
+
+1. **Sign in** → **Monitoring**: verdicts, not a wall of numbers. `ABNORMAL`,
+   with actual, expected, deviation and the comparison basis in words.
+2. **Open the abnormal result** → the **Explanation** and **Findings** panels read
+   the stored evidence back: comparable periods, deviation, confidence and why.
+3. **Recommended next actions** (same page) → target area, the business lever to
+   review, a specific action, a qualitative impact band, an owner, confidence, and
+   what to monitor next. Toggle **Executive / Analyst** to change the depth.
+4. **Investigate** → break the movement down by region, drill into a channel; come
+   back and the recommendation has **re-aimed itself** at the deeper area, with a
+   different owner.
+5. **A normal day** → "No corrective action is currently recommended."
+   **A sparse KPI** → "Evidence insufficient for targeted action," with the
+   collection steps instead of advice. The engine abstains on purpose.
+6. **Sign in as a viewer** → the same advice without the entity detail, and
+   feedback is refused with a `403`. Entitlement is applied before reading.
+
+To provision that exact demo tenant on a live server in one command:
+
+```bash
+cd backend && .venv/Scripts/python scripts/verify_recommendations_live.py \
+    --email demo@your-run.example.com
+```
+
+It walks all seven scenarios over real HTTP, prints what the panel renders, and
+asserts no causal claim and no guaranteed outcome anywhere in the served JSON.
+
+---
+
+## Round 2 objectives → where each one lives
+
+| # | Objective | Implementation |
+|---|---|---|
+| 1 | Detect and prioritise material movements | Robust median / MAD / modified z-score **paired with** the KPI's own registered materiality, so a threshold follows the KPI's level and never the size of its numbers → [docs/DETECTION.md](docs/DETECTION.md) |
+| 2 | Reconcile data and context across sources | Discovery, grain detection, join safety, freshness, cross-source reconciliation, one governed calendar per company. Supabase / PostgreSQL / SQLite / CSV-Excel upload behind one connector interface |
+| 3 | Identify and rank explanatory drivers | Deterministic apportionment across approved dimensions with a stated unattributed gap; declared driver relationships per KPI → [docs/INVESTIGATION.md](docs/INVESTIGATION.md) |
+| 4 | Persona-specific narratives with traceable evidence | Executive / Analyst views on the recommendation panel; a hard `business_view()` vs `evidence()` split where statistics are returned only to `kpi.read` holders; Copilot answers carry `[E1]`-style citations |
+| 5 | Communicate uncertainty and abstain | `LOW_CONFIDENCE` is a first-class verdict, and the action layer answers it with an `EVIDENCE_FIRST` stance: no lever, no owner, no action → [docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md) |
+| 6 | Actions grounded in levers, constraints, decision rights | Evidence → lever → action → impact band → owner → confidence → monitoring plan, on every card, derived from stored rows |
+| 7 | Learn from analyst and business-user feedback | Per-recommendation usefulness and action status, recorded per reader, structurally unable to move a verdict |
+| 8 | Realistic security, cost, latency, scalability | Row / column / domain entitlements, Fernet-sealed credentials, aggregate-only pushdown (a 26-point window is 27 scalar reads, not 27 days of rows), and `execution_logs` carrying latency, model calls, tokens and estimated cost |
+
+**LLM vs non-LLM, stated plainly.** Every actual, expected value, deviation,
+z-score, verdict, share, confidence level and recommendation is deterministic
+Python and SQL. A model is used for exactly two things, both optional and both
+gated: reading a company's handbook into a *proposed* comparison policy that a
+human must approve, and explaining governed material in the Copilot. With
+`LLM_ENABLED=false` the platform makes **zero model calls** — verifiable at
+`GET /api/v1/companies/{id}/telemetry/summary` and by
+`cd backend && python verify_no_llm.py`, which boots the app with the provider SDK
+poisoned in `sys.modules` so an accidental import fails loudly.
+
+---
+
+## Run it
+
+```bash
+# Backend  (Python 3.11+)
 cd backend
-
-# The virtual environment already exists. If you need to recreate it:
-#   py -3.13 -m venv .venv
-#   .venv/Scripts/python -m pip install -r requirements.txt
-
-.venv/Scripts/python -m alembic upgrade head       # create/upgrade schema
-.venv/Scripts/python -m app.seed.bootstrap         # seed roles + permissions
+.venv/Scripts/python -m alembic upgrade head       # schema
+.venv/Scripts/python -m app.seed.bootstrap         # roles + permissions
 .venv/Scripts/python -m uvicorn app.main:app --reload
+# API on http://127.0.0.1:8000 · interactive docs at /docs
+
+# Frontend
+cd frontend && npm run dev
+# UI on http://localhost:5173 · /api is proxied, so no CORS setup in development
 ```
 
-API on <http://127.0.0.1:8000>, interactive docs at `/docs`.
+First run from empty: create an account → create the company (timezone, currency,
+fiscal year — this becomes the governed calendar) → **KPI Setup** (re-enter your
+password; the governance area is re-authenticated, not just hidden) → add a source
+or upload a spreadsheet → tick the tables in scope and name a time column → run
+analysis → register a KPI → validate → approve → approve a comparison policy →
+run detection.
 
-### Frontend
+## Verified state
 
-```bash
-cd frontend
-npm run dev
+```
+backend    python -m pytest tests/       →  298 passed, no warnings
+frontend   npx tsc -b --noEmit           →  clean
+frontend   npx vitest run                →  12 files, 99 tests passed
+frontend   npm run build                 →  clean
+backend    python verify_no_llm.py       →  48 checks, passes with the provider SDK poisoned
+backend    scripts/verify_recommendations_live.py  →  7 scenarios over real HTTP
+backend    python verify_ollama_extraction.py      →  all checks, against a real local model
 ```
 
-UI on <http://localhost:5173>. `/api` is proxied to the backend, so no CORS
-configuration is needed in development.
-
-### Tests
-
-```bash
-cd backend
-.venv/Scripts/python -m pytest tests/ -v
-```
-
-92 backend tests. Two matter most: `tests/test_golden_flow.py`, which walks the
-entire Sprint 1 journey through the real HTTP API and then proves the tenant
-boundary holds, and `tests/test_detection_generalization.py`, which provisions two
-tenants that share no table, column, time-field type or weekday pattern and shows
-one detection engine getting both exactly right.
-
-```bash
-cd frontend
-npx tsc -b --noEmit && npx vitest run
-```
-
-12 frontend tests, nine of which pin what the monitoring screen must *not* show.
+The tests worth reading are the ones written to *falsify* a claim rather than
+confirm it: `test_detection_generalization.py` provisions two tenants that share no
+table, column, time-field type or busiest weekday and shows one engine getting both
+exactly right (two of its tests read the algorithm's own source and fail if a
+company name, weekday or event literal appears in it); `test_investigation_grain.py`
+recomputes apportionment independently in plain Python and compares to `rel=1e-9`;
+`test_recommendations.py` scans every served string for causal verbs and guarantees;
+and `monitoring-business-view.test.tsx` feeds the frontend the **full** statistical
+payload so that its absence from the DOM is a real result and not a thin fixture.
 
 ---
 
-## First run, end to end
+## Where the depth is
 
-1. **Create an account** → you land on company creation.
-2. **Create the company** — name, timezone, currency, fiscal year. This becomes
-   the governed calendar, which is what gives "monthly revenue" a reproducible
-   meaning later.
-3. **Click `KPI Setup`** in the top nav and **re-enter your password**. The
-   governance area is re-authenticated, not merely hidden behind a route.
-4. **Sources → + Add source → Supabase.** Paste your project URL and database
-   password, or tick *paste a connection string* and use the URI straight from
-   Supabase → Project Settings → Database. Then **Test connection** →
-   **Discover tables**.
-5. **Data scope** — tick only the tables the platform may analyse, and set a
-   primary time column on each time series (`orders.order_date`,
-   `marketing_daily.spend_date`). Leave PII tables like `customer_master`
-   unticked. **Save.**
-6. **Run full analysis** — profiling, quality, grain, relationships, join safety,
-   freshness and cross-source reconciliation, all as aggregate SQL pushed into
-   Supabase.
-7. **Documents** — upload the KPI handbook so a KPI can cite it as its definition
-   source.
-8. **KPIs → Suggest from data.** Review each candidate, edit the business
-   definition if it is not how your business defines it, then **Use candidate**.
-9. **Validate** (nine checks, including executing the KPI) → **Approve &
-   activate**.
-10. **History → Publish catalog version** to freeze an immutable snapshot.
+| Document | What it covers |
+|---|---|
+| [APPLICATION_WALKTHROUGH.md](APPLICATION_WALKTHROUGH.md) | Everything: plain-language overview, architecture, the full user journey, page-by-page, feature-by-feature, data flows, the wiring map, and a timed demo script |
+| [docs/DETECTION.md](docs/DETECTION.md) | The generalized detection engine, its statistics, and the generalization proof |
+| [docs/INVESTIGATION.md](docs/INVESTIGATION.md) | Contribution analysis, deterministic apportionment, and the grain problem |
+| [docs/RECOMMENDATIONS.md](docs/RECOMMENDATIONS.md) | The evidence-to-action layer: how a card is derived and what it refuses to say |
+| [docs/COPILOT.md](docs/COPILOT.md) | The governed, optional, provider-independent AI layer |
 
----
+## Design rules that hold everywhere
+
+**Entitlement is applied before reading, not after.** Profiling asks
+`can_read_column` per column and *skips* the ones the caller may not see, recording
+them as withheld with a reason. Nothing sensitive is read and then filtered out of
+a response.
+
+**KPI formulas are structured contracts, not free-text SQL.** A strict parser
+accepts `AGG(col)`, `AGG(DISTINCT col)` and `A / B`, compiling to a machine-readable
+spec. That is what makes validation enforceable, gives lineage that cannot drift
+from the calculation, and leaves no injection surface.
+
+**Bad data is reported, never repaired.** A stale source stays recorded as stale; a
+malformed uploaded row is skipped and counted, not padded; a measure column with
+any nulls gets a note even at `GOOD` status, because those rows silently shrink a
+`SUM`. When a breakdown cannot account for all of a movement, the gap is stated.
+
+**Two databases, kept physically apart.** `DATABASE_URL` is platform metadata
+(companies, contracts, catalog, audit). Tenant business data is never configured
+there — it is registered at runtime and reached only through a connector.
+
+**Reads only.** `execute_query` accepts exactly one `SELECT` / `WITH`. Identifiers
+are validated against a strict pattern and dialect-quoted, since they cannot be
+bound as parameters.
 
 ## Configuration
 
-Everything is environment-driven; `backend/.env` is read if present.
+Environment-driven; `backend/.env` is read if present. Defaults run the whole
+platform with no model and no cloud account.
 
 | Variable | Default | Notes |
 |---|---|---|
-| `DATABASE_URL` | `sqlite:///./data/platform.db` | The **platform metadata** DB. Point at Postgres with `postgresql+psycopg://…` |
-| `SECRET_KEY` | dev value | Signs access tokens, and nothing else. Safe to rotate: everyone signs in again and nothing stored becomes unreadable. |
-| `CREDENTIAL_ENCRYPTION_KEY` | unset → `SECRET_KEY` | Seals stored data-source credentials. **Not** safely rotatable — see below. |
-| `ENVIRONMENT` | `development` | Anything outside `development`/`test`/`testing`/`local` refuses to boot on the shipped `SECRET_KEY` and stops serving `/docs`, `/redoc` and `/openapi.json`. |
-| `ACCESS_TOKEN_TTL_MINUTES` | `720` | |
-| `DOCUMENT_STORAGE_DIR` | `./data/documents` | |
+| `DATABASE_URL` | `sqlite:///./data/platform.db` | Platform **metadata** only. Postgres via `postgresql+psycopg://…` |
+| `SECRET_KEY` | dev value | Signs access tokens. Rotatable on demand — the cost is one round of sign-ins |
+| `CREDENTIAL_ENCRYPTION_KEY` | unset → `SECRET_KEY` | Seals stored source credentials. Set it and stored credentials are re-sealed under it once, at boot, and the count is logged. Back it up separately |
+| `ENVIRONMENT` | `development` | Anything else refuses to boot on the shipped `SECRET_KEY` and stops serving `/docs` |
+| `LLM_ENABLED` | `false` | Master switch for the optional Copilot. Everything else works without it |
+| `CONNECTOR_MAX_ROWS_RETURNED` | `5000` | Hard cap on any connector read |
 | `CONNECTOR_QUERY_TIMEOUT_SECONDS` | `30` | |
-| `CONNECTOR_MAX_ROWS_RETURNED` | `5000` | Hard cap on any connector read. |
-| `CORS_ORIGINS` | `localhost:5173` | Comma-separated. |
+| `ACCESS_TOKEN_TTL_MINUTES` | `720` | |
+| `CORS_ORIGINS` | `localhost:5173` | Comma-separated |
 
-**Two keys, two lifecycles.** A signing key should be rotatable on demand — after a
-leak, on a schedule, whenever every session should be invalidated — and the cost of
-rotating it is one round of sign-ins. A credential key cannot be rotated casually,
-because every registered data source in every company is readable only with the key
-that sealed it. Leave `CREDENTIAL_ENCRYPTION_KEY` unset and `SECRET_KEY` is used, which
-is what earlier installs did; set it and stored credentials are re-sealed under it once,
-at boot, and the count is logged. Back it up separately from everything else.
+Full list, including the seventeen `LLM_*` / `COPILOT_*` settings:
+[backend/.env.example](backend/.env.example) and [docs/COPILOT.md](docs/COPILOT.md).
 
-**Two databases, kept physically apart.** `DATABASE_URL` is *our* metadata
-(companies, users, KPI contracts, catalog, audit). Tenant business data is never
-configured here — it is registered at runtime through the Data Source Registry
-and reached only through a connector. Conflating the two is the standard way a
-multi-tenant BI platform leaks across companies.
+## Stack
 
----
-
-## Layout
-
-```
-backend/
-  app/
-    core/          config, database, security, deps (authz), telemetry, permissions
-    models/        35 tables: tenant, source, profiling, document, catalog, kpi,
-                   observability, detection (bucket configs + runs)
-    connectors/    base interface → sql → {supabase, postgres, sqlite} + warehouse stubs
-    services/      discovery, profiling, grain, relationships, join_safety, freshness,
-                   reconciliation, catalog, documents, kpi_{formula,sql,discovery,
-                   validation,governance}, classification, audit,
-                   detection + bucket_config + robust_stats + bucket_extraction
-    llm/           provider interface, config, one transport (optional Copilot)
-    copilot/       context, retrieval, evidence, tools, orchestrator
-    api/v1/        auth, companies, sources, analysis, documents, catalog, kpis,
-                   observability, detection, copilot
-    seed/          bootstrap (roles + permissions)
-  alembic/         schema migrations
-  tests/           golden end-to-end flow, tenant isolation, formula parser,
-                   detection generalization (two unlike tenants), copilot
-frontend/
-  src/
-    api/           typed client + response shapes
-    auth/          session + elevated admin context
-    components/    UI primitives, formatting, data hooks
-    copilot/       provider + panel (screen context, never typed)
-    pages/         Dashboard, Monitoring, Investigation, Insights, Activity
-    pages/kpi-setup/  Company, Sources, Documents, KPIs, Security, History
-```
-
----
-
-## Decisions worth knowing
-
-**KPI formulas are structured contracts, not free-text SQL.** A strict parser
-accepts only `AGG(col)`, `AGG(DISTINCT col)` and `A / B`, compiling to a
-machine-readable spec. This is what makes validation checks 2, 5, 6 and 7
-enforceable, gives column-level lineage that cannot drift from the calculation,
-and leaves no SQL-injection surface. Free-text SQL would make those checks
-impossible.
-
-**Entitlement is applied before reading, not after.** Profiling asks
-`can_read_column` for each column and *skips* the ones the caller may not see,
-recording them as withheld with a reason. Nothing sensitive is read and then
-filtered out of a response. An analyst profiling `customer_master` sees
-`email` and `phone` marked withheld with no statistics attached; an
-administrator holding `data.read_pii` sees them profiled.
-
-**Declaring a KPI dimension is not scheduling work.** `kpi_dimensions` says
-"region is a valid way to slice Revenue". It does *not* mean anomaly detection
-runs per region. Monitoring happens at the KPI level; entity analysis stays
-selective. Every dimension in the API response carries this note explicitly.
-
-**Non-additivity is stated, not implied.** Each contract carries `is_additive`.
-A ratio KPI like AOV is flagged `false` with instructions to recompute from
-numerator and denominator at each level. Summing a ratio across periods produces
-a plausible, wrong number — the kind of error nothing downstream would catch.
-
-**Bad data is reported, never repaired.** Quality warnings are stored. A stale
-source stays recorded as stale. Where a measure column has *any* nulls, a note
-is recorded even at GOOD status, because those rows silently shrink a `SUM`.
-
-**Join safety guards the most dangerous BI failure.** Fan-out factor,
-duplicate-key rate and observed cardinality are measured per relationship and
-classified `SAFE / SAFE_WITH_AGGREGATION / RISKY / UNKNOWN` with actionable
-guidance. A correct-looking KPI inflated by a fan-out join is the error this
-prevents.
-
-**Reconciliation needs a declared time axis.** Only tables with an
-administrator-designated primary time column participate.
-`product_master.launch_date` is structurally indistinguishable from
-`orders.order_date` to a schema reader, so the judgement is the
-administrator's, consistent with explicit scope everywhere else.
-
-**Credentials never leave the server.** Stored Fernet-encrypted under
-`SECRET_KEY`, decrypted only inside a connector, absent from every response
-schema, and scrubbed before any audit entry is written.
-
-**Reads only.** `execute_query` accepts exactly one `SELECT`/`WITH` statement.
-Identifiers are validated against a strict pattern and dialect-quoted, since
-they cannot be bound as parameters. A BI platform that can write to a tenant's
-production database is a liability.
-
----
-
-## Sprint 1 scope
-
-**Delivered.** Multi-tenant companies with row/column/domain entitlements ·
-data source registry (Supabase / PostgreSQL working, Snowflake / BigQuery
-interface-only) · discovery · explicit analytical scope · access-aware profiling
-with SQL pushdown · quality · grain detection · relationship detection (declared
-and inferred) · join safety · calendar governance · freshness · cross-source
-reconciliation · sensitivity classification · versioned document store ·
-versioned semantic catalog · governed KPI contracts with nine validation checks,
-human approval, versioning, lineage and access policies · append-only audit
-trail · runtime telemetry.
-
-**Also delivered, on top of that foundation.** A generalized deterministic
-**detection engine** — governed comparison policies, calendar-aware expected
-values, robust median / MAD / modified z-score, and a business surface that shows
-KPI, Actual, Expected, Deviation and Status and nothing else. It hard-codes no
-company, table, column, formula, weekday, season or event: see
-[docs/DETECTION.md](docs/DETECTION.md).
-
-**Deliberately absent.** Forecasting · contribution analysis · root-cause
-investigation · causal inference · document embeddings and RAG · action
-recommendations · automated alerts.
-
-Sprint 2 consumes `GET /api/v1/companies/{id}/kpi-contracts` and should never
-need to ask what Revenue means.
+FastAPI · SQLAlchemy 2.0 · Alembic · 40 tables · 7 migrations · 119 endpoints · pytest
+React 18 · TypeScript · Vite · Tailwind · Vitest · no component library
+Optional model layer, two transports: any OpenAI-compatible endpoint (vLLM, Ollama,
+Groq, OpenAI) or Gemini — one module and one branch per additional provider
